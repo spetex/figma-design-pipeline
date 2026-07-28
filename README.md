@@ -1,4 +1,10 @@
-# SPFR Figma Design Pipeline
+# Figma Design Pipeline — Petr Sahula's maintained fork
+
+> [!NOTE]
+> This is Petr Sahula's maintained fork of
+> [`spfr/figma-design-pipeline`](https://github.com/spfr/figma-design-pipeline).
+> It is the canonical implementation used in Petr's environments and may carry
+> fixes and features beyond the original upstream project.
 
 AI design assistant for Figma. Analyze websites, create design systems, design pages and dashboards, sync tokens, and generate production code — all from your terminal.
 
