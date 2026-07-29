@@ -130,4 +130,101 @@ describe("BridgeServer WebSocket limits", () => {
       await bridge.stop();
     }
   });
+
+  it("rejects a chunked batch result with too many chunks", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const bridge = new BridgeServer({
+      maxPayloadBytes: 1024,
+      maxChunkedResultChunks: 2,
+    });
+    const port = await getAvailablePort();
+    await bridge.start(port);
+    const client = new WebSocket(`ws://127.0.0.1:${port}/plugin`);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        client.once("open", resolve);
+        client.once("error", reject);
+      });
+
+      const receivedBatch = new Promise<Record<string, unknown>>((resolve) => {
+        client.once("message", (raw) => resolve(JSON.parse(raw.toString())));
+      });
+      const execution = bridge.execute({
+        dryRun: false,
+        stopOnError: true,
+        rollbackOnError: false,
+        requiredFonts: [],
+        actions: [],
+      });
+      const batch = await receivedBatch;
+
+      client.send(JSON.stringify({
+        type: "batch_result_chunk",
+        batchId: batch.batchId,
+        chunkIndex: 0,
+        chunkCount: 3,
+        data: "{}",
+      }));
+
+      await expect(execution).rejects.toThrow("exceeds the 2-chunk limit");
+      expect(bridge.getStatus().pendingBatches).toBe(0);
+      expect(bridge.isConnected()).toBe(true);
+    } finally {
+      client.terminate();
+      await bridge.stop();
+    }
+  });
+
+  it("rejects a chunked batch result when its aggregate byte size is too large", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const bridge = new BridgeServer({
+      maxPayloadBytes: 1024,
+      maxChunkedResultBytes: 8,
+    });
+    const port = await getAvailablePort();
+    await bridge.start(port);
+    const client = new WebSocket(`ws://127.0.0.1:${port}/plugin`);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        client.once("open", resolve);
+        client.once("error", reject);
+      });
+
+      const receivedBatch = new Promise<Record<string, unknown>>((resolve) => {
+        client.once("message", (raw) => resolve(JSON.parse(raw.toString())));
+      });
+      const execution = bridge.execute({
+        dryRun: false,
+        stopOnError: true,
+        rollbackOnError: false,
+        requiredFonts: [],
+        actions: [],
+      });
+      const batch = await receivedBatch;
+
+      client.send(JSON.stringify({
+        type: "batch_result_chunk",
+        batchId: batch.batchId,
+        chunkIndex: 0,
+        chunkCount: 2,
+        data: "12345678",
+      }));
+      client.send(JSON.stringify({
+        type: "batch_result_chunk",
+        batchId: batch.batchId,
+        chunkIndex: 1,
+        chunkCount: 2,
+        data: "9",
+      }));
+
+      await expect(execution).rejects.toThrow("exceeds the 8-byte limit");
+      expect(bridge.getStatus().pendingBatches).toBe(0);
+      expect(bridge.isConnected()).toBe(true);
+    } finally {
+      client.terminate();
+      await bridge.stop();
+    }
+  });
 });

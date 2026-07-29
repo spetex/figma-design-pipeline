@@ -3,9 +3,13 @@ import { createServer, type Server } from "node:http";
 import { randomUUID } from "node:crypto";
 
 export const DEFAULT_BRIDGE_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
+export const DEFAULT_BRIDGE_MAX_CHUNKED_RESULT_BYTES = 64 * 1024 * 1024;
+export const DEFAULT_BRIDGE_MAX_CHUNKED_RESULT_CHUNKS = 64;
 
 export interface BridgeServerOptions {
   maxPayloadBytes?: number;
+  maxChunkedResultBytes?: number;
+  maxChunkedResultChunks?: number;
 }
 
 export interface BridgeStatus {
@@ -32,6 +36,7 @@ interface PendingBatch {
 interface ChunkedBatchResult {
   chunkCount: number;
   chunks: Map<number, string>;
+  totalBytes: number;
 }
 
 export interface BatchResult {
@@ -75,12 +80,26 @@ export class BridgeServer {
   private lastHandshakeAt: string | null = null;
   private lastPongAt: string | null = null;
   private readonly maxPayloadBytes: number;
+  private readonly maxChunkedResultBytes: number;
+  private readonly maxChunkedResultChunks: number;
 
-  constructor({ maxPayloadBytes = DEFAULT_BRIDGE_MAX_PAYLOAD_BYTES }: BridgeServerOptions = {}) {
+  constructor({
+    maxPayloadBytes = DEFAULT_BRIDGE_MAX_PAYLOAD_BYTES,
+    maxChunkedResultBytes = DEFAULT_BRIDGE_MAX_CHUNKED_RESULT_BYTES,
+    maxChunkedResultChunks = DEFAULT_BRIDGE_MAX_CHUNKED_RESULT_CHUNKS,
+  }: BridgeServerOptions = {}) {
     if (!Number.isSafeInteger(maxPayloadBytes) || maxPayloadBytes <= 0) {
       throw new Error("maxPayloadBytes must be a positive integer");
     }
+    if (!Number.isSafeInteger(maxChunkedResultBytes) || maxChunkedResultBytes <= 0) {
+      throw new Error("maxChunkedResultBytes must be a positive integer");
+    }
+    if (!Number.isSafeInteger(maxChunkedResultChunks) || maxChunkedResultChunks <= 0) {
+      throw new Error("maxChunkedResultChunks must be a positive integer");
+    }
     this.maxPayloadBytes = maxPayloadBytes;
+    this.maxChunkedResultBytes = maxChunkedResultBytes;
+    this.maxChunkedResultChunks = maxChunkedResultChunks;
   }
 
   async start(preferredPort = 4010): Promise<number> {
@@ -224,9 +243,18 @@ export class BridgeServer {
       return;
     }
 
+    const expectedChunkCount = chunkCount as number;
+    if (expectedChunkCount > this.maxChunkedResultChunks) {
+      this.rejectPending(
+        batchId,
+        `Plugin batch result exceeds the ${this.maxChunkedResultChunks}-chunk limit`,
+      );
+      return;
+    }
+
     let assembly = this.chunkedResults.get(batchId);
     if (!assembly) {
-      assembly = { chunkCount: chunkCount as number, chunks: new Map() };
+      assembly = { chunkCount: expectedChunkCount, chunks: new Map(), totalBytes: 0 };
       this.chunkedResults.set(batchId, assembly);
     } else if (assembly.chunkCount !== chunkCount) {
       this.rejectPending(batchId, "Plugin sent inconsistent batch result chunk metadata");
@@ -239,7 +267,18 @@ export class BridgeServer {
       this.rejectPending(batchId, `Plugin sent conflicting data for batch result chunk ${index}`);
       return;
     }
-    assembly.chunks.set(index, chunk);
+    if (existing === undefined) {
+      const chunkBytes = Buffer.byteLength(chunk);
+      if (chunkBytes > this.maxChunkedResultBytes - assembly.totalBytes) {
+        this.rejectPending(
+          batchId,
+          `Plugin batch result exceeds the ${this.maxChunkedResultBytes}-byte limit`,
+        );
+        return;
+      }
+      assembly.chunks.set(index, chunk);
+      assembly.totalBytes += chunkBytes;
+    }
 
     if (assembly.chunks.size !== assembly.chunkCount) {
       return;
