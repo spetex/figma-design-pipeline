@@ -2,6 +2,12 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type Server } from "node:http";
 import { randomUUID } from "node:crypto";
 
+export const DEFAULT_BRIDGE_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
+
+export interface BridgeServerOptions {
+  maxPayloadBytes?: number;
+}
+
 export interface BridgeStatus {
   connected: boolean;
   mode: "plugin" | "fallback";
@@ -62,6 +68,14 @@ export class BridgeServer {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private lastHandshakeAt: string | null = null;
   private lastPongAt: string | null = null;
+  private readonly maxPayloadBytes: number;
+
+  constructor({ maxPayloadBytes = DEFAULT_BRIDGE_MAX_PAYLOAD_BYTES }: BridgeServerOptions = {}) {
+    if (!Number.isSafeInteger(maxPayloadBytes) || maxPayloadBytes <= 0) {
+      throw new Error("maxPayloadBytes must be a positive integer");
+    }
+    this.maxPayloadBytes = maxPayloadBytes;
+  }
 
   async start(preferredPort = 4010): Promise<number> {
     for (let port = preferredPort; port < preferredPort + 5; port++) {
@@ -83,7 +97,12 @@ export class BridgeServer {
 
       server.on("error", reject);
 
-      const wss = new WebSocketServer({ server, path: "/plugin" });
+      const wss = new WebSocketServer({
+        server,
+        path: "/plugin",
+        maxPayload: this.maxPayloadBytes,
+        perMessageDeflate: false,
+      });
       wss.on("error", reject);
 
       wss.on("connection", (ws) => {
@@ -102,6 +121,10 @@ export class BridgeServer {
           } catch (err) {
             console.error("[bridge] Bad message:", err);
           }
+        });
+
+        ws.on("error", (err) => {
+          console.error(`[bridge] WebSocket error: ${err.message}`);
         });
 
         ws.on("close", () => {

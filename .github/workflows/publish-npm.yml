@@ -25,6 +25,8 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - run: npm ci
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
       - run: npm run check
       - run: npm test
       - run: npm run build

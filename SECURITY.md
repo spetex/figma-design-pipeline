@@ -67,8 +67,48 @@ Before making the repo public or publishing a release:
 4. Redact tokens from logs, screenshots, and issue reports
 5. Review [docs/RELEASE-HARDENING.md](docs/RELEASE-HARDENING.md)
 
+## Dependency Security
+
+The npm release workflow runs `npm audit --omit=dev` after `npm ci` and blocks
+publishing if the production dependency tree has a reported vulnerability.
+This network-dependent check stays in release CI; normal local development and
+tests do not require audit service availability.
+
+### Issue #11 audit record
+
+On 2026-07-29, `npm audit --omit=dev` against the untouched lockfile reported
+11 production vulnerabilities: 1 low, 4 moderate, and 6 high. After refreshing
+the direct dependencies and affected transitive resolutions, the same command
+reported 0 vulnerabilities.
+
+The baseline dependency and bundle review found:
+
+- `@spetex/figma-design-pipeline -> ws@8.20.0` was directly reachable from
+  `src/plugin/bridge.ts` and included in `dist/index.js`. It is now locked to
+  `ws@8.21.1`.
+- `@spetex/figma-design-pipeline -> @modelcontextprotocol/sdk@1.29.0 ->
+  ajv@8.20.0 -> fast-uri@3.1.2` was included in the stdio bundle through the
+  SDK validation provider. `fast-uri` is now locked to 3.1.4.
+- `@spetex/figma-design-pipeline -> @modelcontextprotocol/sdk@1.29.0 ->
+  @hono/node-server@1.19.14 -> hono@4.12.18` and
+  `@modelcontextprotocol/sdk@1.29.0 -> express@5.2.1 ->
+  body-parser@2.2.2 / qs@6.15.1` were installed but absent from the esbuild
+  input graph for `src/index.ts`. The published server imports the SDK's MCP
+  and stdio modules, not its HTTP transports. These paths were not reachable
+  in the bundled stdio runtime, but were still refreshed to
+  `@hono/node-server@2.0.12`, `hono@4.12.32`, `body-parser@2.3.0`, and
+  `qs@6.15.3`.
+
+There are no remaining production advisories requiring a reachability
+exception. The bundle result can be checked after `npm run build` by searching
+the source comments in `dist/index.js` for the package names above.
+
 ## Figma Plugin Security
 
 The Figma plugin communicates with the MCP server via a local WebSocket connection (`127.0.0.1`). This is intentionally localhost-only — the bridge does not accept remote connections.
+
+The bridge keeps one active plugin connection, limits inbound WebSocket
+messages to 16 MiB, and disables per-message compression. Messages above the
+limit are closed with WebSocket status 1009.
 
 The plugin runs inside Figma's sandboxed environment and can only access the current file's scene graph through the official Plugin API.

@@ -4,6 +4,11 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 
 ## [Unreleased]
 
+### Security
+- Refreshed production dependencies to resolve all findings from `npm audit --omit=dev`, including the directly used `ws` package and MCP SDK transitive dependencies.
+- Limited inbound plugin bridge messages to 16 MiB, explicitly disabled WebSocket compression, and added an oversized-message regression test.
+- Added a production dependency audit gate to the npm release workflow.
+
 ### Fixed
 - Fallback JavaScript now resolves symbolic node references by create-action order, matching compiled plugin batches even when non-create actions appear before or between creates.
 - `figma_plan_layout` now emits canonical `paddingTop`, `paddingRight`, `paddingBottom`, and `paddingLeft` fields for inferred padding, producing schema-valid `set_spacing` actions.
