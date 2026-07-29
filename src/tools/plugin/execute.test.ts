@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { BridgeServer } from "../../plugin/bridge.js";
+import { CREATE_TYPES } from "../../plugin/batch-compiler.js";
 import { handleExecute } from "./execute.js";
 import { actionSchema } from "../../shared/actions.js";
 
@@ -37,8 +39,167 @@ describe("handleExecute fallback generation", () => {
 
     expect(result.pluginConnected).toBe(false);
     expect(result.fallbackJs).toContain("const resolveRefId = (id) => {");
+    expect(result.fallbackJs).toContain("const createdNodeIds = new Map();");
     expect(result.fallbackJs).toContain('const getNode = (id) => figma.getNodeById(resolveRefId(id));');
     expect(result.fallbackJs).toContain('getNode("$ref:node-0").appendChild(f);');
+  });
+
+  it("matches plugin create-order references for every create action type", async () => {
+    const createActions: unknown[] = [
+      { type: "create_frame", name: "Frame", parentId: "1:2" },
+      { type: "create_text", parentId: "1:2", characters: "Text" },
+      { type: "create_component_from_node", nodeId: "2:1", name: "Component" },
+      { type: "create_component_set", componentIds: ["2:1"], name: "Variants" },
+      { type: "create_instance", componentId: "2:1", parentId: "1:2" },
+      { type: "duplicate_node", nodeId: "2:1" },
+      {
+        type: "create_paint_style",
+        name: "Color/Primary",
+        paints: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 } }],
+      },
+      {
+        type: "create_text_style",
+        name: "Type/Body",
+        fontFamily: "Inter",
+        fontSize: 16,
+      },
+      { type: "create_effect_style", name: "Effect/None", effects: [] },
+      { type: "create_page", name: "Page" },
+      { type: "create_variable_collection", name: "Tokens" },
+      {
+        type: "create_variable",
+        collectionId: "VariableCollectionId:1",
+        name: "spacing/md",
+        resolvedType: "FLOAT",
+        value: 16,
+      },
+    ];
+    const actions = [
+      { type: "rename", nodeId: "1:1", name: "Before creates" },
+      ...createActions.flatMap((action, index) => [
+        action,
+        { type: "set_opacity", nodeId: "1:1", opacity: index / createActions.length },
+      ]),
+    ];
+    const execute = vi.fn().mockResolvedValue({
+      batchId: "test",
+      dryRun: false,
+      success: true,
+      results: [],
+      nodeIdMap: {},
+      summary: { total: actions.length, applied: actions.length, failed: 0, skipped: 0 },
+    });
+    const bridge = {
+      isConnected: () => true,
+      execute,
+    } as unknown as BridgeServer;
+
+    await handleExecute(bridge, { actions });
+    const pluginBatch = execute.mock.calls[0][0] as {
+      actions: Array<Record<string, unknown>>;
+    };
+    const pluginReferences = pluginBatch.actions.flatMap((action) =>
+      typeof action._ref === "string"
+        ? [{ ref: action._ref, type: action.type }]
+        : []
+    );
+
+    const fallback = await handleExecute(null, { actions });
+    const fallbackReferences = Array.from(
+      fallback.fallbackJs!.matchAll(
+        /recordCreatedNode\("(\$ref:node-\d+)", \{ type: "([^"]+)"/g
+      ),
+      (match) => ({ ref: match[1], type: match[2] })
+    );
+
+    expect(createActions.map((action) => (action as { type: string }).type)).toEqual(
+      Array.from(CREATE_TYPES)
+    );
+    expect(fallbackReferences).toEqual(pluginReferences);
+    expect(pluginReferences.map(({ ref }) => ref)).toEqual(
+      createActions.map((_, index) => `$ref:node-${index}`)
+    );
+  });
+
+  it("resolves references by create order with ordinary actions before, between, and after creates", async () => {
+    const actions = [
+      { type: "rename", nodeId: "existing", name: "Renamed" },
+      { type: "create_page", name: "Created page" },
+      { type: "set_opacity", nodeId: "existing", opacity: 0.5 },
+      {
+        type: "create_frame",
+        name: "Outer frame",
+        parentId: "$ref:node-0",
+        width: 200,
+        height: 100,
+      },
+      { type: "set_visible", nodeId: "existing", visible: false },
+      {
+        type: "create_frame",
+        name: "Inner frame",
+        parentId: "$ref:node-1",
+        width: 100,
+        height: 50,
+      },
+      { type: "set_opacity", nodeId: "existing", opacity: 0.75 },
+    ];
+    type TestNode = {
+      id: string;
+      name: string;
+      opacity: number;
+      visible: boolean;
+      children: TestNode[];
+      parentId?: string;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      appendChild: (child: TestNode) => void;
+      resize: (width: number, height: number) => void;
+    };
+    const nodes = new Map<string, TestNode>();
+    const makeNode = (id: string): TestNode => {
+      const node: TestNode = {
+        id,
+        name: id,
+        opacity: 1,
+        visible: true,
+        children: [],
+        appendChild(child) {
+          child.parentId = id;
+          node.children.push(child);
+        },
+        resize(width, height) {
+          node.width = width;
+          node.height = height;
+        },
+      };
+      nodes.set(id, node);
+      return node;
+    };
+    const existing = makeNode("existing");
+    let frameCounter = 0;
+    const figma = {
+      getNodeById: (id: string) => nodes.get(id),
+      createPage: () => makeNode("page-1"),
+      createFrame: () => makeNode(`frame-${++frameCounter}`),
+    };
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof figma) => Promise<unknown>;
+
+    const fallback = await handleExecute(null, { actions });
+    await new AsyncFunction("figma", fallback.fallbackJs!)(
+      figma
+    );
+
+    expect(existing).toMatchObject({
+      name: "Renamed",
+      opacity: 0.75,
+      visible: false,
+    });
+    expect(nodes.get("frame-1")?.parentId).toBe("page-1");
+    expect(nodes.get("frame-2")?.parentId).toBe("frame-1");
   });
 
   it("supports create_text in fallback JS and sanitizes alpha into paint opacity", async () => {
@@ -66,6 +227,8 @@ describe("handleExecute fallback generation", () => {
     expect(result.fallbackJs).toContain("const sanitizePaints = (paints) =>");
     expect(result.fallbackJs).toContain('const t = figma.createText();');
     expect(result.fallbackJs).toContain('t.fills = sanitizePaints([{');
-    expect(result.fallbackJs).toContain('results.push({ type: "create_text", nodeId: t.id });');
+    expect(result.fallbackJs).toContain(
+      'recordCreatedNode("$ref:node-0", { type: "create_text", nodeId: t.id });'
+    );
   });
 });
