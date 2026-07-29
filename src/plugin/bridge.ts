@@ -29,6 +29,11 @@ interface PendingBatch {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface ChunkedBatchResult {
+  chunkCount: number;
+  chunks: Map<number, string>;
+}
+
 export interface BatchResult {
   batchId: string;
   dryRun: boolean;
@@ -64,6 +69,7 @@ export class BridgeServer {
   private plugin: WebSocket | null = null;
   private boundPort: number | null = null;
   private pending = new Map<string, PendingBatch>();
+  private chunkedResults = new Map<string, ChunkedBatchResult>();
   private pluginInfo: { pluginVersion?: string; pageName?: string; documentName?: string } = {};
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private lastHandshakeAt: string | null = null;
@@ -137,6 +143,7 @@ export class BridgeServer {
             // Snapshot and clear before rejecting to avoid double-rejection race with timeouts
             const inFlight = new Map(this.pending);
             this.pending.clear();
+            this.chunkedResults.clear();
             for (const [, p] of inFlight) {
               clearTimeout(p.timer);
               p.reject(new Error("Plugin disconnected mid-batch"));
@@ -173,8 +180,14 @@ export class BridgeServer {
       if (pending) {
         clearTimeout(pending.timer);
         this.pending.delete(batchId);
+        this.chunkedResults.delete(batchId);
         pending.resolve(data as unknown as BatchResult);
       }
+      return;
+    }
+
+    if (data.type === "batch_result_chunk") {
+      this.handleBatchResultChunk(data);
       return;
     }
 
@@ -184,6 +197,85 @@ export class BridgeServer {
       this.lastPongAt = new Date().toISOString();
       return;
     }
+  }
+
+  private handleBatchResultChunk(data: Record<string, unknown>): void {
+    const batchId = data.batchId;
+    const chunkIndex = data.chunkIndex;
+    const chunkCount = data.chunkCount;
+    const chunk = data.data;
+
+    if (
+      typeof batchId !== "string"
+      || !Number.isSafeInteger(chunkIndex)
+      || (chunkIndex as number) < 0
+      || !Number.isSafeInteger(chunkCount)
+      || (chunkCount as number) <= 0
+      || (chunkIndex as number) >= (chunkCount as number)
+      || typeof chunk !== "string"
+    ) {
+      if (typeof batchId === "string") {
+        this.rejectPending(batchId, "Plugin sent malformed batch result chunk metadata");
+      }
+      return;
+    }
+
+    if (!this.pending.has(batchId)) {
+      return;
+    }
+
+    let assembly = this.chunkedResults.get(batchId);
+    if (!assembly) {
+      assembly = { chunkCount: chunkCount as number, chunks: new Map() };
+      this.chunkedResults.set(batchId, assembly);
+    } else if (assembly.chunkCount !== chunkCount) {
+      this.rejectPending(batchId, "Plugin sent inconsistent batch result chunk metadata");
+      return;
+    }
+
+    const index = chunkIndex as number;
+    const existing = assembly.chunks.get(index);
+    if (existing !== undefined && existing !== chunk) {
+      this.rejectPending(batchId, `Plugin sent conflicting data for batch result chunk ${index}`);
+      return;
+    }
+    assembly.chunks.set(index, chunk);
+
+    if (assembly.chunks.size !== assembly.chunkCount) {
+      return;
+    }
+
+    const chunks: string[] = [];
+    for (let i = 0; i < assembly.chunkCount; i++) {
+      const part = assembly.chunks.get(i);
+      if (part === undefined) {
+        return;
+      }
+      chunks.push(part);
+    }
+    this.chunkedResults.delete(batchId);
+
+    try {
+      const result = JSON.parse(chunks.join("")) as Record<string, unknown>;
+      if (result.type !== "batch_result" || result.batchId !== batchId) {
+        this.rejectPending(batchId, "Plugin sent a mismatched chunked batch result");
+        return;
+      }
+      this.handleMessage(result);
+    } catch {
+      this.rejectPending(batchId, "Plugin sent an invalid chunked batch result");
+    }
+  }
+
+  private rejectPending(batchId: string, message: string): void {
+    const pending = this.pending.get(batchId);
+    this.chunkedResults.delete(batchId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pending.delete(batchId);
+    pending.reject(new Error(message));
   }
 
   private startPingLoop(): void {
@@ -218,6 +310,7 @@ export class BridgeServer {
     return new Promise<BatchResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(batchId);
+        this.chunkedResults.delete(batchId);
         reject(new Error(`Batch ${batchId} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
 
@@ -258,6 +351,7 @@ export class BridgeServer {
       p.reject(new Error("Bridge shutting down"));
     }
     this.pending.clear();
+    this.chunkedResults.clear();
     this.stopPingLoop();
     if (this.plugin) { try { this.plugin.close(); } catch { /* ignore */ } }
     if (this.wss) this.wss.close();

@@ -12,6 +12,8 @@ const PORTS = [4010, 4011, 4012, 4013, 4014];
 const RECONNECT_MS = 2000;
 const MAX_RECONNECT_MS = 30000;
 const PORT_CYCLE_AFTER = 3; // retry same port N times before cycling
+// Leave ample room for JSON escaping under the bridge's 16 MiB per-message limit.
+const BATCH_RESULT_CHUNK_SIZE = 1024 * 1024;
 
 let ws = null;
 let portIdx = 0;
@@ -107,6 +109,34 @@ function scheduleReconnect() {
   }, delay);
 }
 
+function sendToBridge(data) {
+  if (!ws || ws.readyState !== 1) return;
+
+  const serialized = JSON.stringify(data);
+  if (
+    data.type !== "batch_result"
+    || typeof data.batchId !== "string"
+    || serialized.length <= BATCH_RESULT_CHUNK_SIZE
+  ) {
+    ws.send(serialized);
+    return;
+  }
+
+  const chunkCount = Math.ceil(serialized.length / BATCH_RESULT_CHUNK_SIZE);
+  for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
+    ws.send(JSON.stringify({
+      type: "batch_result_chunk",
+      batchId: data.batchId,
+      chunkIndex: chunkIndex,
+      chunkCount: chunkCount,
+      data: serialized.slice(
+        chunkIndex * BATCH_RESULT_CHUNK_SIZE,
+        (chunkIndex + 1) * BATCH_RESULT_CHUNK_SIZE
+      ),
+    }));
+  }
+}
+
 window.onmessage = function(e) {
   var msg = e.data.pluginMessage;
   if (!msg) return;
@@ -125,7 +155,7 @@ window.onmessage = function(e) {
     return;
   }
   if (msg.type === "send_to_bridge" && ws && ws.readyState === 1) {
-    ws.send(JSON.stringify(msg.data));
+    sendToBridge(msg.data);
   }
 };
 
