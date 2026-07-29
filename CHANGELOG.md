@@ -4,9 +4,13 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 
 ## [Unreleased]
 
+### Changed
+- Package publication and installation now target `@spetex/figma-design-pipeline`, with repository metadata and documentation pointing to the maintained fork. The previous `spfr-*` executable names remain available as compatibility aliases.
+
 ### Security
 - Refreshed production dependencies to resolve all findings from `npm audit --omit=dev`, including the directly used `ws` package and MCP SDK transitive dependencies.
 - Limited inbound plugin bridge messages to 16 MiB, explicitly disabled WebSocket compression, and added an oversized-message regression test.
+- Large plugin batch results now use bounded chunked transport, preserving supported `export_node` responses while limiting reassembly to 64 MiB and 64 chunks and clearing incomplete assemblies on failure or shutdown.
 - Added a production dependency audit gate to the npm release workflow.
 
 ### Fixed
