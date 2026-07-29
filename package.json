@@ -1,5 +1,5 @@
 {
-  "name": "@spicefactory/figma-design-pipeline",
+  "name": "@spetex/figma-design-pipeline",
   "version": "0.8.0",
   "description": "AI design assistant MCP server: inspect Figma designs, plan changes, extract tokens, sync design systems, and generate code. Includes a high-performance Figma plugin for 30-60x faster writes than use_figma.",
   "keywords": [
@@ -14,16 +14,16 @@
     "codex",
     "gemini"
   ],
-  "homepage": "https://spfr.github.io/figma-design-pipeline/",
+  "homepage": "https://spetex.github.io/figma-design-pipeline/",
   "bugs": {
-    "url": "https://github.com/spfr/figma-design-pipeline/issues"
+    "url": "https://github.com/spetex/figma-design-pipeline/issues"
   },
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/spfr/figma-design-pipeline.git"
+    "url": "git+https://github.com/spetex/figma-design-pipeline.git"
   },
-  "author": "SPFR",
+  "author": "Petr Sahula",
   "publishConfig": {
     "access": "public"
   },
@@ -36,6 +36,12 @@
   },
   "directories": {
     "bin": "bin"
+  },
+  "bin": {
+    "spetex-figma-design-pipeline": "bin/spetex-figma-design-pipeline",
+    "spetex-figma-design-pipeline-install": "bin/spetex-figma-design-pipeline-install",
+    "spfr-figma-design-pipeline": "bin/spfr-figma-design-pipeline",
+    "spfr-figma-design-pipeline-install": "bin/spfr-figma-design-pipeline-install"
   },
   "files": [
     "bin",

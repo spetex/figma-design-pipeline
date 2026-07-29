@@ -1,6 +1,6 @@
 # Installation
 
-This guide covers installing `@spicefactory/figma-design-pipeline` for Claude Code, Codex CLI, and Gemini CLI.
+This guide covers installing `@spetex/figma-design-pipeline` for Claude Code, Codex CLI, and Gemini CLI.
 
 ## Prerequisites
 
@@ -15,7 +15,7 @@ A `FIGMA_ACCESS_TOKEN` is **optional**. All three CLIs support the official Figm
 ### One-line install (recommended)
 
 ```bash
-npx -y -p @spicefactory/figma-design-pipeline spfr-figma-design-pipeline-install --client all
+npx -y -p @spetex/figma-design-pipeline spetex-figma-design-pipeline-install --client all
 ```
 
 This:
@@ -30,7 +30,7 @@ To install for a single CLI only, replace `--client all` with `--client claude`,
 ### From source
 
 ```bash
-git clone https://github.com/spfr/figma-design-pipeline.git
+git clone https://github.com/spetex/figma-design-pipeline.git
 cd figma-design-pipeline
 npm install
 npm run install:clients
@@ -41,13 +41,13 @@ npm run install:clients
 Re-run the same install command. It refreshes the server, skill, and plugin in place — no need to uninstall first.
 
 ```bash
-npx -y -p @spicefactory/figma-design-pipeline spfr-figma-design-pipeline-install --client all
+npx -y -p @spetex/figma-design-pipeline spetex-figma-design-pipeline-install --client all
 ```
 
 ### Installer flags
 
 ```
-spfr-figma-design-pipeline-install [options]
+spetex-figma-design-pipeline-install [options]
 
   --client <name>   all | claude | claude-code | gemini | gemini-cli | codex | codex-cli
   --skip-build      Reuse existing dist/ artifacts (source installs only)
@@ -215,4 +215,4 @@ rm -rf ~/.gemini/skills/figma-design-pipeline
 **Codex MCP entry points at `~/.npm/_npx/...` instead of `~/.figma-design-pipeline/...`.**
 - That entry was written by an older Codex/MCP integration. Run the installer again — it rewrites the managed block.
 
-For anything else, open an issue at [github.com/spfr/figma-design-pipeline/issues](https://github.com/spfr/figma-design-pipeline/issues).
+For anything else, open an issue at [github.com/spetex/figma-design-pipeline/issues](https://github.com/spetex/figma-design-pipeline/issues).

@@ -1,8 +1,8 @@
 # Publishing
 
-This package is published on **npmjs.com** as `@spicefactory/figma-design-pipeline`.
+This maintained fork will be published on **npmjs.com** as `@spetex/figma-design-pipeline`.
 
-Releases are made by the GitHub Actions trusted-publisher workflow (`.github/workflows/publish-npm.yml`), triggered by tag push.
+After the package is bootstrapped, releases are made by the GitHub Actions trusted-publisher workflow (`.github/workflows/publish-npm.yml`), triggered by tag push.
 
 ## What Ships
 
@@ -34,10 +34,27 @@ Verify the plugin dist is included:
 tar tzf *.tgz | grep plugin
 ```
 
-## npm Trusted Publisher
+## First-Publish Bootstrap
 
-- Package: `@spicefactory/figma-design-pipeline`
-- GitHub: `spfr/figma-design-pipeline`
+An npm package is created by its first publish. The first release of
+`@spetex/figma-design-pipeline` therefore requires an npm account that owns the
+`@spetex` scope:
+
+```bash
+npm login
+npm whoami
+npm publish --access public
+```
+
+Run this only from the reviewed release commit after the version and changelog
+have been finalized. The initial publish cannot use trusted publishing because
+the package does not yet have npm settings where the GitHub publisher can be
+configured.
+
+After the first publish, configure npm trusted publishing for:
+
+- Package: `@spetex/figma-design-pipeline`
+- GitHub: `spetex/figma-design-pipeline`
 - Workflow: `.github/workflows/publish-npm.yml`
 - Trigger: tag push `figma-design-pipeline-v*` or manual dispatch
 
@@ -57,7 +74,7 @@ git push origin figma-design-pipeline-v<next-version>
 ## Install Command
 
 ```bash
-npx -y -p @spicefactory/figma-design-pipeline spfr-figma-design-pipeline-install --client all
+npx -y -p @spetex/figma-design-pipeline spetex-figma-design-pipeline-install --client all
 ```
 
 This installs stable local assets under `~/.figma-design-pipeline/`, registers the MCP server, creates the client skill symlink, and deploys the Figma plugin to `~/.figma-design-pipeline/plugin/`.
@@ -66,14 +83,14 @@ This installs stable local assets under `~/.figma-design-pipeline/`, registers t
 
 ```bash
 cd /tmp
-npx -y -p @spicefactory/figma-design-pipeline spfr-figma-design-pipeline-install --help
+npx -y -p @spetex/figma-design-pipeline spetex-figma-design-pipeline-install --help
 ```
 
 Clean-home test:
 ```bash
 TMP_HOME="$(mktemp -d)"
 cd /tmp
-HOME="$TMP_HOME" npx -y -p @spicefactory/figma-design-pipeline spfr-figma-design-pipeline-install --client all
+HOME="$TMP_HOME" npx -y -p @spetex/figma-design-pipeline spetex-figma-design-pipeline-install --client all
 sed -n '1,120p' "$TMP_HOME/.codex/config.toml"
 ls "$TMP_HOME/.figma-design-pipeline/plugin/manifest.json"
 ```

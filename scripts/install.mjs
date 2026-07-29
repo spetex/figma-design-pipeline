@@ -146,7 +146,7 @@ console.log("- FIGMA_ACCESS_TOKEN is only needed for REST API analysis tools.");
 console.log("- The official Figma MCP handles OAuth-based read/write for all major CLIs.");
 
 function printHelp() {
-  console.log(`Usage: spfr-figma-design-pipeline-install [options]
+  console.log(`Usage: spetex-figma-design-pipeline-install [options]
 
 Options:
   --client <name>   all | claude | claude-code | gemini | gemini-cli | codex | codex-cli

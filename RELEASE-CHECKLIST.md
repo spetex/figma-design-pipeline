@@ -12,14 +12,14 @@ npm ci
 npm run check        # tsc --noEmit (TS 6)
 npm test             # vitest (4 tests)
 npm run build        # builds server + plugin
-npm pack             # produces spicefactory-figma-design-pipeline-<version>.tgz
+npm pack             # produces spetex-figma-design-pipeline-<version>.tgz
 ```
 
 Verify installer from outside the repo:
 
 ```bash
 cd /tmp
-npx -y -p @spicefactory/figma-design-pipeline spfr-figma-design-pipeline-install --help
+npx -y -p @spetex/figma-design-pipeline spetex-figma-design-pipeline-install --help
 ```
 
 Verify clean-home install:
@@ -27,7 +27,7 @@ Verify clean-home install:
 ```bash
 TMP_HOME="$(mktemp -d)"
 cd /tmp
-HOME="$TMP_HOME" npx -y -p @spicefactory/figma-design-pipeline spfr-figma-design-pipeline-install --client all
+HOME="$TMP_HOME" npx -y -p @spetex/figma-design-pipeline spetex-figma-design-pipeline-install --client all
 sed -n '1,120p' "$TMP_HOME/.codex/config.toml"
 ```
 
@@ -77,7 +77,9 @@ export FIGMA_ACCESS_TOKEN=figd_...
 
 ## 4. npm Release
 
-Published via GitHub Actions trusted publishing:
+For the first `@spetex/figma-design-pipeline` release, complete the
+first-publish bootstrap in `PUBLISHING.md` before creating the tag. Later
+releases use GitHub Actions trusted publishing:
 
 ```bash
 npm version <next-version> --no-git-tag-version
@@ -90,7 +92,7 @@ git push origin figma-design-pipeline-v<next-version>
 
 Confirm:
 - GitHub Actions publish workflow succeeds
-- `npm view @spicefactory/figma-design-pipeline version` shows new version
+- `npm view @spetex/figma-design-pipeline version` shows new version
 - `npx` install from outside repo works
 
 ## 5. GitHub Release
@@ -105,5 +107,5 @@ Create release for the tag. Include:
 For end users:
 
 ```bash
-npx -y -p @spicefactory/figma-design-pipeline spfr-figma-design-pipeline-install --client all
+npx -y -p @spetex/figma-design-pipeline spetex-figma-design-pipeline-install --client all
 ```

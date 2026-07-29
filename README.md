@@ -23,7 +23,7 @@ Works with **Claude Code**, **Codex CLI**, and **Gemini CLI**. Uses the official
 ## Quick start
 
 ```bash
-npx -y -p @spicefactory/figma-design-pipeline spfr-figma-design-pipeline-install --client all
+npx -y -p @spetex/figma-design-pipeline spetex-figma-design-pipeline-install --client all
 ```
 
 Then in Figma Desktop: **Plugins → Development → Import plugin from manifest →** `~/.figma-design-pipeline/plugin/manifest.json`.
