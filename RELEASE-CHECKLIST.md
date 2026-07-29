@@ -77,9 +77,8 @@ export FIGMA_ACCESS_TOKEN=figd_...
 
 ## 4. npm Release
 
-For the first `@spetex/figma-design-pipeline` release, complete the
-first-publish bootstrap in `PUBLISHING.md` before creating the tag. Later
-releases use GitHub Actions trusted publishing:
+Releases use the GitHub Actions trusted publisher documented in
+`PUBLISHING.md`:
 
 ```bash
 npm version <next-version> --no-git-tag-version

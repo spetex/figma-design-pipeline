@@ -1,8 +1,8 @@
 # Publishing
 
-This maintained fork will be published on **npmjs.com** as `@spetex/figma-design-pipeline`.
+This maintained fork is published on **npmjs.com** as `@spetex/figma-design-pipeline`.
 
-After the package is bootstrapped, releases are made by the GitHub Actions trusted-publisher workflow (`.github/workflows/publish-npm.yml`), triggered by tag push.
+Releases are made by the GitHub Actions trusted-publisher workflow (`.github/workflows/publish-npm.yml`), triggered by tag push.
 
 ## What Ships
 
@@ -34,29 +34,22 @@ Verify the plugin dist is included:
 tar tzf *.tgz | grep plugin
 ```
 
-## First-Publish Bootstrap
+## npm Trusted Publisher
 
-An npm package is created by its first publish. The first release of
-`@spetex/figma-design-pipeline` therefore requires an npm account that owns the
-`@spetex` scope:
-
-```bash
-npm login
-npm whoami
-npm publish --access public
-```
-
-Run this only from the reviewed release commit after the version and changelog
-have been finalized. The initial publish cannot use trusted publishing because
-the package does not yet have npm settings where the GitHub publisher can be
-configured.
-
-After the first publish, configure npm trusted publishing for:
+npm trusted publishing is configured with:
 
 - Package: `@spetex/figma-design-pipeline`
-- GitHub: `spetex/figma-design-pipeline`
-- Workflow: `.github/workflows/publish-npm.yml`
+- Provider: GitHub Actions
+- Organization/user: `spetex`
+- Repository: `figma-design-pipeline`
+- Workflow filename: `publish-npm.yml`
+- Environment: none
+- Allowed action: `npm publish`
 - Trigger: tag push `figma-design-pipeline-v*` or manual dispatch
+
+The workflow runs on a GitHub-hosted runner with `id-token: write`, allowing npm
+to exchange GitHub's OIDC identity for a short-lived publish credential. No
+long-lived npm publish token is stored in GitHub.
 
 `prepack` runs `npm run build` (server + plugin) automatically.
 
