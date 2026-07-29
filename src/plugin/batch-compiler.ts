@@ -15,18 +15,18 @@ interface CompileOptions {
   rollbackOnError?: boolean;
 }
 
+/** Actions whose results are addressable through `$ref:node-N`, in create-action order. */
+export const CREATE_TYPES: ReadonlySet<Action["type"]> = new Set([
+  "create_frame", "create_text", "create_component_from_node", "create_component_set",
+  "create_instance", "duplicate_node", "create_paint_style", "create_text_style", "create_effect_style",
+  "create_page", "create_variable_collection", "create_variable",
+]);
+
 /** Compile validated actions into an optimized batch with font hoisting and symbolic refs. */
 export function compileBatch(actions: Action[], options: CompileOptions = {}): CompiledBatch {
   const fonts = new Map<string, { family: string; style: string }>();
   const compiled: Array<Record<string, unknown>> = [];
   let refCounter = 0;
-
-  // Actions that create nodes get a symbolic ref
-  const CREATE_TYPES = new Set([
-    "create_frame", "create_text", "create_component_from_node", "create_component_set",
-    "create_instance", "duplicate_node", "create_paint_style", "create_text_style", "create_effect_style",
-    "create_page", "create_variable_collection", "create_variable",
-  ]);
 
   for (const action of actions) {
     const entry = { ...action } as Record<string, unknown>;

@@ -59,11 +59,19 @@ export async function handlePlanLayout(
 
     // Set spacing if suggested
     if (suggestion.suggestedSpacing !== undefined) {
+      const padding = suggestion.suggestedPadding;
       actions.push({
         type: "set_spacing",
         nodeId: suggestion.nodeId,
         itemSpacing: suggestion.suggestedSpacing,
-        ...(suggestion.suggestedPadding || {}),
+        ...(padding
+          ? {
+              paddingTop: padding.top,
+              paddingRight: padding.right,
+              paddingBottom: padding.bottom,
+              paddingLeft: padding.left,
+            }
+          : {}),
       });
     }
   }

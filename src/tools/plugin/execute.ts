@@ -45,7 +45,7 @@ export async function handleExecute(
   }
 
   // Fallback: generate use_figma JavaScript
-  const js = generateFallbackJs(validated);
+  const js = generateFallbackJs(validated, batch.actions);
   return {
     pluginConnected: false,
     fallbackJs: js,
@@ -53,7 +53,10 @@ export async function handleExecute(
 }
 
 /** Generate Plugin API JavaScript from validated actions for use with use_figma fallback. */
-function generateFallbackJs(actions: Action[]): string {
+function generateFallbackJs(
+  actions: Action[],
+  compiledActions: Array<Record<string, unknown>>
+): string {
   const lines: string[] = [];
   const fontsNeeded = new Set<string>();
 
@@ -77,12 +80,16 @@ function generateFallbackJs(actions: Action[]): string {
   }
 
   lines.push("const results = [];");
+  lines.push("const createdNodeIds = new Map();");
+  lines.push("const recordCreatedNode = (ref, result) => {");
+  lines.push("  createdNodeIds.set(ref, result.nodeId);");
+  lines.push("  results.push(result);");
+  lines.push("};");
   lines.push("const resolveRefId = (id) => {");
   lines.push("  if (typeof id !== \"string\") return id;");
   lines.push("  const match = id.match(/^\\$ref:node-(\\d+)$/);");
   lines.push("  if (!match) return id;");
-  lines.push("  const index = Number(match[1]);");
-  lines.push("  const resolved = results[index]?.nodeId;");
+  lines.push("  const resolved = createdNodeIds.get(id);");
   lines.push("  if (!resolved) throw new Error(`Unable to resolve ${id}. Ensure referenced action ran first.`);");
   lines.push("  return resolved;");
   lines.push("};");
@@ -105,6 +112,13 @@ function generateFallbackJs(actions: Action[]): string {
     const nid = "nodeId" in a ? a.nodeId : "";
     const g = (id: string) => `getNode(${j(id)})`;
     const r = (t: string, extra = "") => `results.push({ type: "${t}", nodeId: "${nid}"${extra} });`;
+    const createRef = compiledActions[i]?._ref;
+    const cr = (t: string, nodeId: string) => {
+      if (typeof createRef !== "string") {
+        throw new Error(`Missing compiled reference for create action ${i}: ${t}`);
+      }
+      return `recordCreatedNode(${j(createRef)}, { type: "${t}", nodeId: ${nodeId} });`;
+    };
 
     switch (a.type) {
       case "rename":
@@ -114,12 +128,12 @@ function generateFallbackJs(actions: Action[]): string {
         lines.push(`{ const n = ${g(nid)}; const p = ${g(a.targetParentId)}; ${a.insertIndex !== undefined ? `p.insertChild(${a.insertIndex}, n)` : "p.appendChild(n)"}; ${r("move")} }`);
         break;
       case "create_frame":
-        lines.push(`{ const f = figma.createFrame(); f.name = ${j(a.name)}; f.resize(${a.width}, ${a.height}); ${g(a.parentId)}.appendChild(f); f.x = ${a.x}; f.y = ${a.y}; results.push({ type: "create_frame", nodeId: f.id }); }`);
+        lines.push(`{ const f = figma.createFrame(); f.name = ${j(a.name)}; f.resize(${a.width}, ${a.height}); ${g(a.parentId)}.appendChild(f); f.x = ${a.x}; f.y = ${a.y}; ${cr("create_frame", "f.id")} }`);
         break;
       case "create_text": {
         const fam = a.fontFamily || "Inter";
         const sty = weightToStyle(a.fontWeight || 400);
-        lines.push(`{ const t = figma.createText(); await figma.loadFontAsync({ family: "${fam}", style: "${sty}" }); t.fontName = { family: "${fam}", style: "${sty}" }; t.characters = ${j(a.characters)}; ${a.name ? `t.name = ${j(a.name)};` : ""} ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} ${a.textAutoResize ? `t.textAutoResize = "${a.textAutoResize}";` : ""} ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} ${g(a.parentId)}.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} results.push({ type: "create_text", nodeId: t.id }); }`);
+        lines.push(`{ const t = figma.createText(); await figma.loadFontAsync({ family: "${fam}", style: "${sty}" }); t.fontName = { family: "${fam}", style: "${sty}" }; t.characters = ${j(a.characters)}; ${a.name ? `t.name = ${j(a.name)};` : ""} ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} ${a.textAutoResize ? `t.textAutoResize = "${a.textAutoResize}";` : ""} ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} ${g(a.parentId)}.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} ${cr("create_text", "t.id")} }`);
         break;
       }
       case "delete_node":
@@ -132,7 +146,7 @@ function generateFallbackJs(actions: Action[]): string {
         lines.push(`{ const n = ${g(nid)}; ${a.x !== undefined ? `n.x = ${a.x};` : ""} ${a.y !== undefined ? `n.y = ${a.y};` : ""} ${r("set_position")} }`);
         break;
       case "duplicate_node":
-        lines.push(`{ const c = ${g(nid)}.clone(); results.push({ type: "duplicate_node", nodeId: c.id }); }`);
+        lines.push(`{ const c = ${g(nid)}.clone(); ${cr("duplicate_node", "c.id")} }`);
         break;
       case "set_visible":
         lines.push(`{ ${g(nid)}.visible = ${a.visible}; ${r("set_visible")} }`);
@@ -192,13 +206,13 @@ function generateFallbackJs(actions: Action[]): string {
         lines.push(`{ const n = ${g(nid)}; ${a.textAlignHorizontal ? `n.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} ${a.textAlignVertical ? `n.textAlignVertical = "${a.textAlignVertical}";` : ""} ${a.paragraphSpacing !== undefined ? `n.paragraphSpacing = ${a.paragraphSpacing};` : ""} ${a.textCase ? `n.textCase = "${a.textCase}";` : ""} ${a.textDecoration ? `n.textDecoration = "${a.textDecoration}";` : ""} ${r("set_text_properties")} }`);
         break;
       case "create_component_from_node":
-        lines.push(`{ const c = figma.createComponentFromNode(${g(nid)}); c.name = ${j(a.name)}; results.push({ type: "create_component_from_node", nodeId: c.id }); }`);
+        lines.push(`{ const c = figma.createComponentFromNode(${g(nid)}); c.name = ${j(a.name)}; ${cr("create_component_from_node", "c.id")} }`);
         break;
       case "create_component_set":
-        lines.push(`{ const comps = ${j(a.componentIds)}.map(id => getNode(id)); const set = figma.combineAsVariants(comps, comps[0].parent); set.name = ${j(a.name)}; results.push({ type: "create_component_set", nodeId: set.id }); }`);
+        lines.push(`{ const comps = ${j(a.componentIds)}.map(id => getNode(id)); const set = figma.combineAsVariants(comps, comps[0].parent); set.name = ${j(a.name)}; ${cr("create_component_set", "set.id")} }`);
         break;
       case "create_instance":
-        lines.push(`{ const inst = ${g(a.componentId)}.createInstance(); ${g(a.parentId)}.appendChild(inst); ${a.x !== undefined ? `inst.x = ${a.x};` : ""} ${a.y !== undefined ? `inst.y = ${a.y};` : ""} results.push({ type: "create_instance", nodeId: inst.id }); }`);
+        lines.push(`{ const inst = ${g(a.componentId)}.createInstance(); ${g(a.parentId)}.appendChild(inst); ${a.x !== undefined ? `inst.x = ${a.x};` : ""} ${a.y !== undefined ? `inst.y = ${a.y};` : ""} ${cr("create_instance", "inst.id")} }`);
         break;
       case "swap_instance":
         lines.push(`{ ${g(a.instanceId)}.swapComponent(${g(a.newComponentId)}); results.push({ type: "swap_instance" }); }`);
@@ -210,13 +224,13 @@ function generateFallbackJs(actions: Action[]): string {
         lines.push(`{ ${g(nid)}.addComponentProperty(${j(a.propertyName)}, "${a.propertyType}", ${j(a.defaultValue)}); ${r("define_component_property")} }`);
         break;
       case "create_paint_style":
-        lines.push(`{ const s = figma.createPaintStyle(); s.name = ${j(a.name)}; s.paints = sanitizePaints(${j(a.paints)}); results.push({ type: "create_paint_style", nodeId: s.id }); }`);
+        lines.push(`{ const s = figma.createPaintStyle(); s.name = ${j(a.name)}; s.paints = sanitizePaints(${j(a.paints)}); ${cr("create_paint_style", "s.id")} }`);
         break;
       case "create_text_style":
-        lines.push(`{ const s = figma.createTextStyle(); s.name = ${j(a.name)}; s.fontName = { family: "${a.fontFamily}", style: "${weightToStyle(a.fontWeight ?? 400)}" }; s.fontSize = ${a.fontSize}; ${a.lineHeight !== undefined ? `s.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} results.push({ type: "create_text_style", nodeId: s.id }); }`);
+        lines.push(`{ const s = figma.createTextStyle(); s.name = ${j(a.name)}; s.fontName = { family: "${a.fontFamily}", style: "${weightToStyle(a.fontWeight ?? 400)}" }; s.fontSize = ${a.fontSize}; ${a.lineHeight !== undefined ? `s.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${cr("create_text_style", "s.id")} }`);
         break;
       case "create_effect_style":
-        lines.push(`{ const s = figma.createEffectStyle(); s.name = ${j(a.name)}; s.effects = ${j(a.effects)}; results.push({ type: "create_effect_style", nodeId: s.id }); }`);
+        lines.push(`{ const s = figma.createEffectStyle(); s.name = ${j(a.name)}; s.effects = ${j(a.effects)}; ${cr("create_effect_style", "s.id")} }`);
         break;
       case "apply_style":
         lines.push(`{ const n = ${g(nid)}; n.${"property" in a && a.property === "fill" ? "fillStyleId" : a.property === "stroke" ? "strokeStyleId" : a.property === "text" ? "textStyleId" : "effectStyleId"} = resolveRefId(${j(a.styleId)}); ${r("apply_style")} }`);
@@ -225,16 +239,16 @@ function generateFallbackJs(actions: Action[]): string {
         lines.push(`{ ${g(nid)}.description = ${j(a.description)}; ${r("set_description")} }`);
         break;
       case "create_page":
-        lines.push(`{ const p = figma.createPage(); p.name = ${j(a.name)}; results.push({ type: "create_page", nodeId: p.id }); }`);
+        lines.push(`{ const p = figma.createPage(); p.name = ${j(a.name)}; ${cr("create_page", "p.id")} }`);
         break;
       case "switch_page":
         lines.push(`{ await figma.setCurrentPageAsync(getNode(${j(a.pageId)})); results.push({ type: "switch_page" }); }`);
         break;
       case "create_variable_collection":
-        lines.push(`{ const c = figma.variables.createVariableCollection(${j(a.name)}); results.push({ type: "create_variable_collection", nodeId: c.id }); }`);
+        lines.push(`{ const c = figma.variables.createVariableCollection(${j(a.name)}); ${cr("create_variable_collection", "c.id")} }`);
         break;
       case "create_variable":
-        lines.push(`{ const c = figma.variables.getVariableCollectionById(resolveRefId(${j(a.collectionId)})); const v = figma.variables.createVariable(${j(a.name)}, c, "${a.resolvedType}"); results.push({ type: "create_variable", nodeId: v.id }); }`);
+        lines.push(`{ const c = figma.variables.getVariableCollectionById(resolveRefId(${j(a.collectionId)})); const v = figma.variables.createVariable(${j(a.name)}, c, "${a.resolvedType}"); ${cr("create_variable", "v.id")} }`);
         break;
       case "bind_variable":
         lines.push(`{ const v = figma.variables.getVariableById(resolveRefId(${j(a.variableId)})); const n = ${g(nid)}; n.setBoundVariable("${a.property}", v); ${r("bind_variable")} }`);
