@@ -2,6 +2,12 @@
 
 All notable changes to SPFR Figma Design Pipeline will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- Fallback JavaScript now resolves symbolic node references by create-action order, matching compiled plugin batches even when non-create actions appear before or between creates.
+- `figma_plan_layout` now emits canonical `paddingTop`, `paddingRight`, `paddingBottom`, and `paddingLeft` fields for inferred padding, producing schema-valid `set_spacing` actions.
+
 ## [0.8.0] - 2026-05-12
 
 ### Changed (breaking)
