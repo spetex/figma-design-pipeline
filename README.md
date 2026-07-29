@@ -52,12 +52,12 @@ The official Figma MCP handles Figma reads and file creation via OAuth — no pe
 
 ## What's new
 
-**0.8.0** (2026-05-12)
-- **Node 24 LTS required.** Target raised from Node 22 to Node 24 (active LTS as of Oct 2025). `engines.node: ">=24.0.0"` is now declared.
-- **Zod 4** — internal schema validation migrated from zod 3 to zod 4.4. No public API change; one internal `z.record(...)` signature updated for the new two-arg form.
-- **TypeScript 6** — dev toolchain bumped to TS 6.0. `tsc --noEmit` clean.
-- **esbuild 0.28**, **@types/node 24** — toolchain bumps.
-- Bundle: server `dist/index.js` ~1.4 MB (up from ~1.0 MB). The MCP SDK explicitly imports `zod/v3` for back-compat, so both zod majors bundle. Has no effect on tool latency or memory in practice — the server is a local subprocess.
+**0.8.1** (2026-07-29)
+- Published the maintained fork as `@spetex/figma-design-pipeline`, with new `spetex-*` commands and compatibility aliases for the previous `spfr-*` executable names.
+- Refreshed production dependencies and added a release audit gate; `npm audit --omit=dev` now reports zero vulnerabilities.
+- Hardened the plugin bridge with a 16 MiB per-message limit, disabled compression, and bounded chunk transport for large export results.
+- Fixed fallback symbolic node references when create actions are interleaved with ordinary actions.
+- Fixed inferred layout padding so `figma_plan_layout` emits schema-valid `set_spacing` actions.
 
 See [CHANGELOG.md](CHANGELOG.md) for prior releases.
 

@@ -4,6 +4,8 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-29
+
 ### Changed
 - Package publication and installation now target `@spetex/figma-design-pipeline`, with repository metadata and documentation pointing to the maintained fork. The previous `spfr-*` executable names remain available as compatibility aliases.
 

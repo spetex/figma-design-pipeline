@@ -30,4 +30,17 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run build
-      - run: npm publish --provenance --access public
+      - name: Check whether this version is already published
+        id: npm_version
+        shell: bash
+        run: |
+          package_spec="$(node -p "const p = require('./package.json'); p.name + '@' + p.version")"
+          if npm view "$package_spec" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "$package_spec is already published; skipping npm publish."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish package
+        if: steps.npm_version.outputs.published != 'true'
+        run: npm publish --provenance --access public
