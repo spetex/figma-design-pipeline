@@ -43,10 +43,10 @@ These all hit the Figma REST API. They need `FIGMA_ACCESS_TOKEN` set in your MCP
 
 | Tool | What it does | When to use |
 |---|---|---|
-| `figma_get_tree` | Enriched node tree with classifications and layout info. Auto-truncates at 80 KB. | First call when exploring any file. |
+| `figma_get_tree` | Enriched node tree with explicit completeness metadata and an 80 KB complete-response cap. | First call when exploring any file. |
 | `figma_audit` | Structural audit: naming, layout, components, tokens, accessibility. | Bounded list of issues before a cleanup pass. |
 | `figma_extract_tokens` | Colors, fonts, spacing, radius, shadows — with Tailwind mapping. | Token sync, theming, brand audits. |
-| `figma_find_nodes` | Filter nodes by name / type / classification / text / size. | "Where is the button styled like X?" |
+| `figma_find_nodes` | Filter nodes by name / type / classification / text / size, with explicit limit and depth metadata. | "Where is the button styled like X?" |
 | `figma_get_components` | List published components. | Before mapping to your code components. |
 | `figma_get_styles` | List published color/text/effect styles. | Token drift check. |
 | `figma_diff_tokens` | Compare Figma styles vs your code tokens. | Sync workflow. Accepts style data directly — no REST call. |
@@ -73,6 +73,47 @@ batches that apply changes, and plugin `documentchange` notifications, clear
 the local inspection cache conservatively. If the plugin is disconnected while
 someone else edits the file, request `refresh: true` or `maxAgeMs: 0` when the
 latest REST view matters.
+
+### Enumeration completeness
+
+`figma_get_tree` preserves every direct child of the requested root whenever
+the complete pretty-printed response fits its 80,000-byte budget. The budget
+includes metadata and continuations, and `responseBytes` is the UTF-8 byte
+length of the exact emitted text. Each node distinguishes the
+source `childCount` from `returnedChildCount`, which counts real direct children
+present in the response (synthetic `COLLAPSED` and `TRUNCATED` markers do not
+count). A complete response has `truncated: false`, `omittedNodeCount: 0`, and
+an empty `truncationReasons` array.
+
+When descendant vector leaves are compacted or deeper nodes are removed to fit
+the byte budget, the response sets `truncated: true`, reports the exact
+`omittedNodeCount`, and includes `vector_compaction` and/or
+`response_size_limit` in `truncationReasons`. `maxResponseBytes` appears when
+the byte cap caused pruning. Each `continuations` entry gives a retrievable
+`nodeId`, reason, and omitted count; call `figma_get_tree` on that node to drill
+into the omitted subtree. Only a root whose direct-child records cannot fit
+after descendant pruning is paginated. In that case, pass
+`directChildren.nextOffset` back as `childOffset` to fetch the next page.
+Every emitted `nextOffset` is strictly greater than the request's `childOffset`;
+a response without `nextOffset` is terminal.
+
+If an individual `name` or `textContent` value would prevent even one direct
+child from fitting, the value is UTF-8-byte bounded while the node ID and node
+record remain present and retrievable. The response includes
+`scalar_field_limit`, `truncatedFieldCount`, `omittedScalarBytes`, and per-node
+`truncatedFields` byte counts. Scalar compaction does not change node counts or
+`omittedNodeCount`.
+
+For compatibility, `nodeCount` continues to count every serialized tree entry,
+including synthetic `COLLAPSED` and `TRUNCATED` markers. Use
+`returnedNodeCount` for the number of real source nodes present and
+`totalNodeCount` for the real source-node total before omissions. Size-limited
+responses retain the legacy `note` field alongside the structured metadata.
+
+`figma_find_nodes` echoes the requested relative REST depth as `traversalDepth`
+(the requested root is depth 0) and its match cap as `matchLimit`. Its
+`truncated` flag is true only after the traversal detects at least one matching
+node beyond the cap, so an exact-limit complete result is not mislabeled.
 
 ### Pattern: explore a file
 

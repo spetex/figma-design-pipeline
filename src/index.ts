@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { FigmaRestClient } from "./shared/figma-rest.js";
 import { SnapshotCache } from "./pipeline/snapshot.js";
-import { parseFigmaUrl } from "./shared/figma-url.js";
+import { FigmaSession, type FileSelection } from "./shared/figma-session.js";
 import type { ToolContext } from "./shared/context.js";
 import {
   getTreeInputSchema,
@@ -28,7 +28,11 @@ import {
 } from "./shared/types.js";
 
 // ─── Inspect tools ───────────────────────────────────────────────────
-import { handleGetTree, compactTree, truncateTree } from "./tools/inspect/get-tree.js";
+import {
+  DEFAULT_MAX_RESPONSE_BYTES,
+  handleGetTree,
+  serializeGetTreeResponse,
+} from "./tools/inspect/get-tree.js";
 import { handleAudit } from "./tools/inspect/audit.js";
 import { handleExtractTokens } from "./tools/inspect/extract-tokens.js";
 import { handleExportImages } from "./tools/inspect/export-images.js";
@@ -72,8 +76,7 @@ const bridge = new BridgeServer({
   onDocumentChange: () => snapshotCache.invalidateAll(),
 });
 
-// Track the last root node for session continuity
-let lastRootNodeId: string | undefined;
+const figmaSession = new FigmaSession();
 
 function getContext(): ToolContext {
   if (!rest) {
@@ -87,40 +90,27 @@ function getContext(): ToolContext {
 
 // ─── URL Resolution ─────────────────────────────────────────────────
 
+function activateFile(selection: FileSelection): void {
+  if (rest && selection.fileChanged) {
+    rest.defaultFileKey = selection.fileKey;
+    snapshotCache.invalidateAll();
+    console.error(`[mcp] Switched to Figma file: ${selection.fileKey}${selection.fileName ? ` (${selection.fileName})` : ""}`);
+  }
+}
+
 /** Update session file key if a new Figma URL is provided. No nodeId required. */
 function applyFileKey(params: { figmaUrl?: string }): void {
   if (!params.figmaUrl) return;
-  const parsed = parseFigmaUrl(params.figmaUrl);
-  if (rest && parsed.fileKey !== rest.defaultFileKey) {
-    rest.defaultFileKey = parsed.fileKey;
-    snapshotCache.invalidateAll();
-    console.error(`[mcp] Switched to Figma file: ${parsed.fileKey}${parsed.fileName ? ` (${parsed.fileName})` : ""}`);
-  }
+  activateFile(figmaSession.applyFileKey(params.figmaUrl, rest?.defaultFileKey));
 }
 
 /** Resolve figmaUrl + nodeId into a concrete nodeId. Throws if no nodeId can be determined. */
 function resolveParams(params: { figmaUrl?: string; nodeId?: string }): { nodeId: string } {
-  let nodeId = params.nodeId;
-
-  if (params.figmaUrl) {
-    applyFileKey(params);
-    if (!nodeId) {
-      const parsed = parseFigmaUrl(params.figmaUrl);
-      if (parsed.nodeId) nodeId = parsed.nodeId;
-    }
-  }
-
-  if (!nodeId) {
-    nodeId = lastRootNodeId || "";
-  }
-
-  if (!nodeId) {
-    throw new Error(
-      "No node ID provided. Pass a Figma URL with ?node-id=X:Y or provide nodeId directly."
-    );
-  }
-
-  return { nodeId };
+  // Activate the URL's file before resolving so a missing node ID still leaves the
+  // session on the requested file for a follow-up call with an explicit nodeId.
+  applyFileKey(params);
+  const resolved = figmaSession.resolveParams(params, rest?.defaultFileKey);
+  return { nodeId: resolved.nodeId };
 }
 
 function jsonResponse(result: unknown) {
@@ -145,7 +135,11 @@ Use this path when the goal is understanding a design, not modifying it.
 4. figma_export_images if you need visual snapshots
 
 ## Context Rules
-- figma_get_tree is compact by default and auto-truncates at 80KB.
+- figma_get_tree preserves requested-root children when possible. Its 80KB cap covers the complete pretty-printed response, including metadata and continuations; responseBytes is the UTF-8 byte length of that exact text.
+- Any vector compaction, size pruning, or oversized scalar compaction is explicit through truncated and truncationReasons. Scalar compaction reports truncatedFieldCount, omittedScalarBytes, and per-node truncatedFields.
+- Follow directChildren.nextOffset using childOffset for another wide-root page; every emitted nextOffset is strictly greater than the current offset.
+- childCount is the source total; returnedChildCount is the number of real direct children present. Follow continuation nodeIds with focused figma_get_tree calls.
+- figma_find_nodes echoes traversalDepth and matchLimit, and marks truncated only after detecting a match beyond the limit.
 - figma_extract_tokens is the detailed style view. Do not request it unless token detail is actually needed.
 - For very large files, keep drilling into specific nodeIds instead of repeating root fetches.
 `;
@@ -308,31 +302,27 @@ server.resource(
 
 server.tool(
   "figma_get_tree",
-  "Fetch enriched Figma node tree with classifications, tokens, and layout info. Inspection snapshots are keyed by file, node, depth, and style inclusion; responses report fromCache, snapshotAt, and cacheAgeMs. Use refresh: true or maxAgeMs: 0 for a new Figma REST request; this is not a guaranteed fresh plugin read.",
+  "Fetch an enriched Figma node tree while preserving requested-root children whenever the 80KB complete serialized-response cap permits. responseBytes is the UTF-8 size of the exact pretty-printed text. childCount is the source total and returnedChildCount is the number returned. nodeCount retains the serialized-node count (including synthetic markers), while returnedNodeCount counts real returned nodes. Vector compaction, node pruning, and oversized name/textContent compaction set truncated and report machine-readable reasons plus exact node/field omission metrics. Pass directChildren.nextOffset as childOffset for the next wide-root page; nextOffset always advances. Inspection snapshots are keyed by file, node, depth, and style inclusion.",
   getTreeInputSchema.shape,
   async (params) => {
     const { nodeId } = resolveParams(params);
     const ctx = getContext();
     const result = await handleGetTree(ctx, { ...params, nodeId });
 
-    // Track for session continuity
-    lastRootNodeId = nodeId;
+    // Track the successful root read together with its file for session continuity.
+    if (ctx.rest.defaultFileKey) {
+      figmaSession.rememberRoot({ fileKey: ctx.rest.defaultFileKey, nodeId });
+    }
 
-    const compact = compactTree(result.tree);
-    const { tree: outputTree, truncated, nodeCount } = truncateTree(compact, 80_000);
+    const response = serializeGetTreeResponse(result, {
+      maxResponseBytes: DEFAULT_MAX_RESPONSE_BYTES,
+      childOffset: params.childOffset,
+    });
 
     return {
       content: [{
         type: "text",
-        text: JSON.stringify({
-          nodeId: result.nodeId,
-          fromCache: result.fromCache,
-          snapshotAt: result.snapshotAt,
-          cacheAgeMs: result.cacheAgeMs,
-          nodeCount,
-          ...(truncated ? { truncated: true, note: "Tree exceeded 80KB — deeper children omitted. Use figma_get_tree on specific nodeIds to drill down." } : {}),
-          tree: outputTree,
-        }, null, 2),
+        text: response.text,
       }],
     };
   }
@@ -373,7 +363,7 @@ server.tool(
 
 server.tool(
   "figma_find_nodes",
-  "Search/filter nodes by name pattern, type, classification, text content, or size. Responses report fromCache, snapshotAt, and cacheAgeMs; use refresh: true or maxAgeMs: 0 for a new Figma REST request, not a guaranteed fresh plugin read.",
+  "Search/filter nodes by name pattern, type, classification, text content, or size. traversalDepth echoes the requested REST depth relative to the root, matchLimit echoes the result cap, and truncated is true only when a match beyond that cap is detected. Responses also report fromCache, snapshotAt, and cacheAgeMs.",
   findNodesInputSchema.shape,
   async (params) => {
     const { nodeId } = resolveParams(params);
