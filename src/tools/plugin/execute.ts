@@ -103,7 +103,7 @@ function generateFallbackJs(
     if (action.type === "create_text" || action.type === "create_text_style") {
       const weight = action.fontWeight ?? 400;
       const style = weightToStyle(weight);
-      fontsNeeded.add(`await figma.loadFontAsync({ family: "${action.fontFamily}", style: "${style}" });`);
+      fontsNeeded.add(`await loadFontOnce({ family: "${action.fontFamily}", style: "${style}" });`);
     }
   }
 
@@ -122,6 +122,14 @@ function generateFallbackJs(
   lines.push("if (executionOptions.rollbackOnError && typeof figma.triggerUndo !== \"function\") {");
   lines.push("  throw new Error(\"Fallback execution environment does not support rollback (figma.triggerUndo).\");");
   lines.push("}");
+  lines.push("");
+  lines.push("const loadedFonts = new Set();");
+  lines.push("const loadFontOnce = async (font) => {");
+  lines.push("  const key = `${font.family}|${font.style || 'Regular'}`;");
+  lines.push("  if (loadedFonts.has(key)) return;");
+  lines.push("  await figma.loadFontAsync(font);");
+  lines.push("  loadedFonts.add(key);");
+  lines.push("};");
   lines.push("");
 
   if (fontsNeeded.size > 0) {
@@ -209,7 +217,7 @@ function generateFallbackJs(
         lines.push(`{ ${g(nid)}.name = ${j(a.name)}; markDocumentWrite(); ${r("rename")} }`);
         break;
       case "move":
-        lines.push(`{ const n = ${g(nid)}; const p = requireContainer(${j(a.targetParentId)}); ${a.insertIndex !== undefined ? `p.insertChild(${a.insertIndex}, n)` : "p.appendChild(n)"}; markDocumentWrite(); ${r("move")} }`);
+        lines.push(`{ const n = requireNode(${j(nid)}); const p = requireContainer(${j(a.targetParentId)}); ${a.insertIndex !== undefined ? `p.insertChild(${a.insertIndex}, n)` : "p.appendChild(n)"}; markDocumentWrite(); ${r("move")} }`);
         break;
       case "create_frame":
         lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const f = figma.createFrame(); markDocumentWrite(); f.name = ${j(a.name)}; f.resize(${a.width}, ${a.height}); parent.appendChild(f); f.x = ${a.x}; f.y = ${a.y}; ${cr("create_frame", "f.id")} }`);
@@ -217,7 +225,7 @@ function generateFallbackJs(
       case "create_text": {
         const fam = a.fontFamily || "Inter";
         const sty = weightToStyle(a.fontWeight || 400);
-        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); await figma.loadFontAsync({ family: "${fam}", style: "${sty}" }); const t = figma.createText(); markDocumentWrite(); t.fontName = { family: "${fam}", style: "${sty}" }; t.characters = ${j(a.characters)}; ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} t.textAutoResize = "${a.textAutoResize || "HEIGHT"}"; ${a.name ? `t.name = ${j(a.name)};` : ""} parent.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} ${cr("create_text", "t.id")} }`);
+        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); await loadFontOnce({ family: "${fam}", style: "${sty}" }); const t = figma.createText(); markDocumentWrite(); t.fontName = { family: "${fam}", style: "${sty}" }; t.characters = ${j(a.characters)}; ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} t.textAutoResize = "${a.textAutoResize || "HEIGHT"}"; ${a.name ? `t.name = ${j(a.name)};` : ""} parent.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} ${cr("create_text", "t.id")} }`);
         break;
       }
       case "delete_node":
@@ -278,13 +286,13 @@ function generateFallbackJs(
         lines.push(`{ const n = ${g(nid)}; ${a.radius !== undefined ? `n.cornerRadius = ${a.radius}; markDocumentWrite();` : ""} ${a.radii ? `n.topLeftRadius=${a.radii[0]}; markDocumentWrite(); n.topRightRadius=${a.radii[1]}; markDocumentWrite(); n.bottomRightRadius=${a.radii[2]}; markDocumentWrite(); n.bottomLeftRadius=${a.radii[3]}; markDocumentWrite();` : ""} ${r("set_corner_radius")} }`);
         break;
       case "set_text_content":
-        lines.push(`{ const n = ${g(nid)}; if (n.fontName === figma.mixed) { const seenFonts = new Set(); for (let rangeStart = 0; rangeStart < n.characters.length; rangeStart++) { const rangeFont = n.getRangeFontName(rangeStart, rangeStart + 1); const fontKey = \`${"${rangeFont.family}|${rangeFont.style}"}\`; if (!seenFonts.has(fontKey)) { seenFonts.add(fontKey); await figma.loadFontAsync(rangeFont); } } } else { await figma.loadFontAsync(n.fontName); } n.characters = ${j(a.characters)}; markDocumentWrite(); ${r("set_text_content")} }`);
+        lines.push(`{ const n = ${g(nid)}; if (n.fontName === figma.mixed) { const seenFonts = new Set(); for (let rangeStart = 0; rangeStart < n.characters.length; rangeStart++) { const rangeFont = n.getRangeFontName(rangeStart, rangeStart + 1); const fontKey = \`${"${rangeFont.family}|${rangeFont.style}"}\`; if (!seenFonts.has(fontKey)) { seenFonts.add(fontKey); await loadFontOnce(rangeFont); } } } else { await loadFontOnce(n.fontName); } n.characters = ${j(a.characters)}; markDocumentWrite(); ${r("set_text_content")} }`);
         break;
       case "set_text_style": {
         const hasFontOverride = Boolean(a.fontFamily) || a.fontWeight !== undefined;
         const family = a.fontFamily ? j(a.fontFamily) : "currentFamily";
         const style = a.fontWeight !== undefined ? j(weightToStyle(a.fontWeight)) : "currentStyle";
-        lines.push(`{ const n = ${g(nid)}; const currentFont = n.fontName; if (${hasFontOverride}) { const currentFamily = currentFont === figma.mixed ? "Inter" : currentFont.family; const currentStyle = currentFont === figma.mixed ? "Regular" : currentFont.style; const family = ${family}; const style = ${style}; await figma.loadFontAsync({ family, style }); n.fontName = { family, style }; markDocumentWrite(); } else if (currentFont === figma.mixed) { const seenFonts = new Set(); for (let rangeStart = 0; rangeStart < n.characters.length; rangeStart++) { const rangeFont = n.getRangeFontName(rangeStart, rangeStart + 1); const fontKey = \`${"${rangeFont.family}|${rangeFont.style}"}\`; if (!seenFonts.has(fontKey)) { seenFonts.add(fontKey); await figma.loadFontAsync(rangeFont); } } } else { await figma.loadFontAsync(currentFont); } ${a.fontSize !== undefined ? `n.fontSize = ${a.fontSize}; markDocumentWrite();` : ""} ${a.lineHeight !== undefined ? `n.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" }; markDocumentWrite();` : ""} ${a.letterSpacing !== undefined ? `n.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" }; markDocumentWrite();` : ""} ${r("set_text_style")} }`);
+        lines.push(`{ const n = ${g(nid)}; const currentFont = n.fontName; if (${hasFontOverride}) { const currentFamily = currentFont === figma.mixed ? "Inter" : currentFont.family; const currentStyle = currentFont === figma.mixed ? "Regular" : currentFont.style; const family = ${family}; const style = ${style}; await loadFontOnce({ family, style }); n.fontName = { family, style }; markDocumentWrite(); } else if (currentFont === figma.mixed) { const seenFonts = new Set(); for (let rangeStart = 0; rangeStart < n.characters.length; rangeStart++) { const rangeFont = n.getRangeFontName(rangeStart, rangeStart + 1); const fontKey = \`${"${rangeFont.family}|${rangeFont.style}"}\`; if (!seenFonts.has(fontKey)) { seenFonts.add(fontKey); await loadFontOnce(rangeFont); } } } else { await loadFontOnce(currentFont); } ${a.fontSize !== undefined ? `n.fontSize = ${a.fontSize}; markDocumentWrite();` : ""} ${a.lineHeight !== undefined ? `n.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" }; markDocumentWrite();` : ""} ${a.letterSpacing !== undefined ? `n.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" }; markDocumentWrite();` : ""} ${r("set_text_style")} }`);
         break;
       }
       case "set_text_properties":
@@ -300,7 +308,7 @@ function generateFallbackJs(
         lines.push(`{ const component = requireNode(${j(a.componentId)}); if (component.type !== "COMPONENT" || typeof component.createInstance !== "function") throw new Error("Node is not a component"); const parent = requireContainer(${j(a.parentId)}); const inst = component.createInstance(); markDocumentWrite(); parent.appendChild(inst); ${a.x !== undefined ? `inst.x = ${a.x}; markDocumentWrite();` : ""} ${a.y !== undefined ? `inst.y = ${a.y}; markDocumentWrite();` : ""} ${cr("create_instance", "inst.id")} }`);
         break;
       case "swap_instance":
-        lines.push(`{ ${g(a.instanceId)}.swapComponent(${g(a.newComponentId)}); markDocumentWrite(); results.push({ type: "swap_instance" }); }`);
+        lines.push(`{ const instance = requireNode(${j(a.instanceId)}); if (instance.type !== "INSTANCE" || typeof instance.swapComponent !== "function") throw new Error("Node is not an instance"); const component = requireNode(${j(a.newComponentId)}); if (component.type !== "COMPONENT") throw new Error("Node is not a component"); instance.swapComponent(component); markDocumentWrite(); results.push({ type: "swap_instance" }); }`);
         break;
       case "set_component_properties":
         lines.push(`{ const n = ${g(nid)}; for (const [property, value] of Object.entries(${j(a.properties)})) { n.setProperties({ [property]: value }); markDocumentWrite(); } ${r("set_component_properties")} }`);
@@ -327,7 +335,7 @@ function generateFallbackJs(
         lines.push(`{ const p = figma.createPage(); markDocumentWrite(); p.name = ${j(a.name)}; ${cr("create_page", "p.id")} }`);
         break;
       case "switch_page":
-        lines.push(`{ await figma.setCurrentPageAsync(getNode(${j(a.pageId)})); results.push({ type: "switch_page" }); }`);
+        lines.push(`{ const page = getNode(${j(a.pageId)}); if (!page || page.type !== "PAGE") throw new Error("Node ${a.pageId} is not a page"); await figma.setCurrentPageAsync(page); results.push({ type: "switch_page" }); }`);
         break;
       case "create_variable_collection":
         lines.push(`{ const c = figma.variables.createVariableCollection(${j(a.name)}); markDocumentWrite(); const modes = ${j(a.modes)}; if (modes[0]) { c.renameMode(c.modes[0].modeId, modes[0]); markDocumentWrite(); } for (let modeIndex = 1; modeIndex < modes.length; modeIndex++) { c.addMode(modes[modeIndex]); markDocumentWrite(); } ${cr("create_variable_collection", "c.id")} }`);

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { compileBatch } from "../src/plugin/batch-compiler.js";
 import { ACTION_TYPES } from "../src/shared/action-parity.js";
 import { actionSchema } from "../src/shared/actions.js";
 import { handleExecute } from "../src/tools/plugin/execute.js";
@@ -16,23 +17,37 @@ type PluginFigma = {
   createText?: ReturnType<typeof vi.fn>;
 };
 
-function batch(actions: Array<Record<string, unknown>>) {
+function batch(actions: Array<Record<string, unknown>>, preloadFonts = false) {
+  const compiled = compileBatch(actions.map((action) => actionSchema.parse(action)), {
+    rollbackOnError: true,
+  });
   return {
     batchId: "test-batch",
-    dryRun: false,
-    stopOnError: true,
-    rollbackOnError: true,
-    requiredFonts: [],
-    actions,
+    ...compiled,
+    requiredFonts: preloadFonts ? compiled.requiredFonts : [],
   };
 }
 
-async function runPlugin(figma: PluginFigma, actions: Array<Record<string, unknown>>) {
+function normalizeBridgeTransportFontPreloads(
+  trace: readonly string[],
+  actions: Array<Record<string, unknown>>
+): string[] {
+  const transportCalls = compileBatch(actions.map((action) => actionSchema.parse(action))).requiredFonts
+    .map((font) => `call:figma.loadFontAsync:${JSON.stringify([font])}`);
+  expect(trace.slice(0, transportCalls.length)).toEqual(transportCalls);
+  return trace.slice(transportCalls.length);
+}
+
+async function runPlugin(
+  figma: PluginFigma,
+  actions: Array<Record<string, unknown>>,
+  { preloadFonts = false }: { preloadFonts?: boolean } = {}
+) {
   vi.resetModules();
   vi.stubGlobal("figma", figma);
   vi.stubGlobal("__html__", "");
   await import("./code.js");
-  await figma.ui.onmessage!({ type: "bridge_message", data: { type: "batch", ...batch(actions) } });
+  await figma.ui.onmessage!({ type: "bridge_message", data: { type: "batch", ...batch(actions, preloadFonts) } });
   return figma.ui.postMessage.mock.calls.find(
     ([message]) => message.type === "send_to_bridge" && message.data.type === "batch_result"
   )?.[0].data;
@@ -399,6 +414,7 @@ function createBehavioralFigma() {
   return {
     figma,
     trace,
+    nodes,
     state: () => ({
       nodes: Array.from(nodeSnapshots.entries()).map(([id, node]) => [id, snapshot(node)]),
       collection: snapshot(collection),
@@ -430,32 +446,115 @@ describe("all-action behavioral parity", () => {
     const fallbackResults = await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
 
     const connected = createBehavioralFigma();
-    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, [action]);
+    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, [action], { preloadFonts: true });
 
     expect(fallbackResults).not.toEqual([expect.objectContaining({ status: "failed" })]);
     expect(pluginResult.summary).toMatchObject({ applied: 1, failed: 0 });
-    // The bridge compiles required fonts before the connected executor runs;
-    // compare every action-observable call and write after that transport-only
-    // preflight difference has been removed.
-    expect(fallback.trace.filter((entry) => !entry.startsWith("call:figma.loadFontAsync:")))
-      .toEqual(connected.trace.filter((entry) => !entry.startsWith("call:figma.loadFontAsync:")));
+    // Strip only the compiler's known transport preloads. Any action-level
+    // font call remains observable, exposing mismatched counts or arguments.
+    expect(normalizeBridgeTransportFontPreloads(fallback.trace, [action]))
+      .toEqual(normalizeBridgeTransportFontPreloads(connected.trace, [action]));
     expect(fallback.state()).toEqual(connected.state());
   });
 
-  it("enforces the same delete_node safety precondition in both paths", async () => {
-    const action = { type: "delete_node", nodeId: "page", confirmed: true };
+  const PRECONDITION_PARITY_CASES: Array<{
+    label: string;
+    action: Record<string, unknown>;
+    configure: (nodes: Map<string, Record<string, unknown>>) => void;
+  }> = [
+    {
+      label: "a protected page deletion",
+      action: { type: "delete_node", nodeId: "page", confirmed: true },
+      configure: () => {},
+    },
+    {
+      label: "a missing destructive target",
+      action: { type: "delete_node", nodeId: "node", confirmed: true },
+      configure: (nodes) => { nodes.delete("node"); },
+    },
+    {
+      label: "a missing move source",
+      action: { type: "move", nodeId: "node", targetParentId: "parent", insertIndex: 0 },
+      configure: (nodes) => { nodes.delete("node"); },
+    },
+    {
+      label: "a non-container move target",
+      action: { type: "move", nodeId: "node", targetParentId: "parent", insertIndex: 0 },
+      configure: (nodes) => { delete nodes.get("parent")!.appendChild; },
+    },
+    {
+      label: "a missing frame parent",
+      action: { type: "create_frame", name: "Frame", parentId: "parent", x: 0, y: 0, width: 100, height: 100 },
+      configure: (nodes) => { nodes.delete("parent"); },
+    },
+    {
+      label: "a non-container text parent",
+      action: { type: "create_text", parentId: "parent", characters: "Text", fontFamily: "Inter", fontWeight: 400 },
+      configure: (nodes) => { delete nodes.get("parent")!.appendChild; },
+    },
+    {
+      label: "a component source without a container parent",
+      action: { type: "create_component_from_node", nodeId: "source", name: "Component" },
+      configure: (nodes) => { nodes.get("source")!.parent = undefined; },
+    },
+    {
+      label: "a non-component variant source",
+      action: { type: "create_component_set", componentIds: ["component"], name: "Variants" },
+      configure: (nodes) => { nodes.get("component")!.type = "RECTANGLE"; },
+    },
+    {
+      label: "a non-component instance source",
+      action: { type: "create_instance", componentId: "component", parentId: "parent", x: 0, y: 0 },
+      configure: (nodes) => { nodes.get("component")!.type = "RECTANGLE"; },
+    },
+    {
+      label: "a non-container instance parent",
+      action: { type: "create_instance", componentId: "component", parentId: "parent", x: 0, y: 0 },
+      configure: (nodes) => { delete nodes.get("parent")!.appendChild; },
+    },
+    {
+      label: "a non-instance swap source",
+      action: { type: "swap_instance", instanceId: "instance", newComponentId: "component" },
+      configure: (nodes) => { nodes.get("instance")!.type = "RECTANGLE"; },
+    },
+    {
+      label: "a non-component swap target",
+      action: { type: "swap_instance", instanceId: "instance", newComponentId: "component" },
+      configure: (nodes) => { nodes.get("component")!.type = "RECTANGLE"; },
+    },
+    {
+      label: "a document page target",
+      action: { type: "switch_page", pageId: "page" },
+      configure: (nodes) => { nodes.get("page")!.type = "DOCUMENT"; },
+    },
+    {
+      label: "a missing page target",
+      action: { type: "switch_page", pageId: "page" },
+      configure: (nodes) => { nodes.delete("page"); },
+    },
+  ];
+
+  it.each(PRECONDITION_PARITY_CASES)("fails without mutation for $label in both paths", async ({ action, configure }) => {
     const fallback = createBehavioralFigma();
+    configure(fallback.nodes);
+    fallback.trace.length = 0;
+    const fallbackBefore = fallback.state();
     const generated = await handleExecute(null, { actions: [action] });
     const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
       ...args: string[]
     ) => (figmaApi: typeof fallback.figma) => Promise<Array<Record<string, unknown>>>;
     const fallbackResults = await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
     const connected = createBehavioralFigma();
-    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, [action]);
+    configure(connected.nodes);
+    connected.trace.length = 0;
+    const connectedBefore = connected.state();
+    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, [action], { preloadFonts: true });
 
     expect(fallbackResults).toEqual([expect.objectContaining({ actionIndex: 0, status: "failed" })]);
     expect(pluginResult.summary).toMatchObject({ applied: 0, failed: 1 });
-    expect(fallback.trace.some((entry) => entry.startsWith("call:page.remove:"))).toBe(false);
-    expect(connected.trace.some((entry) => entry.startsWith("call:page.remove:"))).toBe(false);
+    expect(normalizeBridgeTransportFontPreloads(fallback.trace, [action]))
+      .toEqual(normalizeBridgeTransportFontPreloads(connected.trace, [action]));
+    expect(fallback.state()).toEqual(fallbackBefore);
+    expect(connected.state()).toEqual(connectedBefore);
   });
 });
