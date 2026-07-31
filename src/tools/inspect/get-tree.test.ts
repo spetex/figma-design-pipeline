@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SnapshotCache } from "../../pipeline/snapshot.js";
 import type { ToolContext } from "../../shared/context.js";
 import type { FigmaRawNode } from "../../shared/types.js";
-import { handleGetTree } from "./get-tree.js";
+import { compactTree, handleGetTree, truncateTree } from "./get-tree.js";
 
 function node(
   id: string,
@@ -128,5 +128,114 @@ describe("handleGetTree freshness", () => {
     const otherFile = await handleGetTree(ctx, { nodeId: "root", depth: 2, includeStyles: true });
     expect(otherFile.fromCache).toBe(false);
     expect(getFileNodes).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe("tree completeness reporting", () => {
+  it("preserves all 39 direct children when the requested root is vector-heavy", async () => {
+    const children = Array.from({ length: 39 }, (_, index): FigmaRawNode => ({
+      id: `shape-${index}`,
+      name: `Shape ${index}`,
+      type: "RECTANGLE",
+    }));
+    const documents = new Map<string, FigmaRawNode>([
+      ["root", node("root", "Observed section", 0, 1000, children)],
+    ]);
+    const { ctx } = makeContext(documents);
+
+    const result = await handleGetTree(ctx, { nodeId: "root", depth: 1, includeStyles: false });
+    const report = truncateTree(compactTree(result.tree), 80_000);
+
+    expect(report.tree.childCount).toBe(39);
+    expect(report.tree.returnedChildCount).toBe(39);
+    expect(report.tree.children).toHaveLength(39);
+    expect(report).toMatchObject({
+      truncated: false,
+      omittedNodeCount: 0,
+      truncationReasons: [],
+      nodeCount: 40,
+      totalNodeCount: 40,
+    });
+  });
+
+  it("reports descendant vector compaction and the exact omitted count", async () => {
+    const vectors = Array.from({ length: 5 }, (_, index): FigmaRawNode => ({
+      id: `vector-${index}`,
+      name: `Vector ${index}`,
+      type: "VECTOR",
+    }));
+    const documents = new Map<string, FigmaRawNode>([
+      ["root", node("root", "Page", 0, 1000, [node("icon", "Icon", 0, 24, vectors)])],
+    ]);
+    const { ctx } = makeContext(documents);
+
+    const result = await handleGetTree(ctx, { nodeId: "root", depth: 3, includeStyles: false });
+    const report = truncateTree(compactTree(result.tree), 80_000);
+
+    expect(report).toMatchObject({
+      truncated: true,
+      omittedNodeCount: 5,
+      truncationReasons: ["vector_compaction"],
+      nodeCount: 2,
+      totalNodeCount: 7,
+    });
+    expect(report.tree.children[0]).toMatchObject({ childCount: 5, returnedChildCount: 0 });
+    expect(report.continuations).toContainEqual({
+      reason: "vector_compaction",
+      nodeId: "icon",
+      omittedNodeCount: 5,
+    });
+  });
+
+  it("makes byte-limit pruning explicit while preserving direct root children", async () => {
+    const branch = (id: string) => node(
+      id,
+      `Direct child ${id}`,
+      0,
+      100,
+      Array.from({ length: 8 }, (_, index) =>
+        node(`${id}-${index}`, `Verbose descendant ${"x".repeat(120)} ${index}`, 0, 50)
+      )
+    );
+    const documents = new Map<string, FigmaRawNode>([
+      ["root", node("root", "Page", 0, 1000, [branch("a"), branch("b"), branch("c")])],
+    ]);
+    const { ctx } = makeContext(documents);
+
+    const result = await handleGetTree(ctx, { nodeId: "root", depth: 3, includeStyles: false });
+    const report = truncateTree(compactTree(result.tree), 2_500);
+
+    expect(report.truncated).toBe(true);
+    expect(report.truncationReasons).toContain("response_size_limit");
+    expect(report.maxResponseBytes).toBe(2_500);
+    expect(report.responseBytes).toBeLessThanOrEqual(2_500);
+    expect(report.tree.children.map(child => child.id)).toEqual(["a", "b", "c"]);
+    expect(report.tree.returnedChildCount).toBe(3);
+    expect(report.omittedNodeCount).toBe(24);
+    expect(report.continuations).toEqual(expect.arrayContaining([
+      { reason: "response_size_limit", nodeId: "a", omittedNodeCount: 8 },
+      { reason: "response_size_limit", nodeId: "b", omittedNodeCount: 8 },
+      { reason: "response_size_limit", nodeId: "c", omittedNodeCount: 8 },
+    ]));
+  });
+
+  it("returns direct-child continuations when an unusually wide root cannot fit", async () => {
+    const children = Array.from({ length: 12 }, (_, index) =>
+      node(`wide-${index}`, `Direct child ${"wide ".repeat(20)}${index}`, index * 100, 100)
+    );
+    const documents = new Map<string, FigmaRawNode>([
+      ["root", node("root", "Wide page", 0, 1200, children)],
+    ]);
+    const { ctx } = makeContext(documents);
+
+    const result = await handleGetTree(ctx, { nodeId: "root", depth: 1, includeStyles: false });
+    const report = truncateTree(compactTree(result.tree), 1_400);
+
+    expect(report.responseBytes).toBeLessThanOrEqual(1_400);
+    expect(report.tree.returnedChildCount).toBeLessThan(12);
+    expect(report.tree.childCount).toBe(12);
+    expect(report.truncationReasons).toEqual(["response_size_limit"]);
+    expect(report.continuations.length).toBe(12 - report.tree.returnedChildCount);
+    expect(report.continuations.every(entry => entry.nodeId.startsWith("wide-"))).toBe(true);
   });
 });

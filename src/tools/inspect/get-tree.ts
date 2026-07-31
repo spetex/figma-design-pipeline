@@ -17,23 +17,49 @@ export interface GetTreeParams {
  * Removes tokens, componentProperties, variantProperties, and
  * collapses leaf vector/shape nodes to reduce context size.
  */
-interface CompactNode {
+export interface CompactNode {
   id: string;
   name: string;
   type: string;
   classification: string;
   depth: number;
+  /** Total direct children in the source tree. */
   childCount: number;
+  /** Direct source children represented as nodes in this response. */
+  returnedChildCount: number;
   bounds?: { x: number; y: number; width: number; height: number };
   layoutInfo?: EnrichedNode["layoutInfo"];
   textContent?: string;
   isComponent: boolean;
   isInstance: boolean;
   componentId?: string;
+  omittedNodeCount?: number;
+  continuationNodeId?: string;
   children: CompactNode[];
 }
 
-const MAX_RESPONSE_BYTES = 80_000; // ~80KB — keep well within LLM context budget
+export const DEFAULT_MAX_RESPONSE_BYTES = 80_000;
+
+export type TreeTruncationReason = "vector_compaction" | "response_size_limit";
+
+export interface TreeContinuation {
+  reason: TreeTruncationReason;
+  nodeId: string;
+  omittedNodeCount: number;
+}
+
+export interface TruncatedTree {
+  tree: CompactNode;
+  truncated: boolean;
+  omittedNodeCount: number;
+  truncationReasons: TreeTruncationReason[];
+  continuations: TreeContinuation[];
+  /** Number of source nodes actually returned; synthetic markers are excluded. */
+  nodeCount: number;
+  totalNodeCount: number;
+  responseBytes: number;
+  maxResponseBytes?: number;
+}
 
 export async function handleGetTree(
   ctx: ToolContext,
@@ -88,7 +114,7 @@ function snapshotKey(
  * Collapses leaf vector/shape nodes (VECTOR, ELLIPSE, LINE, STAR, etc.)
  * into a single summary when there are many siblings.
  */
-export function compactTree(node: EnrichedNode): CompactNode {
+export function compactTree(node: EnrichedNode, isRequestedRoot = true): CompactNode {
   // Collapse vector-heavy children (e.g., icon SVG paths)
   let children: CompactNode[];
   const vectorTypes = new Set(["VECTOR", "BOOLEAN_OPERATION", "LINE", "ELLIPSE", "STAR", "RECTANGLE"]);
@@ -98,9 +124,11 @@ export function compactTree(node: EnrichedNode): CompactNode {
     (vectorTypes.has(c.type) && c.childCount === 0 ? vectorChildren : otherChildren).push(c);
   }
 
-  if (vectorChildren.length > 3) {
+  // The requested root is an enumeration boundary: never replace its direct
+  // children with a synthetic vector summary.
+  if (!isRequestedRoot && vectorChildren.length > 3) {
     // Collapse many vector leaves into one placeholder
-    children = otherChildren.map(c => compactTree(c));
+    children = otherChildren.map(c => compactTree(c, false));
     children.push({
       id: `${node.id}:vectors`,
       name: `[${vectorChildren.length} vector shapes]`,
@@ -108,12 +136,15 @@ export function compactTree(node: EnrichedNode): CompactNode {
       classification: "unknown",
       depth: node.depth + 1,
       childCount: 0,
+      returnedChildCount: 0,
       isComponent: false,
       isInstance: false,
+      omittedNodeCount: vectorChildren.length,
+      continuationNodeId: node.id,
       children: [],
     });
   } else {
-    children = node.children.map(c => compactTree(c));
+    children = node.children.map(c => compactTree(c, false));
   }
 
   return {
@@ -123,6 +154,7 @@ export function compactTree(node: EnrichedNode): CompactNode {
     classification: node.classification,
     depth: node.depth,
     childCount: node.childCount,
+    returnedChildCount: countReturnedChildren(children),
     bounds: node.bounds,
     layoutInfo: node.layoutInfo,
     textContent: node.textContent,
@@ -137,19 +169,56 @@ export function compactTree(node: EnrichedNode): CompactNode {
  * Truncate tree to fit within byte budget.
  * Progressively removes deeper children until under limit.
  */
-export function truncateTree(node: CompactNode, maxBytes: number): { tree: CompactNode; truncated: boolean; nodeCount: number } {
+export function truncateTree(node: CompactNode, maxBytes: number): TruncatedTree {
   // pruneAtDepth builds a fresh tree from spreads — no clone needed
   let result = node;
-  let json = JSON.stringify(result);
-  let truncated = false;
+  let responseBytes = byteLength(result);
 
-  for (let maxDepth = 8; json.length > maxBytes && maxDepth >= 1; maxDepth--) {
+  for (let maxDepth = 8; responseBytes > maxBytes && maxDepth >= 1; maxDepth--) {
     result = pruneAtDepth(node, maxDepth);
-    json = JSON.stringify(result);
-    truncated = true;
+    responseBytes = byteLength(result);
   }
 
-  return { tree: result, truncated, nodeCount: countNodes(result) };
+  // A very wide root can exceed the cap even after all descendants are
+  // pruned. Only then omit direct children, retaining their IDs as explicit
+  // continuations so each omitted subtree remains retrievable.
+  const directChildContinuations: TreeContinuation[] = [];
+  if (responseBytes > maxBytes) {
+    const retainedChildren = [...result.children];
+    while (responseBytes > maxBytes && retainedChildren.length > 0) {
+      const omitted = retainedChildren.pop()!;
+      directChildContinuations.unshift({
+        reason: "response_size_limit",
+        nodeId: omitted.id,
+        omittedNodeCount: countSourceNodes(omitted),
+      });
+      result = {
+        ...result,
+        returnedChildCount: countReturnedChildren(retainedChildren),
+        children: retainedChildren,
+      };
+      responseBytes = byteLength(result);
+    }
+  }
+
+  const summary = summarizeOmissions(result);
+  const continuations = [...summary.continuations, ...directChildContinuations];
+  const omittedNodeCount = continuations.reduce((sum, entry) => sum + entry.omittedNodeCount, 0);
+  const nodeCount = countReturnedNodes(result);
+  const truncationReasons = Array.from(new Set(continuations.map(entry => entry.reason)));
+  const hitResponseLimit = truncationReasons.includes("response_size_limit");
+
+  return {
+    tree: result,
+    truncated: omittedNodeCount > 0,
+    omittedNodeCount,
+    truncationReasons,
+    continuations,
+    nodeCount,
+    totalNodeCount: nodeCount + omittedNodeCount,
+    responseBytes,
+    ...(hitResponseLimit ? { maxResponseBytes: maxBytes } : {}),
+  };
 }
 
 function pruneAtDepth(node: CompactNode, maxDepth: number, currentDepth = 0): CompactNode {
@@ -163,10 +232,14 @@ function pruneAtDepth(node: CompactNode, maxDepth: number, currentDepth = 0): Co
         classification: "unknown",
         depth: currentDepth + 1,
         childCount: 0,
+        returnedChildCount: 0,
         isComponent: false,
         isInstance: false,
+        omittedNodeCount: node.children.reduce((sum, child) => sum + countSourceNodes(child), 0),
+        continuationNodeId: node.id,
         children: [],
       }],
+      returnedChildCount: 0,
     };
   }
   return {
@@ -175,8 +248,41 @@ function pruneAtDepth(node: CompactNode, maxDepth: number, currentDepth = 0): Co
   };
 }
 
-function countNodes(node: CompactNode): number {
-  return 1 + node.children.reduce((sum, c) => sum + countNodes(c), 0);
+function countReturnedChildren(children: CompactNode[]): number {
+  return children.filter(child => child.type !== "COLLAPSED" && child.type !== "TRUNCATED").length;
+}
+
+function countReturnedNodes(node: CompactNode): number {
+  if (node.type === "COLLAPSED" || node.type === "TRUNCATED") return 0;
+  return 1 + node.children.reduce((sum, child) => sum + countReturnedNodes(child), 0);
+}
+
+function countSourceNodes(node: CompactNode): number {
+  if (node.type === "COLLAPSED" || node.type === "TRUNCATED") {
+    return node.omittedNodeCount ?? 0;
+  }
+  return 1 + node.children.reduce((sum, child) => sum + countSourceNodes(child), 0);
+}
+
+function summarizeOmissions(node: CompactNode): { continuations: TreeContinuation[] } {
+  const continuations: TreeContinuation[] = [];
+  const visit = (candidate: CompactNode): void => {
+    if (candidate.type === "COLLAPSED" || candidate.type === "TRUNCATED") {
+      continuations.push({
+        reason: candidate.type === "COLLAPSED" ? "vector_compaction" : "response_size_limit",
+        nodeId: candidate.continuationNodeId!,
+        omittedNodeCount: candidate.omittedNodeCount ?? 0,
+      });
+      return;
+    }
+    candidate.children.forEach(visit);
+  };
+  visit(node);
+  return { continuations };
+}
+
+function byteLength(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
 function enrichNode(

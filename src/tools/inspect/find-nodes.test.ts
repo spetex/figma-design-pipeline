@@ -55,3 +55,64 @@ describe("handleFindNodes freshness", () => {
     expect(getFileNodes).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("handleFindNodes completeness", () => {
+  it("does not report truncation when the match count equals the limit exactly", async () => {
+    const document: FigmaRawNode = {
+      id: "root",
+      name: "Page",
+      type: "FRAME",
+      children: [
+        { id: "one", name: "Match one", type: "FRAME" },
+        { id: "two", name: "Match two", type: "FRAME" },
+      ],
+    };
+    const getFileNodes = vi.fn(async () => ({ nodes: { root: { document } } }));
+    const ctx = {
+      rest: { defaultFileKey: "file-a", getFileNodes },
+      snapshotCache: new SnapshotCache(),
+    } as unknown as ToolContext;
+
+    const result = await handleFindNodes(ctx, {
+      nodeId: "root",
+      namePattern: "Match",
+      limit: 2,
+      depth: 4,
+    });
+
+    expect(result.matches).toHaveLength(2);
+    expect(result.truncated).toBe(false);
+    expect(result.traversalDepth).toBe(4);
+    expect(result.matchLimit).toBe(2);
+  });
+
+  it("reports truncation only after detecting an additional match", async () => {
+    const document: FigmaRawNode = {
+      id: "root",
+      name: "Page",
+      type: "FRAME",
+      children: Array.from({ length: 3 }, (_, index) => ({
+        id: `match-${index}`,
+        name: `Match ${index}`,
+        type: "FRAME",
+      })),
+    };
+    const getFileNodes = vi.fn(async () => ({ nodes: { root: { document } } }));
+    const ctx = {
+      rest: { defaultFileKey: "file-a", getFileNodes },
+      snapshotCache: new SnapshotCache(),
+    } as unknown as ToolContext;
+
+    const result = await handleFindNodes(ctx, {
+      nodeId: "root",
+      namePattern: "Match",
+      limit: 2,
+      depth: 2,
+    });
+
+    expect(result.matches).toHaveLength(2);
+    expect(result.truncated).toBe(true);
+    expect(result.traversalDepth).toBe(2);
+    expect(result.matchLimit).toBe(2);
+  });
+});
