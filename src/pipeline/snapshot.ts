@@ -1,60 +1,85 @@
 import type { EnrichedNode } from "../shared/types.js";
 
 interface CachedSnapshot {
-  nodeId: string;
   tree: EnrichedNode;
   version: number;
   fetchedAt: number;
-  ttlMs: number;
   lastAccessed: number;
 }
 
-const DEFAULT_TTL = 15 * 60 * 1000; // 15 minutes — designs rarely change mid-session
+export const DEFAULT_SNAPSHOT_MAX_AGE_MS = 15 * 60 * 1000;
 const MAX_ENTRIES = 30; // LRU eviction threshold
+
+export interface SnapshotProvenance {
+  snapshotAt: string;
+  cacheAgeMs: number;
+}
+
+export interface CachedSnapshotHit extends SnapshotProvenance {
+  tree: EnrichedNode;
+}
+
+export interface SnapshotCacheOptions {
+  now?: () => number;
+}
 
 export class SnapshotCache {
   private cache = new Map<string, CachedSnapshot>();
   private currentVersion = 0;
+  private readonly now: () => number;
+
+  constructor({ now = Date.now }: SnapshotCacheOptions = {}) {
+    this.now = now;
+  }
 
   get version(): number {
     return this.currentVersion;
   }
 
-  set(nodeId: string, tree: EnrichedNode, ttlMs = DEFAULT_TTL): void {
+  set(key: string, tree: EnrichedNode): SnapshotProvenance {
     // LRU eviction — remove oldest-accessed entry if at capacity
-    if (this.cache.size >= MAX_ENTRIES && !this.cache.has(nodeId)) {
+    if (this.cache.size >= MAX_ENTRIES && !this.cache.has(key)) {
       let oldestKey: string | null = null;
       let oldestTime = Infinity;
-      for (const [key, entry] of this.cache) {
+      for (const [candidateKey, entry] of this.cache) {
         if (entry.lastAccessed < oldestTime) {
           oldestTime = entry.lastAccessed;
-          oldestKey = key;
+          oldestKey = candidateKey;
         }
       }
       if (oldestKey) this.cache.delete(oldestKey);
     }
 
-    const now = Date.now();
-    this.cache.set(nodeId, {
-      nodeId,
+    const fetchedAt = this.now();
+    this.cache.set(key, {
       tree,
       version: this.currentVersion,
-      fetchedAt: now,
-      ttlMs,
-      lastAccessed: now,
+      fetchedAt,
+      lastAccessed: fetchedAt,
     });
+    return { snapshotAt: new Date(fetchedAt).toISOString(), cacheAgeMs: 0 };
   }
 
-  get(nodeId: string): EnrichedNode | null {
-    const entry = this.cache.get(nodeId);
+  /**
+   * Reuse a snapshot only when it is at most maxAgeMs old. Entries that are too
+   * old for one caller stay available to callers that explicitly accept an
+   * older snapshot.
+   */
+  get(key: string, maxAgeMs = DEFAULT_SNAPSHOT_MAX_AGE_MS): CachedSnapshotHit | null {
+    const entry = this.cache.get(key);
     if (!entry) return null;
-    if (this.isStale(entry)) {
-      this.cache.delete(nodeId);
+    const cacheAgeMs = Math.max(0, this.now() - entry.fetchedAt);
+    if (this.isStale(entry, cacheAgeMs, maxAgeMs)) {
+      if (entry.version < this.currentVersion) this.cache.delete(key);
       return null;
     }
     // Update access time for LRU
-    entry.lastAccessed = Date.now();
-    return entry.tree;
+    entry.lastAccessed = this.now();
+    return {
+      tree: entry.tree,
+      snapshotAt: new Date(entry.fetchedAt).toISOString(),
+      cacheAgeMs,
+    };
   }
 
   /** Invalidate all cached snapshots (call after mutations) */
@@ -63,16 +88,16 @@ export class SnapshotCache {
     this.cache.clear();
   }
 
-  /** Invalidate a specific node's cache */
-  invalidate(nodeId: string): void {
-    this.cache.delete(nodeId);
+  /** Invalidate a specific cache entry. */
+  invalidate(key: string): void {
+    this.cache.delete(key);
   }
 
-  private isStale(entry: CachedSnapshot): boolean {
+  private isStale(entry: CachedSnapshot, cacheAgeMs: number, maxAgeMs: number): boolean {
     // Stale if version has advanced (mutations happened)
     if (entry.version < this.currentVersion) return true;
-    // Stale if TTL expired
-    if (Date.now() - entry.fetchedAt > entry.ttlMs) return true;
+    // Callers control the acceptable age; zero is a cache bypass.
+    if (cacheAgeMs > maxAgeMs || maxAgeMs === 0) return true;
     return false;
   }
 }

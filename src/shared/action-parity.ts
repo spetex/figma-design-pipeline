@@ -61,6 +61,15 @@ export const ACTION_OPERATIONS = {
 
 export const ACTION_TYPES = Object.keys(ACTION_OPERATIONS) as ActionType[];
 
+/** Nodes protected from destructive actions in every execution path. */
+export const FORBIDDEN_DELETE_NODE_TYPES = ["PAGE", "DOCUMENT"] as const;
+
+export function isForbiddenDeleteNodeType(type: unknown): boolean {
+  return FORBIDDEN_DELETE_NODE_TYPES.includes(
+    type as typeof FORBIDDEN_DELETE_NODE_TYPES[number]
+  );
+}
+
 export function isKnownActionType(type: string): type is ActionType {
   return Object.prototype.hasOwnProperty.call(ACTION_OPERATIONS, type);
 }

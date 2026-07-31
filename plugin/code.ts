@@ -1,6 +1,6 @@
 /// <reference types="@figma/plugin-typings" />
 
-import { assertActionInputCoverage, isKnownActionType } from "../src/shared/action-parity";
+import { assertActionInputCoverage, isForbiddenDeleteNodeType, isKnownActionType } from "../src/shared/action-parity";
 
 // ─── SPFR Design Pipeline Plugin v2 ──────────────────────────────
 // High-performance batch executor with font caching, symbolic refs,
@@ -226,7 +226,7 @@ async function executeAction(
 
     case "delete_node": {
       const node = await findSceneNode(action.nodeId as string);
-      if (node.type === "PAGE" || node.type === "DOCUMENT") throw new Error(`Cannot delete ${node.type} node`);
+      if (isForbiddenDeleteNodeType(node.type)) throw new Error(`Cannot delete ${node.type} node`);
       const before = captureSnapshot(node);
       node.remove();
       markDocumentWrite();
@@ -1040,6 +1040,21 @@ figma.on("selectionchange", () => {
 
 figma.on("currentpagechange", () => {
   pushUiContext();
+});
+
+// Coalesce Figma's sometimes-bursty documentchange events before sending a
+// bridge notification. The bridge invalidates all REST inspection snapshots,
+// including those affected by edits made outside figma_execute.
+let documentChangeTimer: ReturnType<typeof setTimeout> | null = null;
+figma.on("documentchange", () => {
+  if (documentChangeTimer) return;
+  documentChangeTimer = setTimeout(() => {
+    documentChangeTimer = null;
+    figma.ui.postMessage({
+      type: "send_to_bridge",
+      data: { type: "document_changed" },
+    });
+  }, 100);
 });
 
 pushUiContext();

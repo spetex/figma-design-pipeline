@@ -11,6 +11,7 @@ export const figmaNodeTypeSchema = z.enum([
   "COMPONENT",
   "COMPONENT_SET",
   "INSTANCE",
+  "SLOT",
   "VECTOR",
   "BOOLEAN_OPERATION",
   "STAR",
@@ -68,6 +69,11 @@ export interface FigmaAbsoluteBoundingBox {
   height: number;
 }
 
+export type FigmaTransform = [
+  [number, number, number],
+  [number, number, number],
+];
+
 export interface FigmaRawNode {
   id: string;
   name: string;
@@ -76,13 +82,14 @@ export interface FigmaRawNode {
   children?: FigmaRawNode[];
   absoluteBoundingBox?: FigmaAbsoluteBoundingBox;
   absoluteRenderBounds?: FigmaAbsoluteBoundingBox;
+  absoluteTransform?: FigmaTransform;
   constraints?: FigmaLayoutConstraints;
   fills?: FigmaPaint[];
   strokes?: FigmaPaint[];
   strokeWeight?: number;
   cornerRadius?: number;
   rectangleCornerRadii?: [number, number, number, number];
-  layoutMode?: "HORIZONTAL" | "VERTICAL" | "NONE";
+  layoutMode?: "HORIZONTAL" | "VERTICAL" | "GRID" | "NONE";
   primaryAxisSizingMode?: string;
   counterAxisSizingMode?: string;
   itemSpacing?: number;
@@ -152,9 +159,10 @@ export interface EnrichedNode {
   depth: number;
   childCount: number;
   bounds?: FigmaAbsoluteBoundingBox;
+  absoluteTransform?: FigmaTransform;
   tokens: DesignToken[];
   layoutInfo?: {
-    mode: "horizontal" | "vertical" | "absolute" | "none";
+    mode: "horizontal" | "vertical" | "grid" | "absolute" | "none";
     spacing?: number;
     padding?: { top: number; right: number; bottom: number; left: number };
   };
@@ -265,6 +273,8 @@ export const getTreeInputSchema = z.object({
   nodeId: z.string().optional().describe("Figma node ID (e.g., '1817:2817'). Auto-extracted from figmaUrl if provided."),
   depth: z.number().int().min(1).max(20).default(10).describe("Max depth to traverse"),
   includeStyles: z.boolean().default(true).describe("Include style/token information"),
+  refresh: z.boolean().default(false).describe("Bypass the inspection snapshot and make a new Figma REST request. This does not guarantee Figma REST has observed a just-made plugin edit."),
+  maxAgeMs: z.number().int().min(0).optional().describe("Maximum acceptable inspection snapshot age in milliseconds. Set to 0 to bypass the snapshot, like refresh: true."),
 });
 
 export const auditInputSchema = z.object({
@@ -381,6 +391,9 @@ export const findNodesInputSchema = z.object({
   minHeight: z.number().optional().describe("Minimum node height in pixels"),
   maxHeight: z.number().optional().describe("Maximum node height in pixels"),
   limit: z.number().int().min(1).max(200).default(50).describe("Max results to return"),
+  depth: z.number().int().min(1).max(20).default(10).describe("Max tree depth to search"),
+  refresh: z.boolean().default(false).describe("Bypass the inspection snapshot and make a new Figma REST request. This does not guarantee Figma REST has observed a just-made plugin edit."),
+  maxAgeMs: z.number().int().min(0).optional().describe("Maximum acceptable inspection snapshot age in milliseconds. Set to 0 to bypass the snapshot, like refresh: true."),
 });
 
 export const getComponentsInputSchema = z.object({

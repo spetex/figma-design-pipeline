@@ -52,6 +52,28 @@ These all hit the Figma REST API. They need `FIGMA_ACCESS_TOKEN` set in your MCP
 | `figma_diff_tokens` | Compare Figma styles vs your code tokens. | Sync workflow. Accepts style data directly — no REST call. |
 | `figma_export_images` | Render nodes to PNG/JPG/SVG via REST. | Snapshots, before/after, docs. |
 
+### Inspection freshness and cache provenance
+
+`figma_get_tree` and `figma_find_nodes` cache REST inspection snapshots by
+Figma file, root node ID, requested depth, and whether styles are included.
+Every response reports `fromCache`, `snapshotAt` (ISO timestamp), and
+`cacheAgeMs`, so callers can tell whether they received a reused snapshot and
+how old it is.
+
+- `refresh: true` always bypasses the inspection cache and makes a new Figma
+  REST API request.
+- `maxAgeMs` permits reuse only when a snapshot is no older than that many
+  milliseconds. `maxAgeMs: 0` is equivalent to `refresh: true`.
+- Without either option, snapshots can be reused for up to 15 minutes.
+
+These inspection tools use the Figma REST API, not the plugin bridge. A refresh
+guarantees a new REST request, but cannot guarantee that Figma REST has already
+observed a just-made plugin or editor mutation. Connected `figma_execute`
+batches that apply changes, and plugin `documentchange` notifications, clear
+the local inspection cache conservatively. If the plugin is disconnected while
+someone else edits the file, request `refresh: true` or `maxAgeMs: 0` when the
+latest REST view matters.
+
 ### Pattern: explore a file
 
 ```

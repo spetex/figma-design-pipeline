@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeServer } from "../../plugin/bridge.js";
 import { compileBatch, CREATE_TYPES } from "../../plugin/batch-compiler.js";
+import { SnapshotCache } from "../../pipeline/snapshot.js";
 import { ACTION_TYPES, assertActionInputCoverage, assertActionSchemaCoverage } from "../../shared/action-parity.js";
-import { handleExecute } from "./execute.js";
+import type { EnrichedNode } from "../../shared/types.js";
+import { handleExecute, invalidateSnapshotsAfterExecute } from "./execute.js";
 import { actionSchema } from "../../shared/actions.js";
 
 describe("actionSchema (zod v4)", () => {
@@ -176,6 +178,23 @@ describe("handleExecute fallback generation", () => {
     expect(node.name).toBe("Before");
   });
 
+  it("rejects delete_node for a page before calling remove", async () => {
+    const remove = vi.fn();
+    const fallback = await handleExecute(null, {
+      actions: [{ type: "delete_node", nodeId: "page", confirmed: true }],
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: { getNodeById: () => { id: string; type: string; remove: typeof remove } }) => Promise<Array<Record<string, unknown>>>;
+
+    const result = await new AsyncFunction("figma", fallback.fallbackJs!)({
+      getNodeById: () => ({ id: "page", type: "PAGE", remove }),
+    });
+
+    expect(result).toEqual([expect.objectContaining({ actionIndex: 0, status: "failed" })]);
+    expect(remove).not.toHaveBeenCalled();
+  });
+
   it("does not create a detached node when a fallback create dependency is invalid", async () => {
     const createFrame = vi.fn();
     const fallback = await handleExecute(null, {
@@ -339,6 +358,64 @@ describe("handleExecute fallback generation", () => {
       { type: "rollback", status: "applied" },
     ]));
     expect(triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a planned grouping wrapper absolute in plugin and fallback execution paths", async () => {
+    const actions = [
+      {
+        type: "create_frame" as const,
+        name: "Grid/Cards",
+        parentId: "parent",
+        x: 20,
+        y: 30,
+        width: 320,
+        height: 60,
+      },
+      {
+        type: "set_layout_positioning" as const,
+        nodeId: "$ref:node-0",
+        positioning: "ABSOLUTE" as const,
+      },
+      {
+        type: "set_position" as const,
+        nodeId: "$ref:node-0",
+        x: 20,
+        y: 30,
+      },
+    ];
+    const execute = vi.fn().mockResolvedValue({
+      batchId: "test",
+      dryRun: false,
+      success: true,
+      results: [],
+      nodeIdMap: {},
+      summary: { total: actions.length, applied: actions.length, failed: 0, skipped: 0 },
+    });
+    const bridge = {
+      isConnected: () => true,
+      execute,
+    } as unknown as BridgeServer;
+
+    await handleExecute(bridge, { actions });
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actions: [
+          expect.objectContaining({ type: "create_frame", _ref: "$ref:node-0" }),
+          { type: "set_layout_positioning", nodeId: "$ref:node-0", positioning: "ABSOLUTE" },
+          { type: "set_position", nodeId: "$ref:node-0", x: 20, y: 30 },
+        ],
+      }),
+      undefined
+    );
+
+    const fallback = await handleExecute(null, { actions });
+    const positioning = 'getNode("$ref:node-0").layoutPositioning = "ABSOLUTE"; markDocumentWrite();';
+    const position = 'const n = getNode("$ref:node-0"); if (n.x !== 20) { n.x = 20; markDocumentWrite(); }';
+    expect(fallback.fallbackJs).toContain(positioning);
+    expect(fallback.fallbackJs).toContain(position);
+    expect(fallback.fallbackJs!.indexOf(positioning)).toBeLessThan(
+      fallback.fallbackJs!.indexOf(position)
+    );
   });
 
   it("resolves batch references in fallback JS when the plugin bridge is disconnected", async () => {
@@ -547,5 +624,52 @@ describe("handleExecute fallback generation", () => {
     expect(result.fallbackJs).toContain(
       'recordCreatedNode("$ref:node-0", { type: "create_text", nodeId: t.id });'
     );
+  });
+});
+
+describe("inspection cache invalidation after execution", () => {
+  it("clears inspection snapshots after a connected non-dry-run batch applies a mutation", () => {
+    const snapshotCache = new SnapshotCache();
+    snapshotCache.set("file/root", {} as EnrichedNode);
+
+    const cacheInvalidated = invalidateSnapshotsAfterExecute(snapshotCache, {
+      pluginConnected: true,
+      result: {
+        batchId: "batch-1",
+        dryRun: false,
+        success: true,
+        results: [],
+        nodeIdMap: {},
+        summary: { total: 1, applied: 1, failed: 0, skipped: 0 },
+      },
+    });
+
+    expect(cacheInvalidated).toBe(true);
+    expect(snapshotCache.get("file/root", Number.POSITIVE_INFINITY)).toBeNull();
+  });
+
+  it("does not invalidate for fallback, dry-run, or batches with no applied actions", () => {
+    const makeExecution = (pluginConnected: boolean, dryRun: boolean, applied: number) => ({
+      pluginConnected,
+      result: {
+        batchId: "batch-1",
+        dryRun,
+        success: true,
+        results: [],
+        nodeIdMap: {},
+        summary: { total: 1, applied, failed: 0, skipped: 0 },
+      },
+    });
+
+    for (const execution of [
+      makeExecution(false, false, 1),
+      makeExecution(true, true, 1),
+      makeExecution(true, false, 0),
+    ]) {
+      const snapshotCache = new SnapshotCache();
+      snapshotCache.set("file/root", {} as EnrichedNode);
+      expect(invalidateSnapshotsAfterExecute(snapshotCache, execution)).toBe(false);
+      expect(snapshotCache.get("file/root", Number.POSITIVE_INFINITY)).not.toBeNull();
+    }
   });
 });

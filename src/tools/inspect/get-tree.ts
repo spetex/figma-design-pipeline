@@ -1,12 +1,15 @@
 import type { ToolContext } from "../../shared/context.js";
 import type { EnrichedNode, FigmaRawNode } from "../../shared/types.js";
+import type { SnapshotProvenance } from "../../pipeline/snapshot.js";
 import { classifyNode } from "../../analysis/node-classifier.js";
 import { extractNodeTokens } from "../../analysis/token-extractor.js";
 
-interface GetTreeParams {
+export interface GetTreeParams {
   nodeId: string;
   depth?: number;
   includeStyles?: boolean;
+  refresh?: boolean;
+  maxAgeMs?: number;
 }
 
 /**
@@ -35,13 +38,16 @@ const MAX_RESPONSE_BYTES = 80_000; // ~80KB — keep well within LLM context bud
 export async function handleGetTree(
   ctx: ToolContext,
   params: GetTreeParams
-): Promise<{ nodeId: string; tree: EnrichedNode; fromCache: boolean }> {
-  const { nodeId, depth = 10, includeStyles = true } = params;
+): Promise<{ nodeId: string; tree: EnrichedNode; fromCache: boolean } & SnapshotProvenance> {
+  const { nodeId, depth = 10, includeStyles = true, refresh = false, maxAgeMs } = params;
+  const cacheKey = snapshotKey(ctx, { nodeId, depth, includeStyles });
 
-  // Check cache first
-  const cached = ctx.snapshotCache.get(nodeId);
+  // refresh and maxAgeMs: 0 are explicit cache bypasses.
+  const cached = !refresh && maxAgeMs !== 0
+    ? ctx.snapshotCache.get(cacheKey, maxAgeMs)
+    : null;
   if (cached) {
-    return { nodeId, tree: cached, fromCache: true };
+    return { nodeId, fromCache: true, ...cached };
   }
 
   // Fetch from REST API
@@ -58,9 +64,22 @@ export async function handleGetTree(
   const enriched = enrichNode(rawRoot, 0, includeStyles);
 
   // Cache the result
-  ctx.snapshotCache.set(nodeId, enriched);
+  const provenance = ctx.snapshotCache.set(cacheKey, enriched);
 
-  return { nodeId, tree: enriched, fromCache: false };
+  return { nodeId, tree: enriched, fromCache: false, ...provenance };
+}
+
+/** A tree snapshot changes with the file, root, REST depth, and enrichment mode. */
+function snapshotKey(
+  ctx: ToolContext,
+  params: Required<Pick<GetTreeParams, "nodeId" | "depth" | "includeStyles">>
+): string {
+  return JSON.stringify({
+    fileKey: ctx.rest.defaultFileKey ?? null,
+    nodeId: params.nodeId,
+    depth: params.depth,
+    includeStyles: params.includeStyles,
+  });
 }
 
 /**
@@ -191,6 +210,7 @@ function enrichNode(
     depth,
     childCount: children.length,
     bounds,
+    absoluteTransform: raw.absoluteTransform,
     tokens,
     layoutInfo: raw.layoutMode
       ? {
@@ -199,6 +219,8 @@ function enrichNode(
               ? "horizontal"
               : raw.layoutMode === "VERTICAL"
                 ? "vertical"
+                : raw.layoutMode === "GRID"
+                  ? "grid"
                 : "none",
           spacing: raw.itemSpacing,
           padding:

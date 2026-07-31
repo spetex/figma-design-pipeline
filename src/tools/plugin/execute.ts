@@ -1,7 +1,8 @@
 import type { BridgeServer, BatchResult } from "../../plugin/bridge.js";
+import type { SnapshotCache } from "../../pipeline/snapshot.js";
 import { compileBatch } from "../../plugin/batch-compiler.js";
 import { actionSchema, type Action } from "../../shared/actions.js";
-import { assertActionInputCoverage, isKnownActionType } from "../../shared/action-parity.js";
+import { assertActionInputCoverage, FORBIDDEN_DELETE_NODE_TYPES, isKnownActionType } from "../../shared/action-parity.js";
 import { weightToFontStyle } from "../../shared/font.js";
 
 interface ExecuteParams {
@@ -23,6 +24,23 @@ export interface FallbackLimitation {
   option: "rollbackOnError";
   condition: "figma.triggerUndo_unavailable";
   message: string;
+}
+
+/**
+ * Connected writes can alter any cached ancestor or descendant, so invalidate
+ * the whole inspection cache after a completed non-dry-run batch that applied
+ * at least one action. Returns whether invalidation was performed.
+ */
+export function invalidateSnapshotsAfterExecute(
+  snapshotCache: SnapshotCache,
+  execution: ExecuteResult
+): boolean {
+  const batch = execution.result;
+  if (!execution.pluginConnected || !batch || batch.dryRun || batch.summary.applied === 0) {
+    return false;
+  }
+  snapshotCache.invalidateAll();
+  return true;
 }
 
 export async function handleExecute(
@@ -141,6 +159,7 @@ function generateFallbackJs(
   lines.push("  if (typeof node.appendChild !== \"function\") throw new Error(`Node ${resolveRefId(id)} is not a container`);");
   lines.push("  return node;");
   lines.push("};");
+  lines.push(`const cannotDeleteNode = (node) => !node || ${j(FORBIDDEN_DELETE_NODE_TYPES)}.includes(node.type);`);
   lines.push("const sanitizePaints = (paints) => (paints || []).map((paint) => {");
   lines.push("  if (!paint || typeof paint !== \"object\" || !paint.color || typeof paint.color !== \"object\") return paint;");
   lines.push("  if (!(\"a\" in paint.color)) return paint;");
@@ -202,7 +221,7 @@ function generateFallbackJs(
         break;
       }
       case "delete_node":
-        lines.push(`{ ${g(nid)}.remove(); markDocumentWrite(); ${r("delete_node")} }`);
+        lines.push(`{ const n = ${g(nid)}; if (cannotDeleteNode(n)) throw new Error("Cannot delete page or document nodes"); n.remove(); markDocumentWrite(); ${r("delete_node")} }`);
         break;
       case "resize":
         lines.push(`{ const n = ${g(nid)}; n.resize(${a.width ?? "n.width"}, ${a.height ?? "n.height"}); markDocumentWrite(); ${r("resize")} }`);
