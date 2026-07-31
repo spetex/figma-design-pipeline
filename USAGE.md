@@ -140,6 +140,8 @@ Plans are reviewable: the agent inspects, edits, or filters before sending to `f
 
 `figma_execute` batches up to 500 validated actions into a single round-trip. With the plugin connected, the bridge runs them in-process; without it, you get fallback JS for `use_figma`.
 
+Fallback JavaScript preserves `dryRun`, `stopOnError`, and `rollbackOnError` semantics. Rollback requires the host runtime to expose `figma.triggerUndo`; when `rollbackOnError: true`, the tool returns a structured `fallbackLimitations` entry and the program fails closed before executing any action if that API is unavailable.
+
 43 action types are available. Highlights:
 
 - **Nodes**: `create_frame`, `create_text`, `create_component`, `create_instance`, `clone_node`, `delete_node`
