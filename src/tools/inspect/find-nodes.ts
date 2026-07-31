@@ -39,6 +39,8 @@ interface FindNodesResult extends SnapshotProvenance {
   matches: FoundNode[];
   totalScanned: number;
   truncated: boolean;
+  traversalDepth: number;
+  matchLimit: number;
   fromCache: boolean;
 }
 
@@ -63,14 +65,13 @@ export async function handleFindNodes(
 
   const matches: FoundNode[] = [];
   let totalScanned = 0;
+  let hasAdditionalMatch = false;
 
   const nameRegex = params.namePattern ? new RegExp(params.namePattern, "i") : null;
   const textRegex = params.textContent ? new RegExp(params.textContent, "i") : null;
 
   walkTree(tree, (node) => {
     totalScanned++;
-
-    if (matches.length >= limit) return false; // early exit
 
     // Apply filters — all must match
     if (nameRegex && !nameRegex.test(node.name)) return true;
@@ -86,6 +87,11 @@ export async function handleFindNodes(
     if (params.maxWidth !== undefined && (!node.bounds || node.bounds.width > params.maxWidth)) return true;
     if (params.minHeight !== undefined && (!node.bounds || node.bounds.height < params.minHeight)) return true;
     if (params.maxHeight !== undefined && (!node.bounds || node.bounds.height > params.maxHeight)) return true;
+
+    if (matches.length >= limit) {
+      hasAdditionalMatch = true;
+      return false;
+    }
 
     matches.push({
       id: node.id,
@@ -106,7 +112,9 @@ export async function handleFindNodes(
   return {
     matches,
     totalScanned,
-    truncated: matches.length >= limit,
+    truncated: hasAdditionalMatch,
+    traversalDepth: depth,
+    matchLimit: limit,
     fromCache,
     snapshotAt,
     cacheAgeMs,
