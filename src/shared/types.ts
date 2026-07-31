@@ -271,7 +271,8 @@ const figmaUrlField = z
 export const getTreeInputSchema = z.object({
   figmaUrl: figmaUrlField,
   nodeId: z.string().optional().describe("Figma node ID (e.g., '1817:2817'). Auto-extracted from figmaUrl if provided."),
-  depth: z.number().int().min(1).max(20).default(10).describe("Max depth to traverse"),
+  depth: z.number().int().min(1).max(20).default(10).describe("Maximum REST traversal depth relative to the requested root (root is depth 0)"),
+  childOffset: z.number().int().min(0).default(0).describe("Direct-child offset from a prior response's directChildren.nextOffset continuation"),
   includeStyles: z.boolean().default(true).describe("Include style/token information"),
   refresh: z.boolean().default(false).describe("Bypass the inspection snapshot and make a new Figma REST request. This does not guarantee Figma REST has observed a just-made plugin edit."),
   maxAgeMs: z.number().int().min(0).optional().describe("Maximum acceptable inspection snapshot age in milliseconds. Set to 0 to bypass the snapshot, like refresh: true."),
@@ -390,8 +391,8 @@ export const findNodesInputSchema = z.object({
   maxWidth: z.number().optional().describe("Maximum node width in pixels"),
   minHeight: z.number().optional().describe("Minimum node height in pixels"),
   maxHeight: z.number().optional().describe("Maximum node height in pixels"),
-  limit: z.number().int().min(1).max(200).default(50).describe("Max results to return"),
-  depth: z.number().int().min(1).max(20).default(10).describe("Max tree depth to search"),
+  limit: z.number().int().min(1).max(200).default(50).describe("Maximum matches to return; the response reports matchLimit and sets truncated only when an additional match exists"),
+  depth: z.number().int().min(1).max(20).default(10).describe("Maximum REST traversal depth relative to the searched root (root is depth 0); echoed as traversalDepth"),
   refresh: z.boolean().default(false).describe("Bypass the inspection snapshot and make a new Figma REST request. This does not guarantee Figma REST has observed a just-made plugin edit."),
   maxAgeMs: z.number().int().min(0).optional().describe("Maximum acceptable inspection snapshot age in milliseconds. Set to 0 to bypass the snapshot, like refresh: true."),
 });
