@@ -139,14 +139,14 @@ If you skip the installer and want to wire the server up yourself, point your CL
   "mcpServers": {
     "figma-design-pipeline": {
       "command": "node",
-      "args": ["/absolute/path/to/dist/index.js"],
-      "env": {
-        "FIGMA_ACCESS_TOKEN": "$FIGMA_ACCESS_TOKEN"
-      }
+      "args": ["/absolute/path/to/dist/index.js"]
     }
   }
 }
 ```
+
+Claude inherits its parent environment for stdio MCP servers, so start Claude Code
+from a shell where any optional variables are exported.
 
 ### Gemini CLI
 
@@ -159,7 +159,10 @@ If you skip the installer and want to wire the server up yourself, point your CL
       "command": "node",
       "args": ["/absolute/path/to/dist/index.js"],
       "env": {
-        "FIGMA_ACCESS_TOKEN": "$FIGMA_ACCESS_TOKEN"
+        "FIGMA_ACCESS_TOKEN": "$FIGMA_ACCESS_TOKEN",
+        "FIGMA_FILE_KEY": "$FIGMA_FILE_KEY",
+        "FIGMA_PLUGIN_PORT": "$FIGMA_PLUGIN_PORT",
+        "COMPONENT_REGISTRY_DIR": "$COMPONENT_REGISTRY_DIR"
       }
     }
   }
@@ -174,7 +177,7 @@ If you skip the installer and want to wire the server up yourself, point your CL
 [mcp_servers."figma-design-pipeline"]
 command = "node"
 args = ["/absolute/path/to/dist/index.js"]
-env = { FIGMA_ACCESS_TOKEN = "$FIGMA_ACCESS_TOKEN" }
+env_vars = ["FIGMA_ACCESS_TOKEN", "FIGMA_FILE_KEY", "FIGMA_PLUGIN_PORT", "COMPONENT_REGISTRY_DIR"]
 startup_timeout_ms = 30000
 ```
 

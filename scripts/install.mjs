@@ -24,6 +24,12 @@ const geminiSkillDir = resolve(os.homedir(), ".gemini", "skills", "figma-design-
 const claudeSkillDir = resolve(os.homedir(), ".claude", "skills", "figma-design-pipeline");
 const pluginSourceDir = resolve(packageDir, "plugin", "dist");
 const pluginInstallDir = resolve(installRootDir, "plugin");
+const forwardedEnvVars = [
+  "FIGMA_ACCESS_TOKEN",
+  "FIGMA_FILE_KEY",
+  "FIGMA_PLUGIN_PORT",
+  "COMPONENT_REGISTRY_DIR",
+];
 
 const args = process.argv.slice(2);
 const options = {
@@ -246,7 +252,7 @@ function linkSkill(source, target) {
 }
 
 function installClaudeCodeMcp() {
-  const serverJson = JSON.stringify(buildStdioServerConfig(), null, 2);
+  const serverJson = JSON.stringify(buildClaudeStdioServerConfig(), null, 2);
   if (hasCommand("claude")) {
     try {
       try {
@@ -274,20 +280,12 @@ function installClaudeCodeMcp() {
 }
 
 function installGeminiMcp() {
-  const config = buildStdioServerConfig();
+  const config = buildGeminiStdioServerConfig();
   const settingsPath = resolve(os.homedir(), ".gemini", "settings.json");
   ensureDir(dirname(settingsPath));
   const current = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, "utf8")) : {};
   current.mcpServers ??= {};
-  current.mcpServers["figma-design-pipeline"] = {
-    command: "node",
-    args: config.args,
-    env: {
-      FIGMA_ACCESS_TOKEN: "$FIGMA_ACCESS_TOKEN",
-      FIGMA_FILE_KEY: "$FIGMA_FILE_KEY",
-      COMPONENT_REGISTRY_DIR: "$COMPONENT_REGISTRY_DIR",
-    },
-  };
+  current.mcpServers["figma-design-pipeline"] = config;
   writeFileSync(settingsPath, `${JSON.stringify(current, null, 2)}\n`);
 }
 
@@ -297,7 +295,7 @@ function installCodexMcp() {
     '[mcp_servers."figma-design-pipeline"]',
     'command = "node"',
     `args = [${JSON.stringify(installedServerBundlePath)}]`,
-    'env = { FIGMA_ACCESS_TOKEN = "$FIGMA_ACCESS_TOKEN", FIGMA_FILE_KEY = "$FIGMA_FILE_KEY", COMPONENT_REGISTRY_DIR = "$COMPONENT_REGISTRY_DIR" }',
+    `env_vars = ${JSON.stringify(forwardedEnvVars)}`,
     "startup_timeout_ms = 30000",
     "# END figma-design-pipeline",
     "",
@@ -323,14 +321,19 @@ function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function buildStdioServerConfig() {
+function buildClaudeStdioServerConfig() {
+  return {
+    command: "node",
+    args: [installedServerBundlePath],
+  };
+}
+
+function buildGeminiStdioServerConfig() {
   return {
     command: "node",
     args: [installedServerBundlePath],
     env: {
-      FIGMA_ACCESS_TOKEN: "$FIGMA_ACCESS_TOKEN",
-      FIGMA_FILE_KEY: "$FIGMA_FILE_KEY",
-      COMPONENT_REGISTRY_DIR: "$COMPONENT_REGISTRY_DIR",
+      ...Object.fromEntries(forwardedEnvVars.map((name) => [name, `$${name}`])),
     },
   };
 }
