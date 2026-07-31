@@ -1,6 +1,7 @@
 import type { ToolContext } from "../../shared/context.js";
 import type { EnrichedNode, NodeClassification } from "../../shared/types.js";
 import { handleGetTree } from "./get-tree.js";
+import type { SnapshotProvenance } from "../../pipeline/snapshot.js";
 
 interface FindNodesParams {
   nodeId: string;
@@ -15,6 +16,9 @@ interface FindNodesParams {
   minHeight?: number;
   maxHeight?: number;
   limit?: number;
+  depth?: number;
+  refresh?: boolean;
+  maxAgeMs?: number;
 }
 
 interface FoundNode {
@@ -31,10 +35,11 @@ interface FoundNode {
   isInstance: boolean;
 }
 
-interface FindNodesResult {
+interface FindNodesResult extends SnapshotProvenance {
   matches: FoundNode[];
   totalScanned: number;
   truncated: boolean;
+  fromCache: boolean;
 }
 
 /**
@@ -45,10 +50,16 @@ export async function handleFindNodes(
   ctx: ToolContext,
   params: FindNodesParams
 ): Promise<FindNodesResult> {
-  const { nodeId, limit = 50 } = params;
+  const { nodeId, limit = 50, depth = 10, refresh = false, maxAgeMs } = params;
 
   // Get enriched tree (uses cache if available)
-  const { tree } = await handleGetTree(ctx, { nodeId, includeStyles: false });
+  const { tree, fromCache, snapshotAt, cacheAgeMs } = await handleGetTree(ctx, {
+    nodeId,
+    depth,
+    includeStyles: false,
+    refresh,
+    maxAgeMs,
+  });
 
   const matches: FoundNode[] = [];
   let totalScanned = 0;
@@ -96,6 +107,9 @@ export async function handleFindNodes(
     matches,
     totalScanned,
     truncated: matches.length >= limit,
+    fromCache,
+    snapshotAt,
+    cacheAgeMs,
   };
 }
 

@@ -265,6 +265,8 @@ export const getTreeInputSchema = z.object({
   nodeId: z.string().optional().describe("Figma node ID (e.g., '1817:2817'). Auto-extracted from figmaUrl if provided."),
   depth: z.number().int().min(1).max(20).default(10).describe("Max depth to traverse"),
   includeStyles: z.boolean().default(true).describe("Include style/token information"),
+  refresh: z.boolean().default(false).describe("Bypass the inspection snapshot and make a new Figma REST request. This does not guarantee Figma REST has observed a just-made plugin edit."),
+  maxAgeMs: z.number().int().min(0).optional().describe("Maximum acceptable inspection snapshot age in milliseconds. Set to 0 to bypass the snapshot, like refresh: true."),
 });
 
 export const auditInputSchema = z.object({
@@ -381,6 +383,9 @@ export const findNodesInputSchema = z.object({
   minHeight: z.number().optional().describe("Minimum node height in pixels"),
   maxHeight: z.number().optional().describe("Maximum node height in pixels"),
   limit: z.number().int().min(1).max(200).default(50).describe("Max results to return"),
+  depth: z.number().int().min(1).max(20).default(10).describe("Max tree depth to search"),
+  refresh: z.boolean().default(false).describe("Bypass the inspection snapshot and make a new Figma REST request. This does not guarantee Figma REST has observed a just-made plugin edit."),
+  maxAgeMs: z.number().int().min(0).optional().describe("Maximum acceptable inspection snapshot age in milliseconds. Set to 0 to bypass the snapshot, like refresh: true."),
 });
 
 export const getComponentsInputSchema = z.object({

@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeServer } from "../../plugin/bridge.js";
 import { CREATE_TYPES } from "../../plugin/batch-compiler.js";
-import { handleExecute } from "./execute.js";
+import { SnapshotCache } from "../../pipeline/snapshot.js";
+import type { EnrichedNode } from "../../shared/types.js";
+import { handleExecute, invalidateSnapshotsAfterExecute } from "./execute.js";
 import { actionSchema } from "../../shared/actions.js";
 
 describe("actionSchema (zod v4)", () => {
@@ -230,5 +232,52 @@ describe("handleExecute fallback generation", () => {
     expect(result.fallbackJs).toContain(
       'recordCreatedNode("$ref:node-0", { type: "create_text", nodeId: t.id });'
     );
+  });
+});
+
+describe("inspection cache invalidation after execution", () => {
+  it("clears inspection snapshots after a connected non-dry-run batch applies a mutation", () => {
+    const snapshotCache = new SnapshotCache();
+    snapshotCache.set("file/root", {} as EnrichedNode);
+
+    const cacheInvalidated = invalidateSnapshotsAfterExecute(snapshotCache, {
+      pluginConnected: true,
+      result: {
+        batchId: "batch-1",
+        dryRun: false,
+        success: true,
+        results: [],
+        nodeIdMap: {},
+        summary: { total: 1, applied: 1, failed: 0, skipped: 0 },
+      },
+    });
+
+    expect(cacheInvalidated).toBe(true);
+    expect(snapshotCache.get("file/root", Number.POSITIVE_INFINITY)).toBeNull();
+  });
+
+  it("does not invalidate for fallback, dry-run, or batches with no applied actions", () => {
+    const makeExecution = (pluginConnected: boolean, dryRun: boolean, applied: number) => ({
+      pluginConnected,
+      result: {
+        batchId: "batch-1",
+        dryRun,
+        success: true,
+        results: [],
+        nodeIdMap: {},
+        summary: { total: 1, applied, failed: 0, skipped: 0 },
+      },
+    });
+
+    for (const execution of [
+      makeExecution(false, false, 1),
+      makeExecution(true, true, 1),
+      makeExecution(true, false, 0),
+    ]) {
+      const snapshotCache = new SnapshotCache();
+      snapshotCache.set("file/root", {} as EnrichedNode);
+      expect(invalidateSnapshotsAfterExecute(snapshotCache, execution)).toBe(false);
+      expect(snapshotCache.get("file/root", Number.POSITIVE_INFINITY)).not.toBeNull();
+    }
   });
 });

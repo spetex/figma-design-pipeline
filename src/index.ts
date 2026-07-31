@@ -51,7 +51,7 @@ import { handleExportTokens } from "./tools/codegen/export-tokens.js";
 
 // ─── Plugin tools ───────────────────────────────────────────────────
 import { BridgeServer } from "./plugin/bridge.js";
-import { handleExecute } from "./tools/plugin/execute.js";
+import { handleExecute, invalidateSnapshotsAfterExecute } from "./tools/plugin/execute.js";
 import { handlePluginStatus } from "./tools/plugin/status.js";
 
 // ─── Configuration ──────────────────────────────────────────────────
@@ -68,7 +68,9 @@ if (FIGMA_ACCESS_TOKEN) {
 
 const snapshotCache = new SnapshotCache();
 const BRIDGE_PORT = Number(process.env.FIGMA_PLUGIN_PORT || 4010);
-const bridge = new BridgeServer();
+const bridge = new BridgeServer({
+  onDocumentChange: () => snapshotCache.invalidateAll(),
+});
 
 // Track the last root node for session continuity
 let lastRootNodeId: string | undefined;
@@ -306,7 +308,7 @@ server.resource(
 
 server.tool(
   "figma_get_tree",
-  "Fetch enriched Figma node tree with classifications, tokens, and layout info. Pass a Figma URL or nodeId.",
+  "Fetch enriched Figma node tree with classifications, tokens, and layout info. Inspection snapshots are keyed by file, node, depth, and style inclusion; responses report fromCache, snapshotAt, and cacheAgeMs. Use refresh: true or maxAgeMs: 0 for a new Figma REST request; this is not a guaranteed fresh plugin read.",
   getTreeInputSchema.shape,
   async (params) => {
     const { nodeId } = resolveParams(params);
@@ -325,6 +327,8 @@ server.tool(
         text: JSON.stringify({
           nodeId: result.nodeId,
           fromCache: result.fromCache,
+          snapshotAt: result.snapshotAt,
+          cacheAgeMs: result.cacheAgeMs,
           nodeCount,
           ...(truncated ? { truncated: true, note: "Tree exceeded 80KB — deeper children omitted. Use figma_get_tree on specific nodeIds to drill down." } : {}),
           tree: outputTree,
@@ -369,7 +373,7 @@ server.tool(
 
 server.tool(
   "figma_find_nodes",
-  "Search/filter nodes by name pattern, type, classification, text content, or size. Returns matching nodes without full tree output.",
+  "Search/filter nodes by name pattern, type, classification, text content, or size. Responses report fromCache, snapshotAt, and cacheAgeMs; use refresh: true or maxAgeMs: 0 for a new Figma REST request, not a guaranteed fresh plugin read.",
   findNodesInputSchema.shape,
   async (params) => {
     const { nodeId } = resolveParams(params);
@@ -517,10 +521,8 @@ server.tool(
       rollbackOnError: params.rollbackOnError,
       timeoutMs: params.timeoutMs,
     });
-    if (result.pluginConnected) {
-      snapshotCache.invalidateAll();
-    }
-    return jsonResponse(result);
+    const cacheInvalidated = invalidateSnapshotsAfterExecute(snapshotCache, result);
+    return jsonResponse({ ...result, cacheInvalidated });
   }
 );
 
