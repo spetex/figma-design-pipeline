@@ -94,6 +94,15 @@ the byte cap caused pruning. Each `continuations` entry gives a retrievable
 into the omitted subtree. Only a root whose direct-child records cannot fit
 after descendant pruning is paginated. In that case, pass
 `directChildren.nextOffset` back as `childOffset` to fetch the next page.
+Every emitted `nextOffset` is strictly greater than the request's `childOffset`;
+a response without `nextOffset` is terminal.
+
+If an individual `name` or `textContent` value would prevent even one direct
+child from fitting, the value is UTF-8-byte bounded while the node ID and node
+record remain present and retrievable. The response includes
+`scalar_field_limit`, `truncatedFieldCount`, `omittedScalarBytes`, and per-node
+`truncatedFields` byte counts. Scalar compaction does not change node counts or
+`omittedNodeCount`.
 
 For compatibility, `nodeCount` continues to count every serialized tree entry,
 including synthetic `COLLAPSED` and `TRUNCATED` markers. Use

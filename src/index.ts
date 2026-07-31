@@ -136,7 +136,8 @@ Use this path when the goal is understanding a design, not modifying it.
 
 ## Context Rules
 - figma_get_tree preserves requested-root children when possible. Its 80KB cap covers the complete pretty-printed response, including metadata and continuations; responseBytes is the UTF-8 byte length of that exact text.
-- Any vector compaction or size pruning is explicit through truncated, omittedNodeCount, truncationReasons, and continuations. Follow directChildren.nextOffset using childOffset for another wide-root page.
+- Any vector compaction, size pruning, or oversized scalar compaction is explicit through truncated and truncationReasons. Scalar compaction reports truncatedFieldCount, omittedScalarBytes, and per-node truncatedFields.
+- Follow directChildren.nextOffset using childOffset for another wide-root page; every emitted nextOffset is strictly greater than the current offset.
 - childCount is the source total; returnedChildCount is the number of real direct children present. Follow continuation nodeIds with focused figma_get_tree calls.
 - figma_find_nodes echoes traversalDepth and matchLimit, and marks truncated only after detecting a match beyond the limit.
 - figma_extract_tokens is the detailed style view. Do not request it unless token detail is actually needed.
@@ -301,7 +302,7 @@ server.resource(
 
 server.tool(
   "figma_get_tree",
-  "Fetch an enriched Figma node tree while preserving requested-root children whenever the 80KB complete serialized-response cap permits. responseBytes is the UTF-8 size of the exact pretty-printed text. childCount is the source total and returnedChildCount is the number returned. nodeCount retains the serialized-node count (including synthetic markers), while returnedNodeCount counts real returned nodes. Any vector compaction or size pruning sets truncated and reports omittedNodeCount, machine-readable truncationReasons, the applicable byte cap, and continuations; pass directChildren.nextOffset as childOffset for the next wide-root page. Inspection snapshots are keyed by file, node, depth, and style inclusion.",
+  "Fetch an enriched Figma node tree while preserving requested-root children whenever the 80KB complete serialized-response cap permits. responseBytes is the UTF-8 size of the exact pretty-printed text. childCount is the source total and returnedChildCount is the number returned. nodeCount retains the serialized-node count (including synthetic markers), while returnedNodeCount counts real returned nodes. Vector compaction, node pruning, and oversized name/textContent compaction set truncated and report machine-readable reasons plus exact node/field omission metrics. Pass directChildren.nextOffset as childOffset for the next wide-root page; nextOffset always advances. Inspection snapshots are keyed by file, node, depth, and style inclusion.",
   getTreeInputSchema.shape,
   async (params) => {
     const { nodeId } = resolveParams(params);

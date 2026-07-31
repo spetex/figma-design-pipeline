@@ -36,12 +36,19 @@ export interface CompactNode {
   componentId?: string;
   omittedNodeCount?: number;
   continuationNodeId?: string;
+  truncatedFields?: Partial<Record<"name" | "textContent", {
+    originalBytes: number;
+    returnedBytes: number;
+  }>>;
   children: CompactNode[];
 }
 
 export const DEFAULT_MAX_RESPONSE_BYTES = 80_000;
 
-export type TreeTruncationReason = "vector_compaction" | "response_size_limit";
+export type TreeTruncationReason =
+  | "vector_compaction"
+  | "response_size_limit"
+  | "scalar_field_limit";
 
 export interface TreeContinuation {
   reason: TreeTruncationReason;
@@ -54,6 +61,8 @@ export interface TruncatedTree {
   tree: CompactNode;
   truncated: boolean;
   omittedNodeCount: number;
+  truncatedFieldCount: number;
+  omittedScalarBytes: number;
   truncationReasons: TreeTruncationReason[];
   continuations: TreeContinuation[];
   /** Number of source nodes actually returned; synthetic markers are excluded. */
@@ -75,6 +84,8 @@ export interface GetTreeResponsePayload {
   totalNodeCount: number;
   truncated: boolean;
   omittedNodeCount: number;
+  truncatedFieldCount: number;
+  omittedScalarBytes: number;
   truncationReasons: TreeTruncationReason[];
   continuations: TreeContinuation[];
   responseBytes: number;
@@ -246,6 +257,8 @@ export function truncateTree(node: CompactNode, maxBytes: number): TruncatedTree
     tree: result,
     truncated: omittedNodeCount > 0,
     omittedNodeCount,
+    truncatedFieldCount: 0,
+    omittedScalarBytes: 0,
     truncationReasons,
     continuations,
     nodeCount,
@@ -308,16 +321,32 @@ export function serializeGetTreeResponse(
   }
 
   if (serialized.payload.responseBytes > maxResponseBytes) {
+    outputTree = pruneOversizedScalarFields(outputTree);
+    serialized = serializeCandidate(
+      result,
+      outputTree,
+      maxResponseBytes,
+      childOffset,
+      precedingOmittedNodeCount,
+      directContinuation
+    );
+  }
+
+  if (serialized.payload.responseBytes > maxResponseBytes) {
     const retainedChildren = [...outputTree.children];
     let omittedDirectNodeCount = 0;
-    while (serialized.payload.responseBytes > maxResponseBytes && retainedChildren.length > 0) {
+    while (serialized.payload.responseBytes > maxResponseBytes && retainedChildren.length > 1) {
       const omitted = retainedChildren.pop()!;
       omittedDirectNodeCount += countSourceNodes(omitted);
+      const nextOffset = childOffset + retainedChildren.length;
+      if (nextOffset <= childOffset) {
+        throw new Error("figma_get_tree pagination did not advance");
+      }
       directContinuation = {
         reason: "response_size_limit",
         nodeId: result.nodeId,
         omittedNodeCount: omittedDirectNodeCount,
-        childOffset: childOffset + retainedChildren.length,
+        childOffset: nextOffset,
       };
       outputTree = {
         ...outputTree,
@@ -353,6 +382,7 @@ function serializeCandidate(
   directContinuation?: TreeContinuation
 ): SerializedGetTreeResponse {
   const summarized = summarizeOmissions(tree).continuations;
+  const scalarSummary = summarizeScalarTruncations(tree);
   const continuations = directContinuation
     ? [...summarized, directContinuation]
     : summarized;
@@ -365,10 +395,11 @@ function serializeCandidate(
   const nodeCount = countSerializedNodes(tree);
   const responseSizeLimited = precedingOmittedNodeCount > 0 || continuations.some(
     continuation => continuation.reason === "response_size_limit"
-  );
+  ) || scalarSummary.truncatedFieldCount > 0;
   const truncationReasons = Array.from(new Set([
     ...(precedingOmittedNodeCount > 0 ? ["response_size_limit" as const] : []),
     ...continuations.map(continuation => continuation.reason),
+    ...(scalarSummary.truncatedFieldCount > 0 ? ["scalar_field_limit" as const] : []),
   ]));
   const nextOffset = directContinuation?.childOffset;
   const directChildren = childOffset > 0 || nextOffset !== undefined
@@ -388,8 +419,10 @@ function serializeCandidate(
     nodeCount,
     returnedNodeCount,
     totalNodeCount: returnedNodeCount + omittedNodeCount,
-    truncated: omittedNodeCount > 0,
+    truncated: omittedNodeCount > 0 || scalarSummary.truncatedFieldCount > 0,
     omittedNodeCount,
+    truncatedFieldCount: scalarSummary.truncatedFieldCount,
+    omittedScalarBytes: scalarSummary.omittedScalarBytes,
     truncationReasons,
     continuations,
     ...(responseSizeLimited ? {
@@ -409,6 +442,60 @@ function serializeCandidate(
     if (measuredBytes === responseBytes) return { payload, text };
     responseBytes = measuredBytes;
   }
+}
+
+const MAX_SCALAR_FIELD_BYTES = 4_000;
+
+function pruneOversizedScalarFields(node: CompactNode): CompactNode {
+  const name = truncateUtf8(node.name, MAX_SCALAR_FIELD_BYTES);
+  const textContent = node.textContent === undefined
+    ? undefined
+    : truncateUtf8(node.textContent, MAX_SCALAR_FIELD_BYTES);
+  const truncatedFields: CompactNode["truncatedFields"] = {
+    ...(name.truncated ? {
+      name: { originalBytes: name.originalBytes, returnedBytes: name.returnedBytes },
+    } : {}),
+    ...(textContent?.truncated ? {
+      textContent: {
+        originalBytes: textContent.originalBytes,
+        returnedBytes: textContent.returnedBytes,
+      },
+    } : {}),
+  };
+
+  return {
+    ...node,
+    name: name.value,
+    ...(textContent ? { textContent: textContent.value } : {}),
+    ...(Object.keys(truncatedFields).length > 0 ? { truncatedFields } : {}),
+    children: node.children.map(pruneOversizedScalarFields),
+  };
+}
+
+function truncateUtf8(value: string, maxBytes: number): {
+  value: string;
+  originalBytes: number;
+  returnedBytes: number;
+  truncated: boolean;
+} {
+  const originalBytes = Buffer.byteLength(value, "utf8");
+  if (originalBytes <= maxBytes) {
+    return { value, originalBytes, returnedBytes: originalBytes, truncated: false };
+  }
+
+  const suffix = "…";
+  const contentBudget = maxBytes - Buffer.byteLength(suffix, "utf8");
+  let returned = "";
+  let returnedBytes = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (returnedBytes + characterBytes > contentBudget) break;
+    returned += character;
+    returnedBytes += characterBytes;
+  }
+  returned += suffix;
+  returnedBytes += Buffer.byteLength(suffix, "utf8");
+  return { value: returned, originalBytes, returnedBytes, truncated: true };
 }
 
 function pruneAtDepth(node: CompactNode, maxDepth: number, currentDepth = 0): CompactNode {
@@ -477,6 +564,24 @@ function summarizeOmissions(node: CompactNode): { continuations: TreeContinuatio
   };
   visit(node);
   return { continuations };
+}
+
+function summarizeScalarTruncations(node: CompactNode): {
+  truncatedFieldCount: number;
+  omittedScalarBytes: number;
+} {
+  let truncatedFieldCount = 0;
+  let omittedScalarBytes = 0;
+  const visit = (candidate: CompactNode): void => {
+    for (const field of Object.values(candidate.truncatedFields ?? {})) {
+      if (!field) continue;
+      truncatedFieldCount++;
+      omittedScalarBytes += field.originalBytes - field.returnedBytes;
+    }
+    candidate.children.forEach(visit);
+  };
+  visit(node);
+  return { truncatedFieldCount, omittedScalarBytes };
 }
 
 function byteLength(value: unknown): number {

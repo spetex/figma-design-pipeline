@@ -287,4 +287,68 @@ describe("tree completeness reporting", () => {
     expect(nextPage.payload.responseBytes).toBe(Buffer.byteLength(nextPage.text, "utf8"));
     expect(nextPage.payload.directChildren?.offset).toBe(nextOffset);
   });
+
+  it("terminates with exact coverage when one direct child has an oversized Unicode field", async () => {
+    const oversizedName = "界".repeat(30_000);
+    const oversizedChild = node("oversized-child", oversizedName, 0, 100);
+    const documents = new Map<string, FigmaRawNode>([
+      ["root", node("root", "Page", 0, 1000, [oversizedChild])],
+      ["oversized-child", oversizedChild],
+    ]);
+    const { ctx } = makeContext(documents);
+    const result = await handleGetTree(ctx, { nodeId: "root", depth: 1, includeStyles: false });
+
+    const seenPages = new Set<string>();
+    const returnedIds = new Set<string>();
+    let childOffset = 0;
+    let terminalPayload: ReturnType<typeof serializeGetTreeResponse>["payload"] | undefined;
+
+    for (let pageNumber = 0; pageNumber < 10; pageNumber++) {
+      const page = serializeGetTreeResponse(result, { childOffset });
+      expect(page.payload.responseBytes).toBe(Buffer.byteLength(page.text, "utf8"));
+      expect(page.payload.responseBytes).toBeLessThanOrEqual(80_000);
+      expect(seenPages.has(page.text)).toBe(false);
+      seenPages.add(page.text);
+      page.payload.tree.children.forEach(child => returnedIds.add(child.id));
+
+      const nextOffset = page.payload.directChildren?.nextOffset;
+      if (nextOffset === undefined) {
+        terminalPayload = page.payload;
+        break;
+      }
+      expect(nextOffset).toBeGreaterThan(childOffset);
+      childOffset = nextOffset;
+    }
+
+    expect(terminalPayload).toBeDefined();
+    expect([...returnedIds]).toEqual(["oversized-child"]);
+    expect(seenPages.size).toBe(1);
+    expect(terminalPayload).toMatchObject({
+      truncated: true,
+      omittedNodeCount: 0,
+      truncatedFieldCount: 1,
+      truncationReasons: ["scalar_field_limit"],
+      nodeCount: 2,
+      returnedNodeCount: 2,
+      totalNodeCount: 2,
+    });
+    const returnedChild = terminalPayload!.tree.children[0]!;
+    expect(returnedChild.id).toBe("oversized-child");
+    expect(returnedChild.truncatedFields?.name?.originalBytes).toBe(
+      Buffer.byteLength(oversizedName, "utf8")
+    );
+    expect(terminalPayload!.omittedScalarBytes).toBe(
+      returnedChild.truncatedFields!.name!.originalBytes -
+      returnedChild.truncatedFields!.name!.returnedBytes
+    );
+
+    const focused = await handleGetTree(ctx, {
+      nodeId: "oversized-child",
+      depth: 1,
+      includeStyles: false,
+    });
+    const focusedResponse = serializeGetTreeResponse(focused);
+    expect(focusedResponse.payload.nodeId).toBe("oversized-child");
+    expect(focusedResponse.payload.responseBytes).toBeLessThanOrEqual(80_000);
+  });
 });
