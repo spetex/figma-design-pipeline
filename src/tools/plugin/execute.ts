@@ -1,7 +1,7 @@
 import type { BridgeServer, BatchResult } from "../../plugin/bridge.js";
 import { compileBatch } from "../../plugin/batch-compiler.js";
 import { actionSchema, type Action } from "../../shared/actions.js";
-import { actionWritesDocument, isKnownActionType } from "../../shared/action-parity.js";
+import { assertActionInputCoverage, isKnownActionType } from "../../shared/action-parity.js";
 import { weightToFontStyle } from "../../shared/font.js";
 
 interface ExecuteParams {
@@ -36,6 +36,7 @@ export async function handleExecute(
     if (!parsed.success) {
       throw new Error(`Invalid action: ${parsed.error.issues.map(i => i.message).join(", ")}`);
     }
+    assertActionInputCoverage(parsed.data);
     validated.push(parsed.data);
   }
 
@@ -81,7 +82,7 @@ function generateFallbackJs(
   const fontsNeeded = new Set<string>();
 
   for (const action of actions) {
-    if (action.type === "create_text_style") {
+    if (action.type === "create_text" || action.type === "create_text_style") {
       const weight = action.fontWeight ?? 400;
       const style = weightToStyle(weight);
       fontsNeeded.add(`await figma.loadFontAsync({ family: "${action.fontFamily}", style: "${style}" });`);
@@ -135,6 +136,11 @@ function generateFallbackJs(
   lines.push("  if (!node) throw new Error(`Node not found: ${resolveRefId(id)}`);");
   lines.push("  return node;");
   lines.push("};");
+  lines.push("const requireContainer = (id) => {");
+  lines.push("  const node = requireNode(id);");
+  lines.push("  if (typeof node.appendChild !== \"function\") throw new Error(`Node ${resolveRefId(id)} is not a container`);");
+  lines.push("  return node;");
+  lines.push("};");
   lines.push("const sanitizePaints = (paints) => (paints || []).map((paint) => {");
   lines.push("  if (!paint || typeof paint !== \"object\" || !paint.color || typeof paint.color !== \"object\") return paint;");
   lines.push("  if (!(\"a\" in paint.color)) return paint;");
@@ -161,6 +167,7 @@ function generateFallbackJs(
     if (!isKnownActionType(a.type)) {
       throw new Error(`Unknown action type: ${a.type}`);
     }
+    assertActionInputCoverage(a);
     lines.push(`// Action ${i}: ${a.type}`);
     lines.push("if (stopProcessing) {");
     lines.push(`  results.push({ actionIndex: ${i}, type: ${j(a.type)}, status: "skipped" });`);
@@ -180,43 +187,43 @@ function generateFallbackJs(
 
     switch (a.type) {
       case "rename":
-        lines.push(`{ ${g(nid)}.name = ${j(a.name)}; ${r("rename")} }`);
+        lines.push(`{ ${g(nid)}.name = ${j(a.name)}; markDocumentWrite(); ${r("rename")} }`);
         break;
       case "move":
-        lines.push(`{ const n = ${g(nid)}; const p = ${g(a.targetParentId)}; ${a.insertIndex !== undefined ? `p.insertChild(${a.insertIndex}, n)` : "p.appendChild(n)"}; ${r("move")} }`);
+        lines.push(`{ const n = ${g(nid)}; const p = requireContainer(${j(a.targetParentId)}); ${a.insertIndex !== undefined ? `p.insertChild(${a.insertIndex}, n)` : "p.appendChild(n)"}; markDocumentWrite(); ${r("move")} }`);
         break;
       case "create_frame":
-        lines.push(`{ const parent = requireNode(${j(a.parentId)}); const f = figma.createFrame(); markDocumentWrite(); f.name = ${j(a.name)}; f.resize(${a.width}, ${a.height}); parent.appendChild(f); f.x = ${a.x}; f.y = ${a.y}; ${cr("create_frame", "f.id")} }`);
+        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const f = figma.createFrame(); markDocumentWrite(); f.name = ${j(a.name)}; f.resize(${a.width}, ${a.height}); parent.appendChild(f); f.x = ${a.x}; f.y = ${a.y}; ${cr("create_frame", "f.id")} }`);
         break;
       case "create_text": {
         const fam = a.fontFamily || "Inter";
         const sty = weightToStyle(a.fontWeight || 400);
-        lines.push(`{ const parent = requireNode(${j(a.parentId)}); const t = figma.createText(); markDocumentWrite(); await figma.loadFontAsync({ family: "${fam}", style: "${sty}" }); t.fontName = { family: "${fam}", style: "${sty}" }; t.characters = ${j(a.characters)}; ${a.name ? `t.name = ${j(a.name)};` : ""} ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} t.textAutoResize = "${a.textAutoResize || "HEIGHT"}"; ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} parent.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} ${cr("create_text", "t.id")} }`);
+        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); await figma.loadFontAsync({ family: "${fam}", style: "${sty}" }); const t = figma.createText(); markDocumentWrite(); t.fontName = { family: "${fam}", style: "${sty}" }; t.characters = ${j(a.characters)}; ${a.name ? `t.name = ${j(a.name)};` : ""} ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} t.textAutoResize = "${a.textAutoResize || "HEIGHT"}"; ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} parent.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} ${cr("create_text", "t.id")} }`);
         break;
       }
       case "delete_node":
-        lines.push(`{ ${g(nid)}.remove(); ${r("delete_node")} }`);
+        lines.push(`{ ${g(nid)}.remove(); markDocumentWrite(); ${r("delete_node")} }`);
         break;
       case "resize":
-        lines.push(`{ const n = ${g(nid)}; n.resize(${a.width ?? "n.width"}, ${a.height ?? "n.height"}); ${r("resize")} }`);
+        lines.push(`{ const n = ${g(nid)}; n.resize(${a.width ?? "n.width"}, ${a.height ?? "n.height"}); markDocumentWrite(); ${r("resize")} }`);
         break;
       case "set_position":
-        lines.push(`{ const n = ${g(nid)}; ${a.x !== undefined ? `n.x = ${a.x}; markDocumentWrite();` : ""} ${a.y !== undefined ? `n.y = ${a.y}; markDocumentWrite();` : ""} ${r("set_position")} }`);
+        lines.push(`{ const n = ${g(nid)}; ${a.x !== undefined ? `if (n.x !== ${a.x}) { n.x = ${a.x}; markDocumentWrite(); }` : ""} ${a.y !== undefined ? `if (n.y !== ${a.y}) { n.y = ${a.y}; markDocumentWrite(); }` : ""} ${r("set_position")} }`);
         break;
       case "duplicate_node":
-        lines.push(`{ const c = ${g(nid)}.clone(); ${cr("duplicate_node", "c.id")} }`);
+        lines.push(`{ const c = ${g(nid)}.clone(); markDocumentWrite(); ${cr("duplicate_node", "c.id")} }`);
         break;
       case "set_visible":
-        lines.push(`{ ${g(nid)}.visible = ${a.visible}; ${r("set_visible")} }`);
+        lines.push(`{ ${g(nid)}.visible = ${a.visible}; markDocumentWrite(); ${r("set_visible")} }`);
         break;
       case "set_opacity":
-        lines.push(`{ ${g(nid)}.opacity = ${a.opacity}; ${r("set_opacity")} }`);
+        lines.push(`{ ${g(nid)}.opacity = ${a.opacity}; markDocumentWrite(); ${r("set_opacity")} }`);
         break;
       case "set_layout_mode":
         lines.push(`{ const n = ${g(nid)}; n.layoutMode = "${a.mode}"; markDocumentWrite(); ${a.primaryAxisSizingMode ? `n.primaryAxisSizingMode = "${a.primaryAxisSizingMode}"; markDocumentWrite();` : ""} ${a.counterAxisSizingMode ? `n.counterAxisSizingMode = "${a.counterAxisSizingMode}"; markDocumentWrite();` : ""} ${r("set_layout_mode")} }`);
         break;
       case "set_layout_positioning":
-        lines.push(`{ ${g(nid)}.layoutPositioning = "${a.positioning}"; ${r("set_layout_positioning")} }`);
+        lines.push(`{ ${g(nid)}.layoutPositioning = "${a.positioning}"; markDocumentWrite(); ${r("set_layout_positioning")} }`);
         break;
       case "set_alignment":
         lines.push(`{ const n = ${g(nid)}; ${a.primaryAxisAlignItems ? `n.primaryAxisAlignItems = "${a.primaryAxisAlignItems}"; markDocumentWrite();` : ""} ${a.counterAxisAlignItems ? `n.counterAxisAlignItems = "${a.counterAxisAlignItems}"; markDocumentWrite();` : ""} ${r("set_alignment")} }`);
@@ -234,25 +241,25 @@ function generateFallbackJs(
         lines.push(`{ const n = ${g(nid)}; ${a.minWidth !== undefined ? `n.minWidth = ${a.minWidth}; markDocumentWrite();` : ""} ${a.maxWidth !== undefined ? `n.maxWidth = ${a.maxWidth}; markDocumentWrite();` : ""} ${a.minHeight !== undefined ? `n.minHeight = ${a.minHeight}; markDocumentWrite();` : ""} ${a.maxHeight !== undefined ? `n.maxHeight = ${a.maxHeight}; markDocumentWrite();` : ""} ${r("set_min_max_size")} }`);
         break;
       case "set_fills":
-        lines.push(`{ ${g(nid)}.fills = sanitizePaints(${j(a.fills)}); ${r("set_fills")} }`);
+        lines.push(`{ ${g(nid)}.fills = sanitizePaints(${j(a.fills)}); markDocumentWrite(); ${r("set_fills")} }`);
         break;
       case "set_gradient_fill":
-        lines.push(`{ const n = ${g(nid)}; const angle = ${(a.angle ?? 0)} * Math.PI / 180; n.fills = [{ type: "GRADIENT_${a.gradientType}", gradientStops: ${j(a.stops)}, gradientTransform: [[Math.cos(angle), Math.sin(angle), 0], [-Math.sin(angle), Math.cos(angle), 0]] }]; ${r("set_gradient_fill")} }`);
+        lines.push(`{ const n = ${g(nid)}; const angle = ${(a.angle ?? 0)} * Math.PI / 180; n.fills = [{ type: "GRADIENT_${a.gradientType}", gradientStops: ${j(a.stops)}, gradientTransform: [[Math.cos(angle), Math.sin(angle), 0], [-Math.sin(angle), Math.cos(angle), 0]] }]; markDocumentWrite(); ${r("set_gradient_fill")} }`);
         break;
       case "set_image_fill":
-        lines.push(`{ const img = figma.createImage(figma.base64Decode(${j(a.imageBase64)})); ${g(nid)}.fills = [{ type: "IMAGE", imageHash: img.hash, scaleMode: "${a.scaleMode || "FILL"}" }]; ${r("set_image_fill")} }`);
+        lines.push(`{ const img = figma.createImage(figma.base64Decode(${j(a.imageBase64)})); ${g(nid)}.fills = [{ type: "IMAGE", imageHash: img.hash, scaleMode: "${a.scaleMode || "FILL"}" }]; markDocumentWrite(); ${r("set_image_fill")} }`);
         break;
       case "set_strokes":
         lines.push(`{ const n = ${g(nid)}; n.strokes = sanitizePaints(${j(a.strokes)}); markDocumentWrite(); ${a.strokeWeight !== undefined ? `n.strokeWeight = ${a.strokeWeight}; markDocumentWrite();` : ""} ${r("set_strokes")} }`);
         break;
       case "set_effects":
-        lines.push(`{ ${g(nid)}.effects = ${j(a.effects)}; ${r("set_effects")} }`);
+        lines.push(`{ ${g(nid)}.effects = ${j(a.effects)}; markDocumentWrite(); ${r("set_effects")} }`);
         break;
       case "set_corner_radius":
         lines.push(`{ const n = ${g(nid)}; ${a.radius !== undefined ? `n.cornerRadius = ${a.radius}; markDocumentWrite();` : ""} ${a.radii ? `n.topLeftRadius=${a.radii[0]}; markDocumentWrite(); n.topRightRadius=${a.radii[1]}; markDocumentWrite(); n.bottomRightRadius=${a.radii[2]}; markDocumentWrite(); n.bottomLeftRadius=${a.radii[3]}; markDocumentWrite();` : ""} ${r("set_corner_radius")} }`);
         break;
       case "set_text_content":
-        lines.push(`{ const n = ${g(nid)}; if (n.fontName === figma.mixed) { const seenFonts = new Set(); for (let rangeStart = 0; rangeStart < n.characters.length; rangeStart++) { const rangeFont = n.getRangeFontName(rangeStart, rangeStart + 1); const fontKey = \`${"${rangeFont.family}|${rangeFont.style}"}\`; if (!seenFonts.has(fontKey)) { seenFonts.add(fontKey); await figma.loadFontAsync(rangeFont); } } } else { await figma.loadFontAsync(n.fontName); } n.characters = ${j(a.characters)}; ${r("set_text_content")} }`);
+        lines.push(`{ const n = ${g(nid)}; if (n.fontName === figma.mixed) { const seenFonts = new Set(); for (let rangeStart = 0; rangeStart < n.characters.length; rangeStart++) { const rangeFont = n.getRangeFontName(rangeStart, rangeStart + 1); const fontKey = \`${"${rangeFont.family}|${rangeFont.style}"}\`; if (!seenFonts.has(fontKey)) { seenFonts.add(fontKey); await figma.loadFontAsync(rangeFont); } } } else { await figma.loadFontAsync(n.fontName); } n.characters = ${j(a.characters)}; markDocumentWrite(); ${r("set_text_content")} }`);
         break;
       case "set_text_style": {
         const hasFontOverride = Boolean(a.fontFamily) || a.fontWeight !== undefined;
@@ -265,22 +272,22 @@ function generateFallbackJs(
         lines.push(`{ const n = ${g(nid)}; ${a.textAlignHorizontal ? `n.textAlignHorizontal = "${a.textAlignHorizontal}"; markDocumentWrite();` : ""} ${a.textAlignVertical ? `n.textAlignVertical = "${a.textAlignVertical}"; markDocumentWrite();` : ""} ${a.paragraphSpacing !== undefined ? `n.paragraphSpacing = ${a.paragraphSpacing}; markDocumentWrite();` : ""} ${a.textCase ? `n.textCase = "${a.textCase}"; markDocumentWrite();` : ""} ${a.textDecoration ? `n.textDecoration = "${a.textDecoration}"; markDocumentWrite();` : ""} ${a.textAutoResize ? `n.textAutoResize = "${a.textAutoResize}"; markDocumentWrite();` : ""} ${r("set_text_properties")} }`);
         break;
       case "create_component_from_node":
-        lines.push(`{ const source = requireNode(${j(nid)}); const c = figma.createComponentFromNode(source); markDocumentWrite(); c.name = ${j(a.name)}; ${cr("create_component_from_node", "c.id")} }`);
+        lines.push(`{ const source = requireNode(${j(nid)}); if (!source.parent || typeof source.parent.appendChild !== "function" || source.type === "PAGE" || source.type === "DOCUMENT") throw new Error("Node is not a scene node with a container parent"); const c = figma.createComponentFromNode(source); markDocumentWrite(); c.name = ${j(a.name)}; ${cr("create_component_from_node", "c.id")} }`);
         break;
       case "create_component_set":
-        lines.push(`{ const comps = ${j(a.componentIds)}.map(id => requireNode(id)); const set = figma.combineAsVariants(comps, comps[0].parent); markDocumentWrite(); set.name = ${j(a.name)}; ${cr("create_component_set", "set.id")} }`);
+        lines.push(`{ const comps = ${j(a.componentIds)}.map(id => requireNode(id)); if (comps.some(component => component.type !== "COMPONENT")) throw new Error("All variant nodes must be components"); const parent = comps[0].parent; if (!parent || typeof parent.appendChild !== "function") throw new Error("Component has no valid parent for variant set"); if (comps.some(component => component.parent !== parent)) throw new Error("All components must share a parent for variant set"); const set = figma.combineAsVariants(comps, parent); markDocumentWrite(); set.name = ${j(a.name)}; ${cr("create_component_set", "set.id")} }`);
         break;
       case "create_instance":
-        lines.push(`{ const component = requireNode(${j(a.componentId)}); const parent = requireNode(${j(a.parentId)}); const inst = component.createInstance(); markDocumentWrite(); parent.appendChild(inst); ${a.x !== undefined ? `inst.x = ${a.x};` : ""} ${a.y !== undefined ? `inst.y = ${a.y};` : ""} ${cr("create_instance", "inst.id")} }`);
+        lines.push(`{ const component = requireNode(${j(a.componentId)}); if (component.type !== "COMPONENT" || typeof component.createInstance !== "function") throw new Error("Node is not a component"); const parent = requireContainer(${j(a.parentId)}); const inst = component.createInstance(); markDocumentWrite(); parent.appendChild(inst); ${a.x !== undefined ? `inst.x = ${a.x}; markDocumentWrite();` : ""} ${a.y !== undefined ? `inst.y = ${a.y}; markDocumentWrite();` : ""} ${cr("create_instance", "inst.id")} }`);
         break;
       case "swap_instance":
-        lines.push(`{ ${g(a.instanceId)}.swapComponent(${g(a.newComponentId)}); results.push({ type: "swap_instance" }); }`);
+        lines.push(`{ ${g(a.instanceId)}.swapComponent(${g(a.newComponentId)}); markDocumentWrite(); results.push({ type: "swap_instance" }); }`);
         break;
       case "set_component_properties":
-        lines.push(`{ ${g(nid)}.setProperties(${j(a.properties)}); ${r("set_component_properties")} }`);
+        lines.push(`{ ${g(nid)}.setProperties(${j(a.properties)}); markDocumentWrite(); ${r("set_component_properties")} }`);
         break;
       case "define_component_property":
-        lines.push(`{ ${g(nid)}.addComponentProperty(${j(a.propertyName)}, "${a.propertyType}", ${j(a.defaultValue)}); ${r("define_component_property")} }`);
+        lines.push(`{ ${g(nid)}.addComponentProperty(${j(a.propertyName)}, "${a.propertyType}", ${j(a.defaultValue)}); markDocumentWrite(); ${r("define_component_property")} }`);
         break;
       case "create_paint_style":
         lines.push(`{ const s = figma.createPaintStyle(); markDocumentWrite(); s.name = ${j(a.name)}; s.paints = sanitizePaints(${j(a.paints)}); ${cr("create_paint_style", "s.id")} }`);
@@ -292,10 +299,10 @@ function generateFallbackJs(
         lines.push(`{ const s = figma.createEffectStyle(); markDocumentWrite(); s.name = ${j(a.name)}; s.effects = ${j(a.effects)}; ${cr("create_effect_style", "s.id")} }`);
         break;
       case "apply_style":
-        lines.push(`{ const n = ${g(nid)}; const styleId = resolveRefId(${j(a.styleId)}); ${a.property === "fill" ? "await n.setFillStyleIdAsync(styleId);" : a.property === "stroke" ? "await n.setStrokeStyleIdAsync(styleId);" : a.property === "text" ? "await n.setTextStyleIdAsync(styleId);" : "await n.setEffectStyleIdAsync(styleId);"} ${r("apply_style")} }`);
+        lines.push(`{ const n = ${g(nid)}; const styleId = resolveRefId(${j(a.styleId)}); ${a.property === "fill" ? "await n.setFillStyleIdAsync(styleId);" : a.property === "stroke" ? "await n.setStrokeStyleIdAsync(styleId);" : a.property === "text" ? "await n.setTextStyleIdAsync(styleId);" : "await n.setEffectStyleIdAsync(styleId);"} markDocumentWrite(); ${r("apply_style")} }`);
         break;
       case "set_description":
-        lines.push(`{ ${g(nid)}.description = ${j(a.description)}; ${r("set_description")} }`);
+        lines.push(`{ ${g(nid)}.description = ${j(a.description)}; markDocumentWrite(); ${r("set_description")} }`);
         break;
       case "create_page":
         lines.push(`{ const p = figma.createPage(); markDocumentWrite(); p.name = ${j(a.name)}; ${cr("create_page", "p.id")} }`);
@@ -304,20 +311,17 @@ function generateFallbackJs(
         lines.push(`{ await figma.setCurrentPageAsync(getNode(${j(a.pageId)})); results.push({ type: "switch_page" }); }`);
         break;
       case "create_variable_collection":
-        lines.push(`{ const c = figma.variables.createVariableCollection(${j(a.name)}); markDocumentWrite(); const modes = ${j(a.modes)}; if (modes[0]) c.renameMode(c.modes[0].modeId, modes[0]); for (let modeIndex = 1; modeIndex < modes.length; modeIndex++) c.addMode(modes[modeIndex]); ${cr("create_variable_collection", "c.id")} }`);
+        lines.push(`{ const c = figma.variables.createVariableCollection(${j(a.name)}); markDocumentWrite(); const modes = ${j(a.modes)}; if (modes[0]) { c.renameMode(c.modes[0].modeId, modes[0]); markDocumentWrite(); } for (let modeIndex = 1; modeIndex < modes.length; modeIndex++) { c.addMode(modes[modeIndex]); markDocumentWrite(); } ${cr("create_variable_collection", "c.id")} }`);
         break;
       case "create_variable":
         lines.push(`{ const c = figma.variables.getVariableCollectionById(resolveRefId(${j(a.collectionId)})); if (!c) throw new Error("Variable collection not found"); const v = figma.variables.createVariable(${j(a.name)}, c, "${a.resolvedType}"); markDocumentWrite(); ${a.scopes ? `v.scopes = ${j(a.scopes)};` : ""} const value = parseVariableValue("${a.resolvedType}", ${j(a.value)}); for (const mode of c.modes) v.setValueForMode(mode.modeId, value); ${cr("create_variable", "v.id")} }`);
         break;
       case "bind_variable":
-        lines.push(`{ const v = figma.variables.getVariableById(resolveRefId(${j(a.variableId)})); if (!v) throw new Error("Variable not found"); const n = ${g(nid)}; ${a.property === "fills" || a.property === "strokes" ? `const paints = [...n.${a.property}]; const paintIndex = ${a.paintIndex ?? 0}; const paint = paints[paintIndex]; if (!paint) throw new Error(\"Paint index \" + paintIndex + \" does not exist in ${a.property}\"); if (paint.type !== \"SOLID\") throw new Error(\"Paint index \" + paintIndex + \" in ${a.property} is not a solid paint\"); paints[paintIndex] = figma.variables.setBoundVariableForPaint(paint, "color", v); n.${a.property} = paints;` : `n.setBoundVariable("${a.property}", v);`} ${r("bind_variable")} }`);
+        lines.push(`{ const v = figma.variables.getVariableById(resolveRefId(${j(a.variableId)})); if (!v) throw new Error("Variable not found"); const n = ${g(nid)}; ${a.property === "fills" || a.property === "strokes" ? `const paints = [...n.${a.property}]; const paintIndex = ${a.paintIndex ?? 0}; const paint = paints[paintIndex]; if (!paint) throw new Error(\"Paint index \" + paintIndex + \" does not exist in ${a.property}\"); if (paint.type !== \"SOLID\") throw new Error(\"Paint index \" + paintIndex + \" in ${a.property} is not a solid paint\"); paints[paintIndex] = figma.variables.setBoundVariableForPaint(paint, "color", v); n.${a.property} = paints; markDocumentWrite();` : `n.setBoundVariable("${a.property}", v); markDocumentWrite();`} ${r("bind_variable")} }`);
         break;
       case "export_node":
         lines.push(`{ const format = "${a.format}"; const scale = ${a.scale}; const bytes = await ${g(nid)}.exportAsync({ format, ...(format !== "SVG" ? { constraint: { type: "SCALE", value: scale } } : {}) }); results.push({ type: "export_node", nodeId: "${nid}", base64: figma.base64Encode(bytes) }); }`);
         break;
-    }
-    if (actionWritesDocument(a.type)) {
-      lines.push("    markDocumentWrite();");
     }
     lines.push("  } catch (error) {");
     lines.push("    failed = true;");

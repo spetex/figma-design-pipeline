@@ -1,6 +1,6 @@
 /// <reference types="@figma/plugin-typings" />
 
-import { actionWritesDocument, isKnownActionType } from "../src/shared/action-parity";
+import { assertActionInputCoverage, isKnownActionType } from "../src/shared/action-parity";
 
 // ─── SPFR Design Pipeline Plugin v2 ──────────────────────────────
 // High-performance batch executor with font caching, symbolic refs,
@@ -52,6 +52,13 @@ async function findSceneNode(nodeId: string): Promise<SceneNode> {
   const node = await findNode(nodeId);
   if (!("parent" in node)) throw new Error(`Not a scene node: ${nodeId}`);
   return node as SceneNode;
+}
+
+function requireContainer(node: BaseNode, nodeId: string): BaseNode & ChildrenMixin {
+  if (!("appendChild" in node) || typeof node.appendChild !== "function") {
+    throw new Error(`Node ${nodeId} is not a container`);
+  }
+  return node as BaseNode & ChildrenMixin;
 }
 
 /** Load every font needed to modify a text node without replacing its font. */
@@ -152,33 +159,34 @@ async function executeAction(
 }> {
   const type = action.type as string;
   if (!isKnownActionType(type)) throw new Error(`Unknown action type: ${type}`);
+  assertActionInputCoverage(action);
 
   switch (type) {
     case "rename": {
       const node = await findNode(action.nodeId as string);
       const before = { name: node.name };
       node.name = action.name as string;
+      markDocumentWrite();
       return { before, after: { name: node.name } };
     }
 
     case "move": {
       const node = await findSceneNode(action.nodeId as string);
       const parent = await findNode(action.targetParentId as string);
-      if (!("children" in parent)) throw new Error(`Target ${action.targetParentId} is not a container`);
-      const container = parent as FrameNode;
+      const container = requireContainer(parent, action.targetParentId as string);
       const beforeParent = node.parent?.id;
       if (action.insertIndex !== undefined) {
         container.insertChild(action.insertIndex as number, node);
       } else {
         container.appendChild(node);
       }
+      markDocumentWrite();
       return { before: { parentId: beforeParent }, after: { parentId: container.id } };
     }
 
     case "create_text": {
       const parent = await findNode(action.parentId as string);
-      if (!("children" in parent)) throw new Error(`Parent ${action.parentId} is not a container`);
-      const container = parent as FrameNode;
+      const container = requireContainer(parent, action.parentId as string);
       const family = (action.fontFamily as string) || "Inter";
       const weight = (action.fontWeight as number) || 400;
       const style = weightToFontStyle(weight);
@@ -204,8 +212,7 @@ async function executeAction(
 
     case "create_frame": {
       const parent = await findNode(action.parentId as string);
-      if (!("children" in parent)) throw new Error(`Parent ${action.parentId} is not a container`);
-      const container = parent as FrameNode;
+      const container = requireContainer(parent, action.parentId as string);
       const frame = figma.createFrame();
       markDocumentWrite();
       frame.name = action.name as string;
@@ -222,6 +229,7 @@ async function executeAction(
       if (node.type === "PAGE" || node.type === "DOCUMENT") throw new Error(`Cannot delete ${node.type} node`);
       const before = captureSnapshot(node);
       node.remove();
+      markDocumentWrite();
       return { before };
     }
 
@@ -232,6 +240,7 @@ async function executeAction(
         (action.width as number) ?? node.width,
         (action.height as number) ?? node.height
       );
+      markDocumentWrite();
       return { before, after: { width: node.width, height: node.height } };
     }
 
@@ -239,12 +248,18 @@ async function executeAction(
       const node = await findSceneNode(action.nodeId as string);
       const before = { x: node.x, y: node.y };
       if (action.x !== undefined) {
-        node.x = action.x as number;
-        markDocumentWrite();
+        const x = action.x as number;
+        if (node.x !== x) {
+          node.x = x;
+          markDocumentWrite();
+        }
       }
       if (action.y !== undefined) {
-        node.y = action.y as number;
-        markDocumentWrite();
+        const y = action.y as number;
+        if (node.y !== y) {
+          node.y = y;
+          markDocumentWrite();
+        }
       }
       return { before, after: { x: node.x, y: node.y } };
     }
@@ -252,6 +267,7 @@ async function executeAction(
     case "duplicate_node": {
       const node = await findSceneNode(action.nodeId as string);
       const clone = node.clone();
+      markDocumentWrite();
       return { after: { id: clone.id, name: clone.name }, newNodeId: clone.id };
     }
 
@@ -277,6 +293,7 @@ async function executeAction(
       const node = await findSceneNode(action.nodeId as string) as FrameNode;
       const before = { layoutPositioning: node.layoutPositioning };
       node.layoutPositioning = action.positioning as "AUTO" | "ABSOLUTE";
+      markDocumentWrite();
       return { before, after: { layoutPositioning: node.layoutPositioning } };
     }
 
@@ -335,6 +352,7 @@ async function executeAction(
       const node = await findSceneNode(action.nodeId as string) as GeometryMixin & SceneNode;
       const before = { fills: safeSerialize(node.fills) };
       node.fills = sanitizePaints(action.fills as unknown[]);
+      markDocumentWrite();
       return { before, after: { fills: safeSerialize(node.fills) } };
     }
 
@@ -354,6 +372,7 @@ async function executeAction(
       const node = await findSceneNode(action.nodeId as string) as BlendMixin & SceneNode;
       const before = { effects: JSON.parse(JSON.stringify(node.effects)) };
       node.effects = action.effects as Effect[];
+      markDocumentWrite();
       return { before, after: { effects: JSON.parse(JSON.stringify(node.effects)) } };
     }
 
@@ -382,6 +401,7 @@ async function executeAction(
       const node = await findSceneNode(action.nodeId as string);
       const before = { visible: node.visible };
       node.visible = action.visible as boolean;
+      markDocumentWrite();
       return { before, after: { visible: node.visible } };
     }
 
@@ -389,6 +409,7 @@ async function executeAction(
       const node = await findSceneNode(action.nodeId as string) as BlendMixin & SceneNode;
       const before = { opacity: node.opacity };
       node.opacity = action.opacity as number;
+      markDocumentWrite();
       return { before, after: { opacity: node.opacity } };
     }
 
@@ -397,6 +418,7 @@ async function executeAction(
       await ensureTextNodeFonts(node);
       const before = { characters: node.characters };
       node.characters = action.characters as string;
+      markDocumentWrite();
       return { before, after: { characters: node.characters } };
     }
 
@@ -434,6 +456,8 @@ async function executeAction(
 
     case "create_component_from_node": {
       const node = await findSceneNode(action.nodeId as string);
+      if (!node.parent) throw new Error(`Node ${action.nodeId} has no parent`);
+      requireContainer(node.parent, `${action.nodeId} parent`);
       const comp = figma.createComponentFromNode(node);
       markDocumentWrite();
       comp.name = action.name as string;
@@ -448,21 +472,27 @@ async function executeAction(
         return node as ComponentNode;
       }));
       const parent = comps[0].parent;
-      if (!parent || !("appendChild" in parent)) throw new Error("Component has no valid parent for variant set");
-      const set = figma.combineAsVariants(comps, parent as FrameNode);
+      if (!parent) throw new Error("Component has no valid parent for variant set");
+      const container = requireContainer(parent, comps[0].id);
+      if (comps.some((component) => component.parent?.id !== parent.id)) {
+        throw new Error("All components must share a parent for variant set");
+      }
+      const set = figma.combineAsVariants(comps, container as FrameNode);
       markDocumentWrite();
       set.name = action.name as string;
       return { after: { id: set.id, name: set.name }, newNodeId: set.id };
     }
 
     case "create_instance": {
-      const comp = await findNode(action.componentId as string) as ComponentNode;
-      const parent = await findNode(action.parentId as string) as FrameNode;
+      const componentNode = await findNode(action.componentId as string);
+      if (componentNode.type !== "COMPONENT") throw new Error(`Node ${action.componentId} is not a component`);
+      const comp = componentNode as ComponentNode;
+      const parent = requireContainer(await findNode(action.parentId as string), action.parentId as string);
       const instance = comp.createInstance();
       markDocumentWrite();
       parent.appendChild(instance);
-      if (action.x !== undefined) instance.x = action.x as number;
-      if (action.y !== undefined) instance.y = action.y as number;
+      if (action.x !== undefined) { instance.x = action.x as number; markDocumentWrite(); }
+      if (action.y !== undefined) { instance.y = action.y as number; markDocumentWrite(); }
       return { after: { id: instance.id }, newNodeId: instance.id };
     }
 
@@ -474,6 +504,7 @@ async function executeAction(
       if (compNode.type !== "COMPONENT") throw new Error(`Node ${action.newComponentId} is not a component`);
       const newComp = compNode as ComponentNode;
       instance.swapComponent(newComp);
+      markDocumentWrite();
       return { after: { componentId: newComp.id } };
     }
 
@@ -623,6 +654,7 @@ async function executeAction(
         gradientTransform,
       };
       node.fills = [fill];
+      markDocumentWrite();
       return { before, after: { fills: safeSerialize(node.fills) } };
     }
 
@@ -637,6 +669,7 @@ async function executeAction(
         scaleMode: (action.scaleMode as "FILL" | "FIT" | "CROP" | "TILE") || "FILL",
       };
       node.fills = [fill];
+      markDocumentWrite();
       return { before, after: { imageHash: image.hash } };
     }
 
@@ -700,6 +733,7 @@ async function executeAction(
       } else {
         throw new Error(`Cannot apply ${property} style to node type ${node.type}`);
       }
+      markDocumentWrite();
       return { after: { styleId, property } };
     }
 
@@ -708,6 +742,7 @@ async function executeAction(
       if (!("description" in node)) throw new Error(`Node ${action.nodeId} does not support descriptions`);
       const before = { description: (node as ComponentNode).description };
       (node as ComponentNode).description = action.description as string;
+      markDocumentWrite();
       return { before, after: { description: (node as ComponentNode).description } };
     }
 
@@ -724,6 +759,7 @@ async function executeAction(
         action.propertyType as ComponentPropertyType,
         action.defaultValue as string | boolean
       );
+      markDocumentWrite();
       return { after: { propertyName: action.propertyName, propertyType: action.propertyType } };
     }
 
@@ -793,9 +829,11 @@ async function executeAction(
         if (paint.type !== "SOLID") throw new Error(`Paint index ${paintIndex} in ${property} is not a solid paint`);
         paints[paintIndex] = figma.variables.setBoundVariableForPaint(paint, "color", variable);
         (node as GeometryMixin)[paintsProp] = paints;
+        markDocumentWrite();
       } else {
         // Numeric properties: spacing, radius, opacity, size
         (node as SceneNode).setBoundVariable(property as VariableBindableNodeField, variable);
+        markDocumentWrite();
       }
       return { after: { variableId: variable.id, property } };
     }
@@ -892,9 +930,7 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
         after: result.after,
       });
       applied++;
-      if (actionWroteDocument || (isKnownActionType(actionType) && actionWritesDocument(actionType))) {
-        documentWrites++;
-      }
+      if (actionWroteDocument) documentWrites++;
     } catch (err) {
       if (actionWroteDocument) documentWrites++;
       const message = err instanceof Error ? err.message : String(err);

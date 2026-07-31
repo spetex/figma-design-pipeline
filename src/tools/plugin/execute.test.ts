@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeServer } from "../../plugin/bridge.js";
 import { compileBatch, CREATE_TYPES } from "../../plugin/batch-compiler.js";
-import { ACTION_PARITY, ACTION_TYPES, actionWritesDocument } from "../../shared/action-parity.js";
-import { weightToFontStyle } from "../../shared/font.js";
+import { ACTION_TYPES, assertActionInputCoverage, assertActionSchemaCoverage } from "../../shared/action-parity.js";
 import { handleExecute } from "./execute.js";
 import { actionSchema } from "../../shared/actions.js";
 
@@ -27,133 +26,26 @@ describe("actionSchema (zod v4)", () => {
 });
 
 describe("handleExecute fallback generation", () => {
-  const PARITY_CASES: Array<{
-    type: keyof typeof ACTION_PARITY;
-    action: unknown;
-    expectedOperations: string[];
-  }> = [
-    { type: "rename", action: { type: "rename", nodeId: "node", name: "Renamed" }, expectedOperations: ['getNode("node").name = "Renamed"'] },
-    { type: "move", action: { type: "move", nodeId: "node", targetParentId: "parent", insertIndex: 2 }, expectedOperations: ["p.insertChild(2, n)"] },
-    { type: "create_text", action: { type: "create_text", parentId: "parent", characters: "Parity text", name: "Parity/Text", fontFamily: "Inter", fontWeight: 600, fontSize: 24, lineHeight: 28, letterSpacing: 1.5, fills: [{ type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3, a: 0.4 }, opacity: 0.5 }], textCase: "UPPER", textAlignHorizontal: "CENTER", textAutoResize: "TRUNCATE", layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG", opacity: 0.6 }, expectedOperations: ['t.characters = "Parity text"', 't.textAutoResize = "TRUNCATE"', 't.layoutSizingHorizontal = "FILL"', 't.layoutSizingVertical = "HUG"'] },
-    { type: "create_frame", action: { type: "create_frame", name: "Parity frame", parentId: "parent", x: 12, y: 34, width: 321, height: 123 }, expectedOperations: ["f.resize(321, 123)", "f.x = 12", "f.y = 34"] },
-    { type: "delete_node", action: { type: "delete_node", nodeId: "node", confirmed: true }, expectedOperations: ['getNode("node").remove()'] },
-    { type: "set_layout_mode", action: { type: "set_layout_mode", nodeId: "node", mode: "HORIZONTAL", primaryAxisSizingMode: "AUTO", counterAxisSizingMode: "FIXED" }, expectedOperations: ['n.primaryAxisSizingMode = "AUTO"', 'n.counterAxisSizingMode = "FIXED"'] },
-    { type: "set_spacing", action: { type: "set_spacing", nodeId: "node", itemSpacing: 8, paddingTop: 1, paddingRight: 2, paddingBottom: 3, paddingLeft: 4 }, expectedOperations: ["n.itemSpacing = 8", "n.paddingLeft = 4"] },
-    { type: "resize", action: { type: "resize", nodeId: "node", width: 200, height: 100 }, expectedOperations: ["n.resize(200, 100)"] },
-    { type: "create_component_from_node", action: { type: "create_component_from_node", nodeId: "node", name: "Parity component" }, expectedOperations: ["figma.createComponentFromNode(getNode(\"node\"))"] },
-    { type: "create_component_set", action: { type: "create_component_set", componentIds: ["component"], name: "Parity variants" }, expectedOperations: ['const comps = ["component"].map'] },
-    { type: "create_instance", action: { type: "create_instance", componentId: "component", parentId: "parent", x: 14, y: 15 }, expectedOperations: ["inst.x = 14", "inst.y = 15"] },
-    { type: "swap_instance", action: { type: "swap_instance", instanceId: "instance", newComponentId: "component" }, expectedOperations: ['getNode("instance").swapComponent(getNode("component"))'] },
-    { type: "set_fills", action: { type: "set_fills", nodeId: "node", fills: [{ type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3, a: 0.4 }, opacity: 0.5 }] }, expectedOperations: ["fills = sanitizePaints"] },
-    { type: "set_text_content", action: { type: "set_text_content", nodeId: "node", characters: "New copy" }, expectedOperations: ["n.getRangeFontName", 'n.characters = "New copy"'] },
-    { type: "set_text_style", action: { type: "set_text_style", nodeId: "node", fontFamily: "Roboto", fontSize: 16, fontWeight: 700, lineHeight: 20, letterSpacing: 0.25 }, expectedOperations: ['const family = "Roboto"', 'n.letterSpacing = { value: 0.25, unit: "PIXELS" }'] },
-    { type: "set_corner_radius", action: { type: "set_corner_radius", nodeId: "node", radius: 5, radii: [1, 2, 3, 4] }, expectedOperations: ["n.cornerRadius = 5", "n.bottomLeftRadius=4"] },
-    { type: "export_node", action: { type: "export_node", nodeId: "node", format: "PNG", scale: 3 }, expectedOperations: ['const format = "PNG"', "constraint: { type: \"SCALE\", value: scale }"] },
-    { type: "set_position", action: { type: "set_position", nodeId: "node", x: 7, y: 9 }, expectedOperations: ["n.x = 7", "n.y = 9"] },
-    { type: "set_layout_positioning", action: { type: "set_layout_positioning", nodeId: "node", positioning: "ABSOLUTE" }, expectedOperations: ['layoutPositioning = "ABSOLUTE"'] },
-    { type: "set_visible", action: { type: "set_visible", nodeId: "node", visible: false }, expectedOperations: ["visible = false"] },
-    { type: "set_opacity", action: { type: "set_opacity", nodeId: "node", opacity: 0.42 }, expectedOperations: ["opacity = 0.42"] },
-    { type: "set_strokes", action: { type: "set_strokes", nodeId: "node", strokes: [{ type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3, a: 0.4 }, opacity: 0.5 }], strokeWeight: 3 }, expectedOperations: ["strokes = sanitizePaints", "n.strokeWeight = 3"] },
-    { type: "set_effects", action: { type: "set_effects", nodeId: "node", effects: [{ type: "DROP_SHADOW", visible: true, radius: 4, blendMode: "NORMAL", color: { r: 0, g: 0, b: 0, a: 0.5 }, offset: { x: 1, y: 2 }, spread: 3, showShadowOnly: false }, { type: "LAYER_BLUR", visible: false, radius: 5 }] }, expectedOperations: ["effects = [{\"type\":\"DROP_SHADOW\""] },
-    { type: "set_alignment", action: { type: "set_alignment", nodeId: "node", primaryAxisAlignItems: "SPACE_BETWEEN", counterAxisAlignItems: "BASELINE" }, expectedOperations: ['primaryAxisAlignItems = "SPACE_BETWEEN"', 'counterAxisAlignItems = "BASELINE"'] },
-    { type: "duplicate_node", action: { type: "duplicate_node", nodeId: "node" }, expectedOperations: ['getNode("node").clone()'] },
-    { type: "set_component_properties", action: { type: "set_component_properties", nodeId: "node", properties: { Variant: "Primary", Disabled: true } }, expectedOperations: ['setProperties({"Variant":"Primary","Disabled":true})'] },
-    { type: "create_paint_style", action: { type: "create_paint_style", name: "Parity/Color", paints: [{ type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3, a: 0.4 }, opacity: 0.5 }] }, expectedOperations: ["s.paints = sanitizePaints"] },
-    { type: "create_text_style", action: { type: "create_text_style", name: "Parity/Text", fontFamily: "Inter", fontWeight: 500, fontSize: 17, lineHeight: 22, letterSpacing: 0.75 }, expectedOperations: ['s.letterSpacing = { value: 0.75, unit: "PIXELS" }'] },
-    { type: "create_effect_style", action: { type: "create_effect_style", name: "Parity/Effect", effects: [{ type: "BACKGROUND_BLUR", visible: true, radius: 8 }] }, expectedOperations: ["figma.createEffectStyle()"] },
-    { type: "set_child_layout_sizing", action: { type: "set_child_layout_sizing", nodeId: "node", layoutSizingHorizontal: "FILL", layoutSizingVertical: "FIXED" }, expectedOperations: ['layoutSizingHorizontal = "FILL"', 'layoutSizingVertical = "FIXED"'] },
-    { type: "set_constraints", action: { type: "set_constraints", nodeId: "node", horizontal: "SCALE", vertical: "STRETCH" }, expectedOperations: ['horizontal: "SCALE"', 'vertical: "STRETCH"'] },
-    { type: "set_min_max_size", action: { type: "set_min_max_size", nodeId: "node", minWidth: 1, maxWidth: 2, minHeight: 3, maxHeight: 4 }, expectedOperations: ["n.minWidth = 1", "n.maxHeight = 4"] },
-    { type: "create_page", action: { type: "create_page", name: "Parity page" }, expectedOperations: ["figma.createPage()"] },
-    { type: "switch_page", action: { type: "switch_page", pageId: "page" }, expectedOperations: ['figma.setCurrentPageAsync(getNode("page"))'] },
-    { type: "set_gradient_fill", action: { type: "set_gradient_fill", nodeId: "node", gradientType: "ANGULAR", stops: [{ position: 0, color: { r: 0, g: 0, b: 0, a: 1 } }, { position: 1, color: { r: 1, g: 1, b: 1, a: 1 } }], angle: 45 }, expectedOperations: ["const angle = 45 * Math.PI / 180", "Math.cos(angle)"] },
-    { type: "set_image_fill", action: { type: "set_image_fill", nodeId: "node", imageBase64: "AQID", scaleMode: "CROP" }, expectedOperations: ['figma.base64Decode("AQID")', 'scaleMode: "CROP"'] },
-    { type: "set_text_properties", action: { type: "set_text_properties", nodeId: "node", textAlignHorizontal: "JUSTIFIED", textAlignVertical: "BOTTOM", paragraphSpacing: 6, textCase: "TITLE", textDecoration: "UNDERLINE", textAutoResize: "HEIGHT" }, expectedOperations: ['n.textAutoResize = "HEIGHT"', 'n.textDecoration = "UNDERLINE"'] },
-    { type: "apply_style", action: { type: "apply_style", nodeId: "node", styleId: "style", property: "effect" }, expectedOperations: ["await n.setEffectStyleIdAsync(styleId)"] },
-    { type: "set_description", action: { type: "set_description", nodeId: "node", description: "Parity description" }, expectedOperations: ['description = "Parity description"'] },
-    { type: "define_component_property", action: { type: "define_component_property", nodeId: "node", propertyName: "Label", propertyType: "TEXT", defaultValue: "Default" }, expectedOperations: ['addComponentProperty("Label", "TEXT", "Default")'] },
-    { type: "create_variable_collection", action: { type: "create_variable_collection", name: "Parity tokens", modes: ["Light", "Dark"] }, expectedOperations: ['const modes = ["Light","Dark"]', "c.renameMode", "c.addMode"] },
-    { type: "create_variable", action: { type: "create_variable", collectionId: "collection", name: "color/primary", resolvedType: "COLOR", value: "#12345678", scopes: ["FRAME_FILL", "SHAPE_FILL"] }, expectedOperations: ['v.scopes = ["FRAME_FILL","SHAPE_FILL"]', 'parseVariableValue("COLOR", "#12345678")', "v.setValueForMode"] },
-    { type: "bind_variable", action: { type: "bind_variable", nodeId: "node", property: "fills", variableId: "variable", paintIndex: 1 }, expectedOperations: ["figma.variables.setBoundVariableForPaint", "const paintIndex = 1", "n.fills = paints"] },
-  ];
+  it("derives exhaustive executor coverage from the Zod schemas", () => {
+    const schemaOperations = actionSchema.options.map((schema) => {
+      const shape = (schema as unknown as { shape: Record<string, unknown> }).shape;
+      const type = (shape.type as { value: string }).value;
+      return { type, fields: Object.keys(shape).filter((field) => field !== "type").sort() };
+    });
 
-  const fallbackFragmentsForField = (type: keyof typeof ACTION_PARITY, field: string, value: unknown): string[] => {
-    if (field === "fontWeight") return [`"${weightToFontStyle(value as number)}"`];
-    if (type === "set_gradient_fill" && field === "gradientType") return [`GRADIENT_${value}`];
-    if (type === "apply_style" && field === "property") {
-      const methodByProperty = {
-        fill: "setFillStyleIdAsync",
-        stroke: "setStrokeStyleIdAsync",
-        text: "setTextStyleIdAsync",
-        effect: "setEffectStyleIdAsync",
-      } as const;
-      return [methodByProperty[value as keyof typeof methodByProperty]];
+    expect(schemaOperations.map(({ type }) => type).sort()).toEqual([...ACTION_TYPES].sort());
+    for (const { type, fields } of schemaOperations) {
+      expect(() => assertActionSchemaCoverage(type, fields)).not.toThrow();
     }
-    if (type === "bind_variable" && field === "property") {
-      return value === "fills" || value === "strokes"
-        ? [`n.${value}`]
-        : [`setBoundVariable("${value}"`];
-    }
-    if (field === "radii") {
-      return (value as number[]).map((radius, index) =>
-        [`topLeftRadius=${radius}`, `topRightRadius=${radius}`, `bottomRightRadius=${radius}`, `bottomLeftRadius=${radius}`][index]
-      );
-    }
-    if (typeof value === "string") return [JSON.stringify(value)];
-    if (typeof value === "number" || typeof value === "boolean") return [String(value)];
-    return [JSON.stringify(value)];
-  };
-
-  it("defines an exhaustive shared parity contract for the action schemas", () => {
-    expect(PARITY_CASES.map(({ type }) => type).sort()).toEqual([...ACTION_TYPES].sort());
   });
 
-  it.each(PARITY_CASES)("emits $type operations for every validated parameter", async ({ type, action }) => {
-    const parsed = actionSchema.parse(action);
-    expect(Object.keys(parsed).filter((key) => key !== "type").sort()).toEqual(
-      [...ACTION_PARITY[type].schemaFields].sort()
+  it("rejects a newly introduced optional field until both executors model it", () => {
+    expect(() => assertActionInputCoverage({ type: "set_position", nodeId: "node", experimentalOffset: 1 })).toThrow(
+      "not implemented by both executors"
     );
-
-    const result = await handleExecute(null, { actions: [action] });
-    for (const field of ACTION_PARITY[type].operationFields) {
-      const value = (parsed as Record<string, unknown>)[field];
-      for (const fragment of fallbackFragmentsForField(type, field, value)) {
-        expect(result.fallbackJs).toContain(fragment);
-      }
-    }
-    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
-      ...args: string[]
-    ) => unknown;
-    expect(() => new AsyncFunction("figma", result.fallbackJs!)).not.toThrow();
-  });
-
-  it.each(PARITY_CASES)("keeps $type defaults and omitted optional fields executable", async ({ type, action }) => {
-    const raw = { ...(action as Record<string, unknown>) };
-    for (const field of ACTION_PARITY[type].schemaFields) {
-      const omitted = { ...raw };
-      delete omitted[field];
-      const parsed = actionSchema.safeParse(omitted);
-      if (!parsed.success) continue;
-
-      const fallback = await handleExecute(null, { actions: [omitted] });
-      const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
-        ...args: string[]
-      ) => unknown;
-      expect(() => new AsyncFunction("figma", fallback.fallbackJs!)).not.toThrow();
-      for (const operationField of ACTION_PARITY[type].operationFields) {
-        if (!(operationField in parsed.data)) continue;
-        const value = (parsed.data as Record<string, unknown>)[operationField];
-        for (const fragment of fallbackFragmentsForField(type, operationField, value)) {
-          expect(fallback.fallbackJs).toContain(fragment);
-        }
-      }
-    }
-  });
-
-  it("uses the shared write contract to exclude read-only actions from rollback eligibility", () => {
-    expect(actionWritesDocument("export_node")).toBe(false);
-    expect(actionWritesDocument("switch_page")).toBe(false);
-    expect(actionWritesDocument("rename")).toBe(true);
+    expect(() => assertActionSchemaCoverage("set_position", ["nodeId", "x", "y", "experimentalOffset"])).toThrow(
+      "schema/executor coverage drift"
+    );
   });
 
   it("preserves the current font when set_text_style omits font fields", async () => {
@@ -301,6 +193,59 @@ describe("handleExecute fallback generation", () => {
     expect(createFrame).not.toHaveBeenCalled();
   });
 
+  it.each([
+    {
+      label: "a non-container frame parent",
+      action: { type: "create_frame", name: "Frame", parentId: "parent" },
+      figma: { getNodeById: () => ({ id: "parent" }), createFrame: vi.fn() },
+      factory: (figma: { createFrame: ReturnType<typeof vi.fn> }) => figma.createFrame,
+    },
+    {
+      label: "a rejected text font",
+      action: { type: "create_text", parentId: "parent", characters: "Text" },
+      figma: {
+        getNodeById: () => ({ id: "parent", appendChild: vi.fn() }),
+        loadFontAsync: async () => { throw new Error("font unavailable"); },
+        createText: vi.fn(),
+      },
+      factory: (figma: { createText: ReturnType<typeof vi.fn> }) => figma.createText,
+    },
+    {
+      label: "an invalid instance parent",
+      action: { type: "create_instance", componentId: "component", parentId: "parent" },
+      figma: {
+        getNodeById: (id: string) => id === "component"
+          ? { id, type: "COMPONENT", createInstance: vi.fn() }
+          : { id },
+      },
+      factory: (figma: { getNodeById: (id: string) => { createInstance?: ReturnType<typeof vi.fn> } }) => figma.getNodeById("component").createInstance!,
+    },
+    {
+      label: "an invalid component source parent",
+      action: { type: "create_component_from_node", nodeId: "source", name: "Component" },
+      figma: { getNodeById: () => ({ id: "source", type: "RECTANGLE" }), createComponentFromNode: vi.fn() },
+      factory: (figma: { createComponentFromNode: ReturnType<typeof vi.fn> }) => figma.createComponentFromNode,
+    },
+    {
+      label: "a non-component variant source",
+      action: { type: "create_component_set", componentIds: ["source"], name: "Variants" },
+      figma: { getNodeById: () => ({ id: "source", type: "RECTANGLE" }), combineAsVariants: vi.fn() },
+      factory: (figma: { combineAsVariants: ReturnType<typeof vi.fn> }) => figma.combineAsVariants,
+    },
+  ])("preflights $label before fallback factories run", async ({ action, figma, factory }) => {
+    const fallback = await handleExecute(null, { actions: [action] });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof figma) => Promise<Array<Record<string, unknown>>>;
+
+    const result = await new AsyncFunction("figma", fallback.fallbackJs!)(figma).catch(() => undefined);
+
+    if (result) {
+      expect(result).toEqual([expect.objectContaining({ actionIndex: 0, status: "failed" })]);
+    }
+    expect(factory(figma as never)).not.toHaveBeenCalled();
+  });
+
   it("only rolls back fallback batches after document writes, including partial writes", async () => {
     const triggerUndo = vi.fn();
     const exported = {
@@ -320,6 +265,19 @@ describe("handleExecute fallback generation", () => {
     await new AsyncFunction("figma", exportFallback.fallbackJs!)({
       getNodeById: (id: string) => id === "exported" ? exported : undefined,
       base64Encode: () => "AQ==",
+      triggerUndo,
+    });
+    expect(triggerUndo).not.toHaveBeenCalled();
+
+    const noOpFallback = await handleExecute(null, {
+      actions: [
+        { type: "set_position", nodeId: "node", x: 0, y: 0 },
+        { type: "rename", nodeId: "missing", name: "Fails" },
+      ],
+      rollbackOnError: true,
+    });
+    await new AsyncFunction("figma", noOpFallback.fallbackJs!)({
+      getNodeById: (id: string) => id === "node" ? { id, x: 0, y: 0 } : undefined,
       triggerUndo,
     });
     expect(triggerUndo).not.toHaveBeenCalled();
@@ -399,7 +357,7 @@ describe("handleExecute fallback generation", () => {
     expect(result.fallbackJs).toContain("const resolveRefId = (id) => {");
     expect(result.fallbackJs).toContain("const createdNodeIds = new Map();");
     expect(result.fallbackJs).toContain('const getNode = (id) => figma.getNodeById(resolveRefId(id));');
-    expect(result.fallbackJs).toContain('const parent = requireNode("$ref:node-0");');
+    expect(result.fallbackJs).toContain('const parent = requireContainer("$ref:node-0");');
     expect(result.fallbackJs).toContain("parent.appendChild(f);");
   });
 

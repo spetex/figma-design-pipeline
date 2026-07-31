@@ -1,76 +1,95 @@
 import type { ActionType } from "./actions.js";
 
 /**
- * The execution contract shared by the plugin batch executor and fallback
- * generator. `schemaFields` documents every validated input field; fields
- * that are only validation guards (such as `confirmed`) are intentionally
- * absent from `operationFields`.
+ * The executable input contract shared by both execution paths. Both the
+ * connected plugin and the fallback generator reject an action that contains
+ * an input field absent here. Tests derive schema fields from Zod and compare
+ * them against this map, so adding an optional schema field fails coverage
+ * until both executors explicitly acknowledge it.
  */
-export interface ActionParitySpec {
-  schemaFields: readonly string[];
-  operationFields: readonly string[];
+export interface ActionOperationSpec {
+  inputFields: readonly string[];
 }
 
-export const ACTION_PARITY = {
-  rename: { schemaFields: ["nodeId", "name"], operationFields: ["nodeId", "name"] },
-  move: { schemaFields: ["nodeId", "targetParentId", "insertIndex"], operationFields: ["nodeId", "targetParentId", "insertIndex"] },
-  create_text: { schemaFields: ["parentId", "characters", "name", "fontFamily", "fontWeight", "fontSize", "lineHeight", "letterSpacing", "fills", "textCase", "textAlignHorizontal", "textAutoResize", "layoutSizingHorizontal", "layoutSizingVertical", "opacity"], operationFields: ["parentId", "characters", "name", "fontFamily", "fontWeight", "fontSize", "lineHeight", "letterSpacing", "fills", "textCase", "textAlignHorizontal", "textAutoResize", "layoutSizingHorizontal", "layoutSizingVertical", "opacity"] },
-  create_frame: { schemaFields: ["name", "parentId", "x", "y", "width", "height"], operationFields: ["name", "parentId", "x", "y", "width", "height"] },
-  delete_node: { schemaFields: ["nodeId", "confirmed"], operationFields: ["nodeId"] },
-  set_layout_mode: { schemaFields: ["nodeId", "mode", "primaryAxisSizingMode", "counterAxisSizingMode"], operationFields: ["nodeId", "mode", "primaryAxisSizingMode", "counterAxisSizingMode"] },
-  set_spacing: { schemaFields: ["nodeId", "itemSpacing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft"], operationFields: ["nodeId", "itemSpacing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft"] },
-  resize: { schemaFields: ["nodeId", "width", "height"], operationFields: ["nodeId", "width", "height"] },
-  create_component_from_node: { schemaFields: ["nodeId", "name"], operationFields: ["nodeId", "name"] },
-  create_component_set: { schemaFields: ["componentIds", "name"], operationFields: ["componentIds", "name"] },
-  create_instance: { schemaFields: ["componentId", "parentId", "x", "y"], operationFields: ["componentId", "parentId", "x", "y"] },
-  swap_instance: { schemaFields: ["instanceId", "newComponentId"], operationFields: ["instanceId", "newComponentId"] },
-  set_fills: { schemaFields: ["nodeId", "fills"], operationFields: ["nodeId", "fills"] },
-  set_text_content: { schemaFields: ["nodeId", "characters"], operationFields: ["nodeId", "characters"] },
-  set_text_style: { schemaFields: ["nodeId", "fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing"], operationFields: ["nodeId", "fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing"] },
-  set_corner_radius: { schemaFields: ["nodeId", "radius", "radii"], operationFields: ["nodeId", "radius", "radii"] },
-  export_node: { schemaFields: ["nodeId", "format", "scale"], operationFields: ["nodeId", "format", "scale"] },
-  set_position: { schemaFields: ["nodeId", "x", "y"], operationFields: ["nodeId", "x", "y"] },
-  set_layout_positioning: { schemaFields: ["nodeId", "positioning"], operationFields: ["nodeId", "positioning"] },
-  set_visible: { schemaFields: ["nodeId", "visible"], operationFields: ["nodeId", "visible"] },
-  set_opacity: { schemaFields: ["nodeId", "opacity"], operationFields: ["nodeId", "opacity"] },
-  set_strokes: { schemaFields: ["nodeId", "strokes", "strokeWeight"], operationFields: ["nodeId", "strokes", "strokeWeight"] },
-  set_effects: { schemaFields: ["nodeId", "effects"], operationFields: ["nodeId", "effects"] },
-  set_alignment: { schemaFields: ["nodeId", "primaryAxisAlignItems", "counterAxisAlignItems"], operationFields: ["nodeId", "primaryAxisAlignItems", "counterAxisAlignItems"] },
-  duplicate_node: { schemaFields: ["nodeId"], operationFields: ["nodeId"] },
-  set_component_properties: { schemaFields: ["nodeId", "properties"], operationFields: ["nodeId", "properties"] },
-  create_paint_style: { schemaFields: ["name", "paints"], operationFields: ["name", "paints"] },
-  create_text_style: { schemaFields: ["name", "fontFamily", "fontWeight", "fontSize", "lineHeight", "letterSpacing"], operationFields: ["name", "fontFamily", "fontWeight", "fontSize", "lineHeight", "letterSpacing"] },
-  create_effect_style: { schemaFields: ["name", "effects"], operationFields: ["name", "effects"] },
-  set_child_layout_sizing: { schemaFields: ["nodeId", "layoutSizingHorizontal", "layoutSizingVertical"], operationFields: ["nodeId", "layoutSizingHorizontal", "layoutSizingVertical"] },
-  set_constraints: { schemaFields: ["nodeId", "horizontal", "vertical"], operationFields: ["nodeId", "horizontal", "vertical"] },
-  set_min_max_size: { schemaFields: ["nodeId", "minWidth", "maxWidth", "minHeight", "maxHeight"], operationFields: ["nodeId", "minWidth", "maxWidth", "minHeight", "maxHeight"] },
-  create_page: { schemaFields: ["name"], operationFields: ["name"] },
-  switch_page: { schemaFields: ["pageId"], operationFields: ["pageId"] },
-  set_gradient_fill: { schemaFields: ["nodeId", "gradientType", "stops", "angle"], operationFields: ["nodeId", "gradientType", "stops", "angle"] },
-  set_image_fill: { schemaFields: ["nodeId", "imageBase64", "scaleMode"], operationFields: ["nodeId", "imageBase64", "scaleMode"] },
-  set_text_properties: { schemaFields: ["nodeId", "textAlignHorizontal", "textAlignVertical", "paragraphSpacing", "textCase", "textDecoration", "textAutoResize"], operationFields: ["nodeId", "textAlignHorizontal", "textAlignVertical", "paragraphSpacing", "textCase", "textDecoration", "textAutoResize"] },
-  apply_style: { schemaFields: ["nodeId", "styleId", "property"], operationFields: ["nodeId", "styleId", "property"] },
-  set_description: { schemaFields: ["nodeId", "description"], operationFields: ["nodeId", "description"] },
-  define_component_property: { schemaFields: ["nodeId", "propertyName", "propertyType", "defaultValue"], operationFields: ["nodeId", "propertyName", "propertyType", "defaultValue"] },
-  create_variable_collection: { schemaFields: ["name", "modes"], operationFields: ["name", "modes"] },
-  create_variable: { schemaFields: ["collectionId", "name", "resolvedType", "value", "scopes"], operationFields: ["collectionId", "name", "resolvedType", "value", "scopes"] },
-  bind_variable: { schemaFields: ["nodeId", "property", "variableId", "paintIndex"], operationFields: ["nodeId", "property", "variableId", "paintIndex"] },
-} as const satisfies Record<ActionType, ActionParitySpec>;
+const operation = (...inputFields: string[]): ActionOperationSpec => ({ inputFields });
 
-export const ACTION_TYPES = Object.keys(ACTION_PARITY) as ActionType[];
+export const ACTION_OPERATIONS = {
+  rename: operation("nodeId", "name"),
+  move: operation("nodeId", "targetParentId", "insertIndex"),
+  create_text: operation("parentId", "characters", "name", "fontFamily", "fontWeight", "fontSize", "lineHeight", "letterSpacing", "fills", "textCase", "textAlignHorizontal", "textAutoResize", "layoutSizingHorizontal", "layoutSizingVertical", "opacity"),
+  create_frame: operation("name", "parentId", "x", "y", "width", "height"),
+  delete_node: operation("nodeId", "confirmed"),
+  set_layout_mode: operation("nodeId", "mode", "primaryAxisSizingMode", "counterAxisSizingMode"),
+  set_spacing: operation("nodeId", "itemSpacing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft"),
+  resize: operation("nodeId", "width", "height"),
+  create_component_from_node: operation("nodeId", "name"),
+  create_component_set: operation("componentIds", "name"),
+  create_instance: operation("componentId", "parentId", "x", "y"),
+  swap_instance: operation("instanceId", "newComponentId"),
+  set_fills: operation("nodeId", "fills"),
+  set_text_content: operation("nodeId", "characters"),
+  set_text_style: operation("nodeId", "fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing"),
+  set_corner_radius: operation("nodeId", "radius", "radii"),
+  export_node: operation("nodeId", "format", "scale"),
+  set_position: operation("nodeId", "x", "y"),
+  set_layout_positioning: operation("nodeId", "positioning"),
+  set_visible: operation("nodeId", "visible"),
+  set_opacity: operation("nodeId", "opacity"),
+  set_strokes: operation("nodeId", "strokes", "strokeWeight"),
+  set_effects: operation("nodeId", "effects"),
+  set_alignment: operation("nodeId", "primaryAxisAlignItems", "counterAxisAlignItems"),
+  duplicate_node: operation("nodeId"),
+  set_component_properties: operation("nodeId", "properties"),
+  create_paint_style: operation("name", "paints"),
+  create_text_style: operation("name", "fontFamily", "fontWeight", "fontSize", "lineHeight", "letterSpacing"),
+  create_effect_style: operation("name", "effects"),
+  set_child_layout_sizing: operation("nodeId", "layoutSizingHorizontal", "layoutSizingVertical"),
+  set_constraints: operation("nodeId", "horizontal", "vertical"),
+  set_min_max_size: operation("nodeId", "minWidth", "maxWidth", "minHeight", "maxHeight"),
+  create_page: operation("name"),
+  switch_page: operation("pageId"),
+  set_gradient_fill: operation("nodeId", "gradientType", "stops", "angle"),
+  set_image_fill: operation("nodeId", "imageBase64", "scaleMode"),
+  set_text_properties: operation("nodeId", "textAlignHorizontal", "textAlignVertical", "paragraphSpacing", "textCase", "textDecoration", "textAutoResize"),
+  apply_style: operation("nodeId", "styleId", "property"),
+  set_description: operation("nodeId", "description"),
+  define_component_property: operation("nodeId", "propertyName", "propertyType", "defaultValue"),
+  create_variable_collection: operation("name", "modes"),
+  create_variable: operation("collectionId", "name", "resolvedType", "value", "scopes"),
+  bind_variable: operation("nodeId", "property", "variableId", "paintIndex"),
+} as const satisfies Record<ActionType, ActionOperationSpec>;
 
-/** Actions that do not change the document and must never make rollback eligible. */
-export const NON_DOCUMENT_WRITE_ACTION_TYPES = [
-  "export_node",
-  "switch_page",
-] as const satisfies readonly ActionType[];
+export const ACTION_TYPES = Object.keys(ACTION_OPERATIONS) as ActionType[];
 
 export function isKnownActionType(type: string): type is ActionType {
-  return Object.prototype.hasOwnProperty.call(ACTION_PARITY, type);
+  return Object.prototype.hasOwnProperty.call(ACTION_OPERATIONS, type);
 }
 
-export function actionWritesDocument(type: ActionType): boolean {
-  return !NON_DOCUMENT_WRITE_ACTION_TYPES.includes(
-    type as typeof NON_DOCUMENT_WRITE_ACTION_TYPES[number]
+/** Reject fields that neither executor has explicitly modeled. */
+export function assertActionInputCoverage(action: Record<string, unknown>): void {
+  const type = action.type;
+  if (typeof type !== "string" || !isKnownActionType(type)) {
+    throw new Error(`Unknown action type: ${String(type)}`);
+  }
+  const unsupportedFields = Object.keys(action).filter(
+    (field) => field !== "type" && field !== "_ref" && !ACTION_OPERATIONS[type].inputFields.includes(field)
   );
+  if (unsupportedFields.length > 0) {
+    throw new Error(
+      `Action ${type} contains field(s) not implemented by both executors: ${unsupportedFields.join(", ")}`
+    );
+  }
+}
+
+/** Test-only schema guard: makes schema/executor drift fail immediately. */
+export function assertActionSchemaCoverage(type: string, schemaFields: readonly string[]): void {
+  if (!isKnownActionType(type)) throw new Error(`Unknown action type: ${type}`);
+  const operationFields = ACTION_OPERATIONS[type].inputFields;
+  const missingFromExecutors = schemaFields.filter((field) => !operationFields.includes(field));
+  const absentFromSchema = operationFields.filter((field) => !schemaFields.includes(field));
+  if (missingFromExecutors.length > 0 || absentFromSchema.length > 0) {
+    throw new Error(
+      `Action ${type} schema/executor coverage drift: missing from executors: ${missingFromExecutors.join(", ") || "none"}; absent from schema: ${absentFromSchema.join(", ") || "none"}`
+    );
+  }
 }
