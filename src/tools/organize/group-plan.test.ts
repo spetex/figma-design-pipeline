@@ -207,4 +207,166 @@ describe("handlePlanGrouping", () => {
         .map((action) => action.targetParentId)
     ).toEqual(["$ref:node-0", "$ref:node-0", "$ref:node-1", "$ref:node-1"]);
   });
+
+  it("makes grouping wrappers absolute and restores their coordinates under auto-layout parents", async () => {
+    const root: FigmaRawNode = {
+      id: "parent",
+      name: "Horizontal dashboard",
+      type: "FRAME",
+      layoutMode: "HORIZONTAL",
+      absoluteBoundingBox: parentBounds,
+      children: [
+        node("card-1", "Card one", 520, 330),
+        node("card-2", "Card two", 640, 330),
+        node("card-3", "Card three", 760, 330),
+      ],
+    };
+
+    const result = await handlePlanGrouping(contextFor(root), {
+      nodeId: root.id,
+      strategy: "minimal",
+    });
+
+    expect(result.actions.slice(0, 3)).toEqual([
+      {
+        type: "create_frame",
+        name: "Grid/Cards",
+        parentId: "parent",
+        x: 20,
+        y: 30,
+        width: 320,
+        height: 60,
+      },
+      {
+        type: "set_layout_positioning",
+        nodeId: "$ref:node-0",
+        positioning: "ABSOLUTE",
+      },
+      {
+        type: "set_position",
+        nodeId: "$ref:node-0",
+        x: 20,
+        y: 30,
+      },
+    ]);
+    expect(result.actions.slice(3, 6)).toEqual([
+      { type: "move", nodeId: "card-1", targetParentId: "$ref:node-0" },
+      { type: "move", nodeId: "card-2", targetParentId: "$ref:node-0" },
+      { type: "move", nodeId: "card-3", targetParentId: "$ref:node-0" },
+    ]);
+  });
+
+  it("does not plan inside instance-owned subtrees for any grouping strategy", async () => {
+    const root: FigmaRawNode = {
+      id: "parent",
+      name: "Dashboard",
+      type: "FRAME",
+      absoluteBoundingBox: parentBounds,
+      children: [
+        {
+          id: "instance",
+          name: "Card collection",
+          type: "INSTANCE",
+          absoluteBoundingBox: { x: 520, y: 330, width: 320, height: 180 },
+          children: [
+            node("card-1", "Card one", 520, 330),
+            node("card-2", "Card two", 600, 330),
+            node("card-3", "Card three", 680, 330),
+            node("card-4", "Card four", 520, 430),
+            node("card-5", "Card five", 600, 430),
+          ],
+        },
+      ],
+    };
+
+    for (const strategy of ["semantic", "spatial", "minimal"] as const) {
+      const result = await handlePlanGrouping(contextFor(root), {
+        nodeId: root.id,
+        strategy,
+      });
+      expect(result.actions).toEqual([]);
+    }
+  });
+
+  it("filters unbounded spatial members before grouping the remaining members", async () => {
+    const unboundedItem: FigmaRawNode = {
+      id: "item-without-bounds",
+      name: "Item without bounds",
+      type: "FRAME",
+    };
+    const root: FigmaRawNode = {
+      id: "parent",
+      name: "Dashboard",
+      type: "FRAME",
+      absoluteBoundingBox: parentBounds,
+      children: [
+        node("item-1", "Item one", 520, 330),
+        node("item-2", "Item two", 600, 330),
+        unboundedItem,
+      ],
+    };
+
+    const result = await handlePlanGrouping(contextFor(root), {
+      nodeId: root.id,
+      strategy: "spatial",
+    });
+
+    expectGroupingPlan(result.actions, {
+      name: "Group/Cluster",
+      memberIds: ["item-1", "item-2"],
+      frame: { x: 20, y: 30, width: 160, height: 60 },
+      positions: {
+        "item-1": { x: 0, y: 0 },
+        "item-2": { x: 80, y: 0 },
+      },
+    });
+  });
+
+  it("does not create or move incomplete semantic or minimal candidates with unbounded members", async () => {
+    const unboundedCard: FigmaRawNode = {
+      id: "card-without-bounds",
+      name: "Card without bounds",
+      type: "FRAME",
+    };
+    const scenarios: Array<{ strategy: "semantic" | "minimal"; root: FigmaRawNode }> = [
+      {
+        strategy: "semantic",
+        root: {
+          id: "parent",
+          name: "Dashboard",
+          type: "FRAME",
+          absoluteBoundingBox: parentBounds,
+          children: [
+            node("card-1", "Card one", 520, 330),
+            unboundedCard,
+            node("other-1", "Other one", 520, 430),
+            node("other-2", "Other two", 640, 430),
+            node("other-3", "Other three", 760, 430),
+          ],
+        },
+      },
+      {
+        strategy: "minimal",
+        root: {
+          id: "parent",
+          name: "Dashboard",
+          type: "FRAME",
+          absoluteBoundingBox: parentBounds,
+          children: [
+            node("card-1", "Card one", 520, 330),
+            node("card-2", "Card two", 640, 330),
+            unboundedCard,
+          ],
+        },
+      },
+    ];
+
+    for (const { strategy, root } of scenarios) {
+      const result = await handlePlanGrouping(contextFor(root), {
+        nodeId: root.id,
+        strategy,
+      });
+      expect(result.actions).toEqual([]);
+    }
+  });
 });

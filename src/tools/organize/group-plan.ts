@@ -35,6 +35,8 @@ export async function handlePlanGrouping(
  * Semantic grouping: group children by their classification into named frames.
  */
 function planSemanticGrouping(node: EnrichedNode, actions: Action[]): void {
+  if (node.isInstance) return;
+
   // Only process nodes with many direct children that could benefit from grouping
   if (node.childCount < 5) {
     for (const child of node.children) planSemanticGrouping(child, actions);
@@ -51,11 +53,12 @@ function planSemanticGrouping(node: EnrichedNode, actions: Action[]): void {
 
   // Create frames for groups with 2+ members
   for (const [classification, members] of groups) {
-    if (members.length < 2) continue;
+    const groupableMembers = members.filter(isGroupableMember);
+    if (groupableMembers.length < 2) continue;
     if (classification === "unknown") continue;
 
     const frameName = toSlashName("Section", classification);
-    addGroupingActions(actions, node, frameName, members);
+    addGroupingActions(actions, node, frameName, groupableMembers);
   }
 
   // Recurse into children
@@ -66,13 +69,15 @@ function planSemanticGrouping(node: EnrichedNode, actions: Action[]): void {
  * Spatial grouping: group by physical proximity on canvas.
  */
 function planSpatialGrouping(node: EnrichedNode, actions: Action[]): void {
+  if (node.isInstance) return;
+
   if (node.childCount < 3) {
     for (const child of node.children) planSpatialGrouping(child, actions);
     return;
   }
 
   // Find clusters of spatially close nodes
-  const clusters = findSpatialClusters(node.children);
+  const clusters = findSpatialClusters(node.children.filter(isGroupableMember));
 
   for (let i = 0; i < clusters.length; i++) {
     const cluster = clusters[i];
@@ -93,9 +98,13 @@ function planSpatialGrouping(node: EnrichedNode, actions: Action[]): void {
  * Minimal grouping: only group obviously related items (e.g., card grids).
  */
 function planMinimalGrouping(node: EnrichedNode, actions: Action[]): void {
+  if (node.isInstance) return;
+
   // Only group card-like patterns
   const cards = node.children.filter(
-    (c) => c.classification === "card" || c.classification === "metric"
+    (c) =>
+      isGroupableMember(c) &&
+      (c.classification === "card" || c.classification === "metric")
   );
 
   if (cards.length >= 3) {
@@ -134,6 +143,12 @@ function addGroupingActions(
   frameName: string,
   members: EnrichedNode[]
 ): void {
+  // Do not create an incomplete wrapper: every moved node needs bounds to be
+  // reparented and restored to its original visible position.
+  if (members.length === 0 || members.some((member) => !isGroupableMember(member))) {
+    return;
+  }
+
   const bounds = computeGroupBounds(members);
   if (!bounds) return;
 
@@ -150,6 +165,23 @@ function addGroupingActions(
     width: bounds.width,
     height: bounds.height,
   });
+
+  if (hasAutoLayout(parent)) {
+    // A wrapper in an auto-layout parent must be absolute before it contains
+    // members; otherwise it participates in flow and Figma ignores its
+    // requested coordinates. Reset its position after making it absolute.
+    actions.push({
+      type: "set_layout_positioning",
+      nodeId: frameRef,
+      positioning: "ABSOLUTE",
+    });
+    actions.push({
+      type: "set_position",
+      nodeId: frameRef,
+      x: bounds.x - parentX,
+      y: bounds.y - parentY,
+    });
+  }
 
   // The create action must run first so this canonical compiler-assigned ref
   // resolves to the newly created frame for every member move.
@@ -170,6 +202,26 @@ function addGroupingActions(
       y: member.bounds.y - bounds.y,
     });
   }
+}
+
+/**
+ * The planner only emits moves for scene nodes with absolute bounds. Instance
+ * subtrees are skipped by the callers above because their owned descendants
+ * cannot be safely reparented.
+ */
+function isGroupableMember(node: EnrichedNode): boolean {
+  return (
+    node.bounds !== undefined &&
+    node.type !== "DOCUMENT" &&
+    node.type !== "CANVAS"
+  );
+}
+
+function hasAutoLayout(node: EnrichedNode): boolean {
+  return (
+    node.layoutInfo?.mode === "horizontal" ||
+    node.layoutInfo?.mode === "vertical"
+  );
 }
 
 function findSpatialClusters(nodes: EnrichedNode[]): EnrichedNode[][] {

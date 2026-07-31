@@ -25,6 +25,64 @@ describe("actionSchema (zod v4)", () => {
 });
 
 describe("handleExecute fallback generation", () => {
+  it("keeps a planned grouping wrapper absolute in plugin and fallback execution paths", async () => {
+    const actions = [
+      {
+        type: "create_frame" as const,
+        name: "Grid/Cards",
+        parentId: "parent",
+        x: 20,
+        y: 30,
+        width: 320,
+        height: 60,
+      },
+      {
+        type: "set_layout_positioning" as const,
+        nodeId: "$ref:node-0",
+        positioning: "ABSOLUTE" as const,
+      },
+      {
+        type: "set_position" as const,
+        nodeId: "$ref:node-0",
+        x: 20,
+        y: 30,
+      },
+    ];
+    const execute = vi.fn().mockResolvedValue({
+      batchId: "test",
+      dryRun: false,
+      success: true,
+      results: [],
+      nodeIdMap: {},
+      summary: { total: actions.length, applied: actions.length, failed: 0, skipped: 0 },
+    });
+    const bridge = {
+      isConnected: () => true,
+      execute,
+    } as unknown as BridgeServer;
+
+    await handleExecute(bridge, { actions });
+    expect(execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actions: [
+          expect.objectContaining({ type: "create_frame", _ref: "$ref:node-0" }),
+          { type: "set_layout_positioning", nodeId: "$ref:node-0", positioning: "ABSOLUTE" },
+          { type: "set_position", nodeId: "$ref:node-0", x: 20, y: 30 },
+        ],
+      }),
+      undefined
+    );
+
+    const fallback = await handleExecute(null, { actions });
+    const positioning = 'getNode("$ref:node-0").layoutPositioning = "ABSOLUTE";';
+    const position = 'const n = getNode("$ref:node-0"); n.x = 20; n.y = 30;';
+    expect(fallback.fallbackJs).toContain(positioning);
+    expect(fallback.fallbackJs).toContain(position);
+    expect(fallback.fallbackJs!.indexOf(positioning)).toBeLessThan(
+      fallback.fallbackJs!.indexOf(position)
+    );
+  });
+
   it("resolves batch references in fallback JS when the plugin bridge is disconnected", async () => {
     const result = await handleExecute(null, {
       actions: [
