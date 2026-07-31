@@ -1,6 +1,7 @@
 import type { ToolContext } from "../../shared/context.js";
 import type { EnrichedNode } from "../../shared/types.js";
 import type { Action } from "../../shared/actions.js";
+import { getNextCreateReference } from "../../plugin/batch-compiler.js";
 import { toSlashName } from "../../shared/naming.js";
 import { handleGetTree } from "../inspect/get-tree.js";
 
@@ -8,6 +9,25 @@ interface PlanGroupingParams {
   nodeId: string;
   strategy?: "semantic" | "spatial" | "minimal";
 }
+
+const ELIGIBLE_PARENT_TYPES = new Set([
+  "CANVAS",
+  "FRAME",
+  "COMPONENT",
+  "SECTION",
+]);
+
+const ELIGIBLE_MEMBER_TYPES = new Set([
+  "FRAME",
+  "INSTANCE",
+  "VECTOR",
+  "STAR",
+  "LINE",
+  "ELLIPSE",
+  "RECTANGLE",
+  "TEXT",
+  "SHAPE_WITH_TEXT",
+]);
 
 export async function handlePlanGrouping(
   ctx: ToolContext,
@@ -34,6 +54,8 @@ export async function handlePlanGrouping(
  * Semantic grouping: group children by their classification into named frames.
  */
 function planSemanticGrouping(node: EnrichedNode, actions: Action[]): void {
+  if (!isEligibleGroupingParent(node)) return;
+
   // Only process nodes with many direct children that could benefit from grouping
   if (node.childCount < 5) {
     for (const child of node.children) planSemanticGrouping(child, actions);
@@ -50,25 +72,12 @@ function planSemanticGrouping(node: EnrichedNode, actions: Action[]): void {
 
   // Create frames for groups with 2+ members
   for (const [classification, members] of groups) {
-    if (members.length < 2) continue;
+    const groupableMembers = members.filter(isEligibleGroupingMember);
+    if (groupableMembers.length < 2) continue;
     if (classification === "unknown") continue;
 
-    // Calculate bounding box for the group
-    const bounds = computeGroupBounds(members);
-    if (!bounds) continue;
-
     const frameName = toSlashName("Section", classification);
-
-    // Create frame action
-    actions.push({
-      type: "create_frame",
-      name: frameName,
-      parentId: node.id,
-      x: bounds.x,
-      y: bounds.y,
-      width: bounds.width,
-      height: bounds.height,
-    });
+    addGroupingActions(actions, node, frameName, groupableMembers);
   }
 
   // Recurse into children
@@ -79,30 +88,26 @@ function planSemanticGrouping(node: EnrichedNode, actions: Action[]): void {
  * Spatial grouping: group by physical proximity on canvas.
  */
 function planSpatialGrouping(node: EnrichedNode, actions: Action[]): void {
+  if (!isEligibleGroupingParent(node)) return;
+
   if (node.childCount < 3) {
     for (const child of node.children) planSpatialGrouping(child, actions);
     return;
   }
 
   // Find clusters of spatially close nodes
-  const clusters = findSpatialClusters(node.children);
+  const clusters = findSpatialClusters(node.children.filter(isEligibleGroupingMember));
 
   for (let i = 0; i < clusters.length; i++) {
     const cluster = clusters[i];
     if (cluster.length < 2) continue;
 
-    const bounds = computeGroupBounds(cluster);
-    if (!bounds) continue;
-
-    actions.push({
-      type: "create_frame",
-      name: clusters.length === 1 ? "Group/Cluster" : `Group/Cluster-${i + 1}`,
-      parentId: node.id,
-      x: bounds.x,
-      y: bounds.y,
-      width: bounds.width,
-      height: bounds.height,
-    });
+    addGroupingActions(
+      actions,
+      node,
+      clusters.length === 1 ? "Group/Cluster" : `Group/Cluster-${i + 1}`,
+      cluster
+    );
   }
 
   for (const child of node.children) planSpatialGrouping(child, actions);
@@ -112,24 +117,17 @@ function planSpatialGrouping(node: EnrichedNode, actions: Action[]): void {
  * Minimal grouping: only group obviously related items (e.g., card grids).
  */
 function planMinimalGrouping(node: EnrichedNode, actions: Action[]): void {
+  if (!isEligibleGroupingParent(node)) return;
+
   // Only group card-like patterns
   const cards = node.children.filter(
-    (c) => c.classification === "card" || c.classification === "metric"
+    (c) =>
+      isEligibleGroupingMember(c) &&
+      (c.classification === "card" || c.classification === "metric")
   );
 
   if (cards.length >= 3) {
-    const bounds = computeGroupBounds(cards);
-    if (bounds) {
-      actions.push({
-        type: "create_frame",
-        name: "Grid/Cards",
-        parentId: node.id,
-        x: bounds.x,
-        y: bounds.y,
-        width: bounds.width,
-        height: bounds.height,
-      });
-    }
+    addGroupingActions(actions, node, "Grid/Cards", cards);
   }
 
   for (const child of node.children) planMinimalGrouping(child, actions);
@@ -149,8 +147,132 @@ function computeGroupBounds(
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
+/**
+ * Create one frame and put all grouped members inside it.
+ *
+ * REST bounds are absolute canvas coordinates. Once a frame is appended to its
+ * parent, Figma interprets its x/y coordinates relative to that parent. Moving
+ * a node also changes the coordinate space of its x/y values, so restore each
+ * bounded member's local coordinates after moving it to preserve its position
+ * on the canvas.
+ */
+function addGroupingActions(
+  actions: Action[],
+  parent: EnrichedNode,
+  frameName: string,
+  members: EnrichedNode[]
+): void {
+  // Do not create an incomplete wrapper: every moved node needs bounds to be
+  // reparented and restored to its original visible position.
+  if (
+    !isEligibleGroupingParent(parent) ||
+    members.length === 0 ||
+    members.some((member) => !isEligibleGroupingMember(member))
+  ) {
+    return;
+  }
+
+  const bounds = computeGroupBounds(members);
+  if (!bounds) return;
+
+  const frameRef = getNextCreateReference(actions);
+  const parentX = parent.bounds?.x ?? 0;
+  const parentY = parent.bounds?.y ?? 0;
+
+  actions.push({
+    type: "create_frame",
+    name: frameName,
+    parentId: parent.id,
+    x: bounds.x - parentX,
+    y: bounds.y - parentY,
+    width: bounds.width,
+    height: bounds.height,
+  });
+
+  if (hasLayoutParent(parent)) {
+    // A wrapper in an auto-layout parent must be absolute before it contains
+    // members; otherwise it participates in flow and Figma ignores its
+    // requested coordinates. Reset its position after making it absolute.
+    actions.push({
+      type: "set_layout_positioning",
+      nodeId: frameRef,
+      positioning: "ABSOLUTE",
+    });
+    actions.push({
+      type: "set_position",
+      nodeId: frameRef,
+      x: bounds.x - parentX,
+      y: bounds.y - parentY,
+    });
+  }
+
+  // The create action must run first so this canonical compiler-assigned ref
+  // resolves to the newly created frame for every member move.
+  for (const member of members) {
+    actions.push({
+      type: "move",
+      nodeId: member.id,
+      targetParentId: frameRef,
+    });
+  }
+
+  for (const member of members) {
+    if (!member.bounds) continue;
+    actions.push({
+      type: "set_position",
+      nodeId: member.id,
+      x: member.bounds.x - bounds.x,
+      y: member.bounds.y - bounds.y,
+    });
+  }
+}
+
+/**
+ * Parent and member eligibility is deliberately allow-listed. Component sets
+ * restrict their children, slots and several special node kinds cannot be
+ * safely reparented, and group/boolean or transformed hierarchies require
+ * transform composition that this plan does not model.
+ */
+function isEligibleGroupingParent(node: EnrichedNode): boolean {
+  return (
+    !node.isInstance &&
+    ELIGIBLE_PARENT_TYPES.has(node.type) &&
+    !hasNonIdentityTransform(node)
+  );
+}
+
+function isEligibleGroupingMember(node: EnrichedNode): boolean {
+  return (
+    node.bounds !== undefined &&
+    ELIGIBLE_MEMBER_TYPES.has(node.type) &&
+    !hasNonIdentityTransform(node)
+  );
+}
+
+function hasLayoutParent(node: EnrichedNode): boolean {
+  return (
+    node.layoutInfo?.mode === "horizontal" ||
+    node.layoutInfo?.mode === "vertical" ||
+    node.layoutInfo?.mode === "grid"
+  );
+}
+
+function hasNonIdentityTransform(node: EnrichedNode): boolean {
+  const transform = node.absoluteTransform;
+  if (!transform) return false;
+
+  const [[a, b], [c, d]] = transform;
+  const epsilon = 1e-6;
+  return (
+    Math.abs(a - 1) > epsilon ||
+    Math.abs(b) > epsilon ||
+    Math.abs(c) > epsilon ||
+    Math.abs(d - 1) > epsilon
+  );
+}
+
 function findSpatialClusters(nodes: EnrichedNode[]): EnrichedNode[][] {
-  const withBounds = nodes.filter((n) => n.bounds);
+  const withBounds = nodes.filter(isEligibleGroupingMember);
   if (withBounds.length < 2) return [];
 
   // Simple cluster: group nodes that are within 50px of each other

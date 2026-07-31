@@ -11,6 +11,7 @@ export const figmaNodeTypeSchema = z.enum([
   "COMPONENT",
   "COMPONENT_SET",
   "INSTANCE",
+  "SLOT",
   "VECTOR",
   "BOOLEAN_OPERATION",
   "STAR",
@@ -68,6 +69,11 @@ export interface FigmaAbsoluteBoundingBox {
   height: number;
 }
 
+export type FigmaTransform = [
+  [number, number, number],
+  [number, number, number],
+];
+
 export interface FigmaRawNode {
   id: string;
   name: string;
@@ -76,13 +82,14 @@ export interface FigmaRawNode {
   children?: FigmaRawNode[];
   absoluteBoundingBox?: FigmaAbsoluteBoundingBox;
   absoluteRenderBounds?: FigmaAbsoluteBoundingBox;
+  absoluteTransform?: FigmaTransform;
   constraints?: FigmaLayoutConstraints;
   fills?: FigmaPaint[];
   strokes?: FigmaPaint[];
   strokeWeight?: number;
   cornerRadius?: number;
   rectangleCornerRadii?: [number, number, number, number];
-  layoutMode?: "HORIZONTAL" | "VERTICAL" | "NONE";
+  layoutMode?: "HORIZONTAL" | "VERTICAL" | "GRID" | "NONE";
   primaryAxisSizingMode?: string;
   counterAxisSizingMode?: string;
   itemSpacing?: number;
@@ -152,9 +159,10 @@ export interface EnrichedNode {
   depth: number;
   childCount: number;
   bounds?: FigmaAbsoluteBoundingBox;
+  absoluteTransform?: FigmaTransform;
   tokens: DesignToken[];
   layoutInfo?: {
-    mode: "horizontal" | "vertical" | "absolute" | "none";
+    mode: "horizontal" | "vertical" | "grid" | "absolute" | "none";
     spacing?: number;
     padding?: { top: number; right: number; bottom: number; left: number };
   };
