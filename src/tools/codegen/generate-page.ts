@@ -1,5 +1,5 @@
 import type { ToolContext } from "../../shared/context.js";
-import type { GeneratedFile } from "../../shared/types.js";
+import type { CodegenDiagnostic, GeneratedFile } from "../../shared/types.js";
 import { handleGetTree } from "../inspect/get-tree.js";
 import { handleMapComponents } from "./map-components.js";
 import { emitAstroTemplate } from "../../codegen/astro-emitter.js";
@@ -18,6 +18,7 @@ export async function handleGeneratePage(
   file: GeneratedFile;
   mappingsUsed: number;
   unmappedNodes: number;
+  diagnostics: CodegenDiagnostic[];
 }> {
   const { nodeId, templateType = "generic", registry = "default" } = params;
 
@@ -31,7 +32,7 @@ export async function handleGeneratePage(
   });
 
   // Generate the template
-  const file = emitAstroTemplate({
+  const { file, diagnostics, mappingsUsed } = emitAstroTemplate({
     mappings,
     tree,
     templateType,
@@ -41,7 +42,8 @@ export async function handleGeneratePage(
   return {
     nodeId,
     file,
-    mappingsUsed: mappings.length,
+    mappingsUsed,
     unmappedNodes: unmapped.length,
+    diagnostics,
   };
 }

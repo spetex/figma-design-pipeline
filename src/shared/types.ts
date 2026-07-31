@@ -245,9 +245,34 @@ export interface ComponentMapping {
   figmaNodeId: string;
   figmaNodeName: string;
   cmsComponent: string;
+  componentName: string;
+  componentPath: string;
+  componentCategory: ComponentRegistryEntry["category"];
+  componentProps: ComponentProp[];
   confidence: number;
   propMappings: Record<string, string>;
   hints?: string[];
+}
+
+export interface CodegenDiagnostic {
+  severity: "error" | "warning";
+  code:
+    | "INVALID_COMPONENT_PATH"
+    | "UNSUPPORTED_COMPONENT_EXTENSION"
+    | "INVALID_COMPONENT_NAME"
+    | "DUPLICATE_NODE_MAPPING"
+    | "INVALID_COMPONENT_PROP"
+    | "INVALID_PROP_MAPPINGS"
+    | "DUPLICATE_COMPONENT_PROP"
+    | "MISSING_REQUIRED_PROP_MAPPING"
+    | "UNKNOWN_COMPONENT_PROP"
+    | "INVALID_SCHEMA_FIELD"
+    | "UNSUPPORTED_COMPONENT_PROP_TYPE"
+    | "MAPPING_NOT_RENDERED";
+  message: string;
+  figmaNodeId: string;
+  component: string;
+  path: string;
 }
 
 export interface GeneratedFile {

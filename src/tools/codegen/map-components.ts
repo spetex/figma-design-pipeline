@@ -22,6 +22,20 @@ export async function handleMapComponents(
   const { tree } = await handleGetTree(ctx, { nodeId, includeStyles: true });
   const registry = await loadRegistry(registryName);
 
+  const { mappings, unmapped } = mapComponentsInTree(tree, registry, hints);
+
+  return { nodeId, mappings, unmapped };
+}
+
+export function mapComponentsInTree(
+  tree: EnrichedNode,
+  registry: Awaited<ReturnType<typeof loadRegistry>>,
+  hints: Array<{ nodeId: string; component: string }> = []
+): {
+  mappings: ComponentMapping[];
+  unmapped: Array<{ nodeId: string; name: string; classification: string }>;
+} {
+
   const mappings: ComponentMapping[] = [];
   const unmapped: Array<{ nodeId: string; name: string; classification: string }> = [];
 
@@ -31,7 +45,7 @@ export async function handleMapComponents(
   // Sort by confidence descending
   mappings.sort((a, b) => b.confidence - a.confidence);
 
-  return { nodeId, mappings, unmapped };
+  return { mappings, unmapped };
 }
 
 function mapNode(
@@ -58,6 +72,10 @@ function mapNode(
         figmaNodeId: node.id,
         figmaNodeName: node.name,
         cmsComponent: match.component.id,
+        componentName: match.component.name,
+        componentPath: match.component.path,
+        componentCategory: match.component.category,
+        componentProps: match.component.props,
         confidence: match.confidence,
         propMappings,
       });

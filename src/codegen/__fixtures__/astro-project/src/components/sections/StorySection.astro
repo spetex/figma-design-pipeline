@@ -1,0 +1,9 @@
+---
+interface Props {
+  story: string;
+}
+
+const { story } = Astro.props;
+---
+
+<section data-story={JSON.stringify(story)}></section>
