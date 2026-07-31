@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { FigmaRestClient } from "./shared/figma-rest.js";
 import { SnapshotCache } from "./pipeline/snapshot.js";
-import { parseFigmaUrl } from "./shared/figma-url.js";
+import { FigmaSession, type FileSelection } from "./shared/figma-session.js";
 import type { ToolContext } from "./shared/context.js";
 import {
   getTreeInputSchema,
@@ -72,8 +72,7 @@ const bridge = new BridgeServer({
   onDocumentChange: () => snapshotCache.invalidateAll(),
 });
 
-// Track the last root node for session continuity
-let lastRootNodeId: string | undefined;
+const figmaSession = new FigmaSession();
 
 function getContext(): ToolContext {
   if (!rest) {
@@ -87,40 +86,27 @@ function getContext(): ToolContext {
 
 // ─── URL Resolution ─────────────────────────────────────────────────
 
+function activateFile(selection: FileSelection): void {
+  if (rest && selection.fileChanged) {
+    rest.defaultFileKey = selection.fileKey;
+    snapshotCache.invalidateAll();
+    console.error(`[mcp] Switched to Figma file: ${selection.fileKey}${selection.fileName ? ` (${selection.fileName})` : ""}`);
+  }
+}
+
 /** Update session file key if a new Figma URL is provided. No nodeId required. */
 function applyFileKey(params: { figmaUrl?: string }): void {
   if (!params.figmaUrl) return;
-  const parsed = parseFigmaUrl(params.figmaUrl);
-  if (rest && parsed.fileKey !== rest.defaultFileKey) {
-    rest.defaultFileKey = parsed.fileKey;
-    snapshotCache.invalidateAll();
-    console.error(`[mcp] Switched to Figma file: ${parsed.fileKey}${parsed.fileName ? ` (${parsed.fileName})` : ""}`);
-  }
+  activateFile(figmaSession.applyFileKey(params.figmaUrl, rest?.defaultFileKey));
 }
 
 /** Resolve figmaUrl + nodeId into a concrete nodeId. Throws if no nodeId can be determined. */
 function resolveParams(params: { figmaUrl?: string; nodeId?: string }): { nodeId: string } {
-  let nodeId = params.nodeId;
-
-  if (params.figmaUrl) {
-    applyFileKey(params);
-    if (!nodeId) {
-      const parsed = parseFigmaUrl(params.figmaUrl);
-      if (parsed.nodeId) nodeId = parsed.nodeId;
-    }
-  }
-
-  if (!nodeId) {
-    nodeId = lastRootNodeId || "";
-  }
-
-  if (!nodeId) {
-    throw new Error(
-      "No node ID provided. Pass a Figma URL with ?node-id=X:Y or provide nodeId directly."
-    );
-  }
-
-  return { nodeId };
+  // Activate the URL's file before resolving so a missing node ID still leaves the
+  // session on the requested file for a follow-up call with an explicit nodeId.
+  applyFileKey(params);
+  const resolved = figmaSession.resolveParams(params, rest?.defaultFileKey);
+  return { nodeId: resolved.nodeId };
 }
 
 function jsonResponse(result: unknown) {
@@ -315,8 +301,10 @@ server.tool(
     const ctx = getContext();
     const result = await handleGetTree(ctx, { ...params, nodeId });
 
-    // Track for session continuity
-    lastRootNodeId = nodeId;
+    // Track the successful root read together with its file for session continuity.
+    if (ctx.rest.defaultFileKey) {
+      figmaSession.rememberRoot({ fileKey: ctx.rest.defaultFileKey, nodeId });
+    }
 
     const compact = compactTree(result.tree);
     const { tree: outputTree, truncated, nodeCount } = truncateTree(compact, 80_000);
