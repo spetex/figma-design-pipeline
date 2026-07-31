@@ -1,4 +1,5 @@
 import type { BridgeServer, BatchResult } from "../../plugin/bridge.js";
+import type { SnapshotCache } from "../../pipeline/snapshot.js";
 import { compileBatch } from "../../plugin/batch-compiler.js";
 import { actionSchema, type Action } from "../../shared/actions.js";
 import { weightToFontStyle } from "../../shared/font.js";
@@ -15,6 +16,23 @@ export interface ExecuteResult {
   pluginConnected: boolean;
   result?: BatchResult;
   fallbackJs?: string;
+}
+
+/**
+ * Connected writes can alter any cached ancestor or descendant, so invalidate
+ * the whole inspection cache after a completed non-dry-run batch that applied
+ * at least one action. Returns whether invalidation was performed.
+ */
+export function invalidateSnapshotsAfterExecute(
+  snapshotCache: SnapshotCache,
+  execution: ExecuteResult
+): boolean {
+  const batch = execution.result;
+  if (!execution.pluginConnected || !batch || batch.dryRun || batch.summary.applied === 0) {
+    return false;
+  }
+  snapshotCache.invalidateAll();
+  return true;
 }
 
 export async function handleExecute(

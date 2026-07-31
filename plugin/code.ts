@@ -887,6 +887,21 @@ figma.on("currentpagechange", () => {
   pushUiContext();
 });
 
+// Coalesce Figma's sometimes-bursty documentchange events before sending a
+// bridge notification. The bridge invalidates all REST inspection snapshots,
+// including those affected by edits made outside figma_execute.
+let documentChangeTimer: ReturnType<typeof setTimeout> | null = null;
+figma.on("documentchange", () => {
+  if (documentChangeTimer) return;
+  documentChangeTimer = setTimeout(() => {
+    documentChangeTimer = null;
+    figma.ui.postMessage({
+      type: "send_to_bridge",
+      data: { type: "document_changed" },
+    });
+  }, 100);
+});
+
 pushUiContext();
 
 figma.on("close", () => {});

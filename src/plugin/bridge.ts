@@ -10,6 +10,7 @@ export interface BridgeServerOptions {
   maxPayloadBytes?: number;
   maxChunkedResultBytes?: number;
   maxChunkedResultChunks?: number;
+  onDocumentChange?: () => void;
 }
 
 export interface BridgeStatus {
@@ -82,11 +83,13 @@ export class BridgeServer {
   private readonly maxPayloadBytes: number;
   private readonly maxChunkedResultBytes: number;
   private readonly maxChunkedResultChunks: number;
+  private readonly onDocumentChange?: () => void;
 
   constructor({
     maxPayloadBytes = DEFAULT_BRIDGE_MAX_PAYLOAD_BYTES,
     maxChunkedResultBytes = DEFAULT_BRIDGE_MAX_CHUNKED_RESULT_BYTES,
     maxChunkedResultChunks = DEFAULT_BRIDGE_MAX_CHUNKED_RESULT_CHUNKS,
+    onDocumentChange,
   }: BridgeServerOptions = {}) {
     if (!Number.isSafeInteger(maxPayloadBytes) || maxPayloadBytes <= 0) {
       throw new Error("maxPayloadBytes must be a positive integer");
@@ -100,6 +103,7 @@ export class BridgeServer {
     this.maxPayloadBytes = maxPayloadBytes;
     this.maxChunkedResultBytes = maxChunkedResultBytes;
     this.maxChunkedResultChunks = maxChunkedResultChunks;
+    this.onDocumentChange = onDocumentChange;
   }
 
   async start(preferredPort = 4010): Promise<number> {
@@ -207,6 +211,18 @@ export class BridgeServer {
 
     if (data.type === "batch_result_chunk") {
       this.handleBatchResultChunk(data);
+      return;
+    }
+
+    if (data.type === "document_changed") {
+      // Figma's documentchange event covers edits made outside this bridge too.
+      // A whole-cache invalidation is deliberately conservative: a change can
+      // affect an arbitrary ancestor, descendant, or layout-dependent sibling.
+      try {
+        this.onDocumentChange?.();
+      } catch (err) {
+        console.error("[bridge] Document-change handler failed:", err);
+      }
       return;
     }
 

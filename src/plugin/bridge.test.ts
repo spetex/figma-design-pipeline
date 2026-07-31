@@ -3,6 +3,8 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { BridgeServer } from "./bridge.js";
+import { SnapshotCache } from "../pipeline/snapshot.js";
+import type { EnrichedNode } from "../shared/types.js";
 
 async function getAvailablePort(): Promise<number> {
   const server = createServer();
@@ -57,6 +59,33 @@ describe("BridgeServer WebSocket limits", () => {
       await expect(closeCode).resolves.toBe(1009);
       await vi.waitFor(() => {
         expect(bridge.isConnected()).toBe(false);
+      });
+    } finally {
+      client.terminate();
+      await bridge.stop();
+    }
+  });
+
+  it("invalidates inspection snapshots when the plugin reports a document change", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const snapshotCache = new SnapshotCache();
+    snapshotCache.set("file/root", {} as EnrichedNode);
+    const bridge = new BridgeServer({
+      onDocumentChange: () => snapshotCache.invalidateAll(),
+    });
+    const port = await getAvailablePort();
+    await bridge.start(port);
+    const client = new WebSocket(`ws://127.0.0.1:${port}/plugin`);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        client.once("open", resolve);
+        client.once("error", reject);
+      });
+      client.send(JSON.stringify({ type: "document_changed" }));
+
+      await vi.waitFor(() => {
+        expect(snapshotCache.get("file/root", Number.POSITIVE_INFINITY)).toBeNull();
       });
     } finally {
       client.terminate();
