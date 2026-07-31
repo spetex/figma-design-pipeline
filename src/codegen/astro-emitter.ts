@@ -421,7 +421,12 @@ function registryPathToImport(
 
   const normalized = registryPath.replace(/^\.\//, "");
   const canonical = posix.normalize(normalized);
-  if (!normalized || normalized.endsWith("/") || canonical !== normalized) {
+  if (
+    !normalized ||
+    posix.isAbsolute(normalized) ||
+    normalized.endsWith("/") ||
+    canonical !== normalized
+  ) {
     diagnostics.push(diagnostic(
       mapping,
       "INVALID_COMPONENT_PATH",

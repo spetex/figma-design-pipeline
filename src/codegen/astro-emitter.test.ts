@@ -371,6 +371,13 @@ import GenericTemplate from "@/components/templates/GenericTemplate.astro";
 
   it("rejects trailing separators and non-canonical component path segments", async () => {
     const invalidPaths = [
+      ".//src/components/ui/ActionLink.astro",
+      ".///src/components/ui/ActionLink.astro",
+      "././src/components/ui/ActionLink.astro",
+      "././/src/components/ui/ActionLink.astro",
+      ".//./src/components/ui/ActionLink.astro",
+      ".//\\src/components/ui/ActionLink.astro",
+      ".\\//src/components/ui/ActionLink.astro",
       "src/components/ui/ActionLink.astro/",
       "src/components/ui/ActionLink.astro//",
       "src/components/ui/ActionLink.astro/.",
@@ -409,12 +416,33 @@ import GenericTemplate from "@/components/templates/GenericTemplate.astro";
     ));
     expect(mappingsUsed).toBe(0);
     for (const path of invalidPaths) expect(file.content).not.toContain(path);
+    expect(file.content).not.toContain("ActionLink.astro");
+    expect(file.content).not.toContain("../..");
     const { stdout } = await checkGeneratedFile(file, `---
 import GenericTemplate from "@/components/templates/GenericTemplate.astro";
 ---
 <GenericTemplate data={{ id: "invalid-paths" }} />`);
     expect(stdout).toContain("- 0 errors");
   }, 30_000);
+
+  it("accepts a single canonical project-relative dot prefix", () => {
+    const node = fixtureNode("canonical-dot-path", "Canonical Dot Path", "cta", 1);
+    const mapping = mappingFor(node, {
+      componentPath: "./src/components/ui/ActionLink.astro",
+    });
+
+    const { file, diagnostics, mappingsUsed } = emitAstroTemplate({
+      mappings: [mapping],
+      tree: node,
+      templateType: "generic",
+    });
+
+    expect(diagnostics).toEqual([]);
+    expect(mappingsUsed).toBe(1);
+    expect(file.content).toContain(
+      'import ActionLink from "@/components/ui/ActionLink.astro";'
+    );
+  });
 });
 
 async function loadFixtureRegistry(): Promise<ComponentRegistry> {
