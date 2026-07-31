@@ -1,5 +1,5 @@
 export interface Props {
-  stats: unknown;
+  stats: number[];
 }
 
 export default function StatsPanel(_props: Props) {

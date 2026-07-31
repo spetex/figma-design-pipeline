@@ -8,7 +8,7 @@
       "path": "src/components/ui/ActionLink.astro",
       "category": "ui",
       "description": "UI action link",
-      "props": [{ "name": "label", "type": "unknown", "required": true }],
+      "props": [{ "name": "label", "type": "string", "required": true }],
       "figmaSignature": { "keywords": ["action"] },
       "schemaFields": { "label": "actionLabel" }
     },
@@ -18,7 +18,7 @@
       "path": "src/components/blocks/FeatureGrid.astro",
       "category": "blocks",
       "description": "Feature block",
-      "props": [{ "name": "items", "type": "unknown", "required": true }],
+      "props": [{ "name": "items", "type": "string[]", "required": true }],
       "figmaSignature": { "keywords": ["features"] },
       "schemaFields": { "items": "features" }
     },
@@ -28,7 +28,7 @@
       "path": "src/components/sections/StorySection.astro",
       "category": "sections",
       "description": "Story section",
-      "props": [{ "name": "story", "type": "unknown", "required": true }],
+      "props": [{ "name": "story", "type": "string", "required": true }],
       "figmaSignature": { "keywords": ["story"] },
       "schemaFields": { "story": "story" }
     },
@@ -38,7 +38,7 @@
       "path": "src/components/sections/StatsPanel.tsx",
       "category": "sections",
       "description": "TSX stats section",
-      "props": [{ "name": "stats", "type": "unknown", "required": true }],
+      "props": [{ "name": "stats", "type": "number[]", "required": true }],
       "figmaSignature": { "keywords": ["stats"] },
       "schemaFields": { "stats": "stats" }
     }

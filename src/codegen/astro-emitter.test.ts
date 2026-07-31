@@ -51,22 +51,124 @@ describe("Astro codegen", () => {
     expect(file.content).toContain('import FeatureGrid from "@/components/blocks/FeatureGrid.astro";');
     expect(file.content).toContain('import StorySection from "@/components/sections/StorySection.astro";');
     expect(file.content).toContain('import StatsPanel from "@/components/sections/StatsPanel.tsx";');
-    expect(file.content).toContain("interface LandingData {");
+    expect(file.content).toContain('"actionLabel": string;');
+    expect(file.content).toContain('"features": string[];');
+    expect(file.content).toContain('"story": string;');
+    expect(file.content).toContain('"stats": number[];');
+    expect(file.content).not.toContain("[field: string]: any");
 
-    const projectRoot = await mkdtemp(join(fixtureWorkspace, ".figma-codegen-astro-"));
-    temporaryRoots.push(projectRoot);
-    await cp(fixtureRoot, projectRoot, { recursive: true });
-    const generatedPath = join(projectRoot, file.path);
-    await mkdir(dirname(generatedPath), { recursive: true });
-    await writeFile(generatedPath, file.content);
+    const { stdout } = await checkGeneratedFile(file, `---
+import LandingTemplate from "@/components/templates/LandingTemplate.astro";
+---
+<LandingTemplate data={{
+  id: "landing",
+  actionLabel: "Read more",
+  features: ["Fast", "Typed"],
+  story: "A concrete story",
+  stats: [12, 24],
+}} />`);
+    expect(stdout).toContain("- 0 errors");
 
-    const astroCheckCli = resolve("node_modules/@astrojs/check/bin/astro-check.js");
-    const { stdout } = await execFileAsync(process.execPath, [astroCheckCli], {
-      cwd: projectRoot,
-      env: { ...process.env, ASTRO_TELEMETRY_DISABLED: "1" },
+    await expect(checkGeneratedFile(file, `---
+import LandingTemplate from "@/components/templates/LandingTemplate.astro";
+---
+<LandingTemplate data={{
+  id: "landing",
+  actionLabel: 42,
+  features: ["Fast"],
+  story: "A concrete story",
+  stats: [12],
+}} />`)).rejects.toMatchObject({
+      stdout: expect.stringContaining("Type 'number' is not assignable to type 'string'"),
     });
+  }, 30_000);
+
+  it("emits reserved component names and hyphenated prop/data names syntax-safely", async () => {
+    const node = fixtureNode("default-cta", "Default CTA", "cta", 1);
+    const mapping = mappingFor(node, {
+      cmsComponent: "default",
+      componentName: "default",
+      componentPath: "src/components/ui/Default.astro",
+      componentProps: [{ name: "cta-label", type: "string", required: true }],
+      propMappings: { "cta-label": "cta-label" },
+    });
+
+    const { file, diagnostics, mappingsUsed } = emitAstroTemplate({
+      mappings: [mapping],
+      tree: node,
+      templateType: "generic",
+    });
+
+    expect(diagnostics).toEqual([]);
+    expect(mappingsUsed).toBe(1);
+    expect(file.content).toContain('import DefaultComponent from "@/components/ui/Default.astro";');
+    expect(file.content).toContain('["cta-label"]: data["cta-label"]');
+    expect(file.content).toContain('"cta-label": string;');
+    const { stdout } = await checkGeneratedFile(file, `---
+import GenericTemplate from "@/components/templates/GenericTemplate.astro";
+---
+<GenericTemplate data={{ id: "cta", "cta-label": "Start" }} />`);
     expect(stdout).toContain("- 0 errors");
   }, 30_000);
+
+  it("diagnoses unrepresentable prop metadata and excludes the mapping", () => {
+    const node = fixtureNode("unsafe", "Unsafe", "cta", 1);
+    const mapping = mappingFor(node, {
+      componentProps: [{ name: "label", type: "ExternalType", required: true }],
+      propMappings: { label: "ctaLabel" },
+    });
+
+    const { file, diagnostics, mappingsUsed } = emitAstroTemplate({
+      mappings: [mapping],
+      tree: node,
+      templateType: "generic",
+    });
+
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        severity: "error",
+        code: "UNSUPPORTED_COMPONENT_PROP_TYPE",
+        figmaNodeId: node.id,
+      }),
+    ]);
+    expect(file.content).not.toContain("ExternalType");
+    expect(mappingsUsed).toBe(0);
+  });
+
+  it("counts only mappings rendered into the emitted tree", () => {
+    const child = fixtureNode("child", "Child", "cta", 1);
+    const tree = {
+      ...fixtureNode("parent", "Parent", "hero", 0),
+      childCount: 1,
+      children: [child],
+    };
+    const parentMapping = mappingFor(tree);
+    const childMapping = mappingFor(child, {
+      cmsComponent: "feature-grid",
+      componentName: "FeatureGrid",
+      componentPath: "src/components/blocks/FeatureGrid.astro",
+    });
+    const missingMapping = mappingFor(fixtureNode("missing", "Missing", "cta", 1), {
+      cmsComponent: "story-section",
+      componentName: "StorySection",
+      componentPath: "src/components/sections/StorySection.astro",
+    });
+
+    const { file, diagnostics, mappingsUsed } = emitAstroTemplate({
+      mappings: [parentMapping, childMapping, missingMapping],
+      tree,
+      templateType: "generic",
+    });
+
+    expect(mappingsUsed).toBe(1);
+    expect(file.content).toContain("<ActionLink />");
+    expect(file.content).not.toContain("FeatureGrid");
+    expect(file.content).not.toContain("StorySection");
+    expect(diagnostics).toEqual([
+      expect.objectContaining({ code: "MAPPING_NOT_RENDERED", figmaNodeId: child.id }),
+      expect.objectContaining({ code: "MAPPING_NOT_RENDERED", figmaNodeId: "missing" }),
+    ]);
+  });
 
   it("returns an explicit diagnostic and falls back when a registry entry is unsupported", () => {
     const tree = fixtureTree();
@@ -99,6 +201,27 @@ async function loadFixtureRegistry(): Promise<ComponentRegistry> {
   return JSON.parse(
     await readFile(join(fixtureRoot, "registry/default-components.json"), "utf8")
   ) as ComponentRegistry;
+}
+
+async function checkGeneratedFile(
+  file: ReturnType<typeof emitAstroTemplate>["file"],
+  caller: string
+) {
+  const projectRoot = await mkdtemp(join(fixtureWorkspace, ".figma-codegen-astro-"));
+  temporaryRoots.push(projectRoot);
+  await cp(fixtureRoot, projectRoot, { recursive: true });
+  const generatedPath = join(projectRoot, file.path);
+  await mkdir(dirname(generatedPath), { recursive: true });
+  await writeFile(generatedPath, file.content);
+  const callerPath = join(projectRoot, "src/pages/index.astro");
+  await mkdir(dirname(callerPath), { recursive: true });
+  await writeFile(callerPath, caller);
+
+  const astroCheckCli = resolve("node_modules/@astrojs/check/bin/astro-check.js");
+  return execFileAsync(process.execPath, [astroCheckCli], {
+    cwd: projectRoot,
+    env: { ...process.env, ASTRO_TELEMETRY_DISABLED: "1" },
+  });
 }
 
 function fixtureTree(): EnrichedNode {

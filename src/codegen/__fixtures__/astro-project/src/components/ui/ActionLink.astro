@@ -1,9 +1,9 @@
 ---
 interface Props {
-  label: unknown;
+  label: string;
 }
 
 const { label } = Astro.props;
 ---
 
-<a href="/">{String(label)}</a>
+<a href="/">{label}</a>
