@@ -420,6 +420,15 @@ function registryPathToImport(
   }
 
   const normalized = registryPath.replace(/^\.\//, "");
+  const canonical = posix.normalize(normalized);
+  if (!normalized || normalized.endsWith("/") || canonical !== normalized) {
+    diagnostics.push(diagnostic(
+      mapping,
+      "INVALID_COMPONENT_PATH",
+      `Registry path ${JSON.stringify(registryPath)} must be a canonical project-relative file path without trailing separators, repeated separators, or dot segments.`
+    ));
+    return null;
+  }
   if (normalized === ".." || normalized.startsWith("../") || normalized.includes("/../")) {
     diagnostics.push(diagnostic(
       mapping,
@@ -660,12 +669,43 @@ class RegistryTypeParser {
     if (token.value === "Record") {
       this.index++;
       if (!this.consume("<")) return null;
-      const key = this.parseUnion();
+      const key = this.parseRecordKey();
       if (!key || !this.consume(",")) return null;
       const value = this.parseUnion();
       return value && this.consume(">") ? `Record<${key}, ${value}>` : null;
     }
 
+    return null;
+  }
+
+  private parseRecordKey(): string | null {
+    const parts: string[] = [];
+    const first = this.parseRecordKeyAtom();
+    if (!first) return null;
+    parts.push(first);
+    while (this.consume("|")) {
+      const next = this.parseRecordKeyAtom();
+      if (!next) return null;
+      parts.push(next);
+    }
+    return parts.join(" | ");
+  }
+
+  private parseRecordKeyAtom(): string | null {
+    const token = this.tokens[this.index];
+    if (!token) return null;
+    if (token.kind === "string" || token.kind === "number") {
+      this.index++;
+      return token.value;
+    }
+    if (token.kind === "word" && ["string", "number", "symbol", "never"].includes(token.value)) {
+      this.index++;
+      return token.value;
+    }
+    if (this.consume("(")) {
+      const key = this.parseRecordKey();
+      return key && this.consume(")") ? `(${key})` : null;
+    }
     return null;
   }
 
