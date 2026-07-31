@@ -272,6 +272,7 @@ export const getTreeInputSchema = z.object({
   figmaUrl: figmaUrlField,
   nodeId: z.string().optional().describe("Figma node ID (e.g., '1817:2817'). Auto-extracted from figmaUrl if provided."),
   depth: z.number().int().min(1).max(20).default(10).describe("Maximum REST traversal depth relative to the requested root (root is depth 0)"),
+  childOffset: z.number().int().min(0).default(0).describe("Direct-child offset from a prior response's directChildren.nextOffset continuation"),
   includeStyles: z.boolean().default(true).describe("Include style/token information"),
   refresh: z.boolean().default(false).describe("Bypass the inspection snapshot and make a new Figma REST request. This does not guarantee Figma REST has observed a just-made plugin edit."),
   maxAgeMs: z.number().int().min(0).optional().describe("Maximum acceptable inspection snapshot age in milliseconds. Set to 0 to bypass the snapshot, like refresh: true."),

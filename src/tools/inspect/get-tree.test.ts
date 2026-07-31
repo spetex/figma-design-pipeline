@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import { SnapshotCache } from "../../pipeline/snapshot.js";
 import type { ToolContext } from "../../shared/context.js";
 import type { FigmaRawNode } from "../../shared/types.js";
-import { compactTree, handleGetTree, truncateTree } from "./get-tree.js";
+import {
+  compactTree,
+  handleGetTree,
+  serializeGetTreeResponse,
+  truncateTree,
+} from "./get-tree.js";
 
 function node(
   id: string,
@@ -176,7 +181,8 @@ describe("tree completeness reporting", () => {
       truncated: true,
       omittedNodeCount: 5,
       truncationReasons: ["vector_compaction"],
-      nodeCount: 2,
+      nodeCount: 3,
+      returnedNodeCount: 2,
       totalNodeCount: 7,
     });
     expect(report.tree.children[0]).toMatchObject({ childCount: 5, returnedChildCount: 0 });
@@ -237,5 +243,48 @@ describe("tree completeness reporting", () => {
     expect(report.truncationReasons).toEqual(["response_size_limit"]);
     expect(report.continuations.length).toBe(12 - report.tree.returnedChildCount);
     expect(report.continuations.every(entry => entry.nodeId.startsWith("wide-"))).toBe(true);
+  });
+
+  it("budgets the exact final emitted text including Unicode metadata and continuations", async () => {
+    const children = Array.from({ length: 320 }, (_, index) =>
+      node(
+        `wide-${index}`,
+        `🎨 Direct child ${index} ${"界".repeat(120)}`,
+        index * 100,
+        100,
+        [node(`wide-${index}-child`, `Descendant ${"é".repeat(80)}`, 0, 50)]
+      )
+    );
+    const documents = new Map<string, FigmaRawNode>([
+      ["root", node("root", "Unicode wide page", 0, 32_000, children)],
+    ]);
+    const { ctx } = makeContext(documents);
+    const result = await handleGetTree(ctx, { nodeId: "root", depth: 2, includeStyles: false });
+
+    const firstPage = serializeGetTreeResponse(result);
+
+    expect(Buffer.byteLength(firstPage.text, "utf8")).toBeLessThanOrEqual(80_000);
+    expect(firstPage.payload.responseBytes).toBe(Buffer.byteLength(firstPage.text, "utf8"));
+    expect(JSON.parse(firstPage.text)).toEqual(firstPage.payload);
+    expect(firstPage.payload).toMatchObject({
+      truncated: true,
+      maxResponseBytes: 80_000,
+      note: "Tree exceeded 80KB — deeper children omitted. Use figma_get_tree on specific nodeIds to drill down.",
+    });
+    expect(firstPage.payload.nodeCount).toBeGreaterThan(firstPage.payload.returnedNodeCount);
+    expect(firstPage.payload.continuations.length).toBeGreaterThan(1);
+    const nextOffset = firstPage.payload.directChildren?.nextOffset;
+    expect(nextOffset).toBeTypeOf("number");
+    expect(nextOffset).toBeGreaterThan(0);
+    expect(firstPage.payload.continuations).toContainEqual(expect.objectContaining({
+      reason: "response_size_limit",
+      nodeId: "root",
+      childOffset: nextOffset,
+    }));
+
+    const nextPage = serializeGetTreeResponse(result, { childOffset: nextOffset });
+    expect(Buffer.byteLength(nextPage.text, "utf8")).toBeLessThanOrEqual(80_000);
+    expect(nextPage.payload.responseBytes).toBe(Buffer.byteLength(nextPage.text, "utf8"));
+    expect(nextPage.payload.directChildren?.offset).toBe(nextOffset);
   });
 });

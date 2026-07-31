@@ -5,7 +5,7 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 ## [Unreleased]
 
 ### Fixed
-- Tree enumeration no longer silently compacts direct root children. Vector compaction and response-size pruning now report exact omission counts, machine-readable reasons, byte-cap metadata, consistent source/returned child counts, and focused continuation node IDs.
+- Tree enumeration no longer silently compacts direct root children. Vector compaction and response-size pruning now report exact omission counts, machine-readable reasons, full serialized-response byte metrics, compatible node counts and notes, and focused or paginated continuations.
 - Node searches now distinguish an exact-limit complete result from a genuinely truncated result and expose their traversal depth and match limit.
 
 ## [0.8.1] - 2026-07-29

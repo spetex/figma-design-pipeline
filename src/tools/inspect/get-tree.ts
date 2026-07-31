@@ -8,6 +8,7 @@ export interface GetTreeParams {
   nodeId: string;
   depth?: number;
   includeStyles?: boolean;
+  childOffset?: number;
   refresh?: boolean;
   maxAgeMs?: number;
 }
@@ -46,6 +47,7 @@ export interface TreeContinuation {
   reason: TreeTruncationReason;
   nodeId: string;
   omittedNodeCount: number;
+  childOffset?: number;
 }
 
 export interface TruncatedTree {
@@ -55,10 +57,41 @@ export interface TruncatedTree {
   truncationReasons: TreeTruncationReason[];
   continuations: TreeContinuation[];
   /** Number of source nodes actually returned; synthetic markers are excluded. */
+  returnedNodeCount: number;
+  /** Serialized tree nodes, including COLLAPSED and TRUNCATED markers. */
   nodeCount: number;
   totalNodeCount: number;
   responseBytes: number;
   maxResponseBytes?: number;
+}
+
+export interface GetTreeResponsePayload {
+  nodeId: string;
+  fromCache: boolean;
+  snapshotAt: string;
+  cacheAgeMs: number;
+  nodeCount: number;
+  returnedNodeCount: number;
+  totalNodeCount: number;
+  truncated: boolean;
+  omittedNodeCount: number;
+  truncationReasons: TreeTruncationReason[];
+  continuations: TreeContinuation[];
+  responseBytes: number;
+  maxResponseBytes?: number;
+  note?: string;
+  directChildren?: {
+    offset: number;
+    returned: number;
+    total: number;
+    nextOffset?: number;
+  };
+  tree: CompactNode;
+}
+
+export interface SerializedGetTreeResponse {
+  payload: GetTreeResponsePayload;
+  text: string;
 }
 
 export async function handleGetTree(
@@ -204,7 +237,8 @@ export function truncateTree(node: CompactNode, maxBytes: number): TruncatedTree
   const summary = summarizeOmissions(result);
   const continuations = [...summary.continuations, ...directChildContinuations];
   const omittedNodeCount = continuations.reduce((sum, entry) => sum + entry.omittedNodeCount, 0);
-  const nodeCount = countReturnedNodes(result);
+  const returnedNodeCount = countReturnedNodes(result);
+  const nodeCount = countSerializedNodes(result);
   const truncationReasons = Array.from(new Set(continuations.map(entry => entry.reason)));
   const hitResponseLimit = truncationReasons.includes("response_size_limit");
 
@@ -215,10 +249,166 @@ export function truncateTree(node: CompactNode, maxBytes: number): TruncatedTree
     truncationReasons,
     continuations,
     nodeCount,
-    totalNodeCount: nodeCount + omittedNodeCount,
+    returnedNodeCount,
+    totalNodeCount: returnedNodeCount + omittedNodeCount,
     responseBytes,
     ...(hitResponseLimit ? { maxResponseBytes: maxBytes } : {}),
   };
+}
+
+/**
+ * Build the exact pretty-printed MCP text while enforcing the byte cap against
+ * that complete serialization, including metadata and continuations.
+ */
+export function serializeGetTreeResponse(
+  result: { nodeId: string; tree: EnrichedNode; fromCache: boolean } & SnapshotProvenance,
+  {
+    maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES,
+    childOffset = 0,
+  }: { maxResponseBytes?: number; childOffset?: number } = {}
+): SerializedGetTreeResponse {
+  if (childOffset > result.tree.children.length) {
+    throw new Error(
+      `childOffset ${childOffset} exceeds root childCount ${result.tree.children.length}`
+    );
+  }
+
+  const precedingChildren = result.tree.children.slice(0, childOffset);
+  const pageRoot: EnrichedNode = {
+    ...result.tree,
+    children: result.tree.children.slice(childOffset),
+  };
+  const compact = compactTree(pageRoot);
+  const precedingOmittedNodeCount = precedingChildren.reduce(
+    (sum, child) => sum + countEnrichedNodes(child),
+    0
+  );
+
+  let outputTree = compact;
+  let directContinuation: TreeContinuation | undefined;
+  let serialized = serializeCandidate(
+    result,
+    outputTree,
+    maxResponseBytes,
+    childOffset,
+    precedingOmittedNodeCount,
+    directContinuation
+  );
+
+  for (let maxDepth = 8; serialized.payload.responseBytes > maxResponseBytes && maxDepth >= 1; maxDepth--) {
+    outputTree = pruneAtDepth(compact, maxDepth);
+    serialized = serializeCandidate(
+      result,
+      outputTree,
+      maxResponseBytes,
+      childOffset,
+      precedingOmittedNodeCount,
+      directContinuation
+    );
+  }
+
+  if (serialized.payload.responseBytes > maxResponseBytes) {
+    const retainedChildren = [...outputTree.children];
+    let omittedDirectNodeCount = 0;
+    while (serialized.payload.responseBytes > maxResponseBytes && retainedChildren.length > 0) {
+      const omitted = retainedChildren.pop()!;
+      omittedDirectNodeCount += countSourceNodes(omitted);
+      directContinuation = {
+        reason: "response_size_limit",
+        nodeId: result.nodeId,
+        omittedNodeCount: omittedDirectNodeCount,
+        childOffset: childOffset + retainedChildren.length,
+      };
+      outputTree = {
+        ...outputTree,
+        returnedChildCount: countReturnedChildren(retainedChildren),
+        children: retainedChildren,
+      };
+      serialized = serializeCandidate(
+        result,
+        outputTree,
+        maxResponseBytes,
+        childOffset,
+        precedingOmittedNodeCount,
+        directContinuation
+      );
+    }
+  }
+
+  if (serialized.payload.responseBytes > maxResponseBytes) {
+    throw new Error(
+      `Unable to serialize figma_get_tree response within ${maxResponseBytes} bytes after omitting all child nodes`
+    );
+  }
+
+  return serialized;
+}
+
+function serializeCandidate(
+  result: { nodeId: string; fromCache: boolean } & SnapshotProvenance,
+  tree: CompactNode,
+  maxResponseBytes: number,
+  childOffset: number,
+  precedingOmittedNodeCount: number,
+  directContinuation?: TreeContinuation
+): SerializedGetTreeResponse {
+  const summarized = summarizeOmissions(tree).continuations;
+  const continuations = directContinuation
+    ? [...summarized, directContinuation]
+    : summarized;
+  const continuationOmissions = continuations.reduce(
+    (sum, continuation) => sum + continuation.omittedNodeCount,
+    0
+  );
+  const omittedNodeCount = precedingOmittedNodeCount + continuationOmissions;
+  const returnedNodeCount = countReturnedNodes(tree);
+  const nodeCount = countSerializedNodes(tree);
+  const responseSizeLimited = precedingOmittedNodeCount > 0 || continuations.some(
+    continuation => continuation.reason === "response_size_limit"
+  );
+  const truncationReasons = Array.from(new Set([
+    ...(precedingOmittedNodeCount > 0 ? ["response_size_limit" as const] : []),
+    ...continuations.map(continuation => continuation.reason),
+  ]));
+  const nextOffset = directContinuation?.childOffset;
+  const directChildren = childOffset > 0 || nextOffset !== undefined
+    ? {
+        offset: childOffset,
+        returned: tree.returnedChildCount,
+        total: tree.childCount,
+        ...(nextOffset !== undefined ? { nextOffset } : {}),
+      }
+    : undefined;
+
+  const withoutBytes = {
+    nodeId: result.nodeId,
+    fromCache: result.fromCache,
+    snapshotAt: result.snapshotAt,
+    cacheAgeMs: result.cacheAgeMs,
+    nodeCount,
+    returnedNodeCount,
+    totalNodeCount: returnedNodeCount + omittedNodeCount,
+    truncated: omittedNodeCount > 0,
+    omittedNodeCount,
+    truncationReasons,
+    continuations,
+    ...(responseSizeLimited ? {
+      maxResponseBytes,
+      note: "Tree exceeded 80KB — deeper children omitted. Use figma_get_tree on specific nodeIds to drill down.",
+    } : {}),
+    ...(directChildren ? { directChildren } : {}),
+    tree,
+  };
+
+  let responseBytes = 0;
+  let text = "";
+  for (;;) {
+    const payload: GetTreeResponsePayload = { ...withoutBytes, responseBytes };
+    text = JSON.stringify(payload, null, 2);
+    const measuredBytes = Buffer.byteLength(text, "utf8");
+    if (measuredBytes === responseBytes) return { payload, text };
+    responseBytes = measuredBytes;
+  }
 }
 
 function pruneAtDepth(node: CompactNode, maxDepth: number, currentDepth = 0): CompactNode {
@@ -255,6 +445,14 @@ function countReturnedChildren(children: CompactNode[]): number {
 function countReturnedNodes(node: CompactNode): number {
   if (node.type === "COLLAPSED" || node.type === "TRUNCATED") return 0;
   return 1 + node.children.reduce((sum, child) => sum + countReturnedNodes(child), 0);
+}
+
+function countSerializedNodes(node: CompactNode): number {
+  return 1 + node.children.reduce((sum, child) => sum + countSerializedNodes(child), 0);
+}
+
+function countEnrichedNodes(node: EnrichedNode): number {
+  return 1 + node.children.reduce((sum, child) => sum + countEnrichedNodes(child), 0);
 }
 
 function countSourceNodes(node: CompactNode): number {

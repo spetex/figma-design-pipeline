@@ -43,7 +43,7 @@ These all hit the Figma REST API. They need `FIGMA_ACCESS_TOKEN` set in your MCP
 
 | Tool | What it does | When to use |
 |---|---|---|
-| `figma_get_tree` | Enriched node tree with explicit completeness metadata and an 80 KB compact-tree cap. | First call when exploring any file. |
+| `figma_get_tree` | Enriched node tree with explicit completeness metadata and an 80 KB complete-response cap. | First call when exploring any file. |
 | `figma_audit` | Structural audit: naming, layout, components, tokens, accessibility. | Bounded list of issues before a cleanup pass. |
 | `figma_extract_tokens` | Colors, fonts, spacing, radius, shadows — with Tailwind mapping. | Token sync, theming, brand audits. |
 | `figma_find_nodes` | Filter nodes by name / type / classification / text / size, with explicit limit and depth metadata. | "Where is the button styled like X?" |
@@ -77,7 +77,9 @@ latest REST view matters.
 ### Enumeration completeness
 
 `figma_get_tree` preserves every direct child of the requested root whenever
-the compact tree fits its 80,000-byte budget. Each node distinguishes the
+the complete pretty-printed response fits its 80,000-byte budget. The budget
+includes metadata and continuations, and `responseBytes` is the UTF-8 byte
+length of the exact emitted text. Each node distinguishes the
 source `childCount` from `returnedChildCount`, which counts real direct children
 present in the response (synthetic `COLLAPSED` and `TRUNCATED` markers do not
 count). A complete response has `truncated: false`, `omittedNodeCount: 0`, and
@@ -90,8 +92,14 @@ the byte budget, the response sets `truncated: true`, reports the exact
 the byte cap caused pruning. Each `continuations` entry gives a retrievable
 `nodeId`, reason, and omitted count; call `figma_get_tree` on that node to drill
 into the omitted subtree. Only a root whose direct-child records cannot fit
-after descendant pruning loses direct children, and every such child is listed
-as its own continuation.
+after descendant pruning is paginated. In that case, pass
+`directChildren.nextOffset` back as `childOffset` to fetch the next page.
+
+For compatibility, `nodeCount` continues to count every serialized tree entry,
+including synthetic `COLLAPSED` and `TRUNCATED` markers. Use
+`returnedNodeCount` for the number of real source nodes present and
+`totalNodeCount` for the real source-node total before omissions. Size-limited
+responses retain the legacy `note` field alongside the structured metadata.
 
 `figma_find_nodes` echoes the requested relative REST depth as `traversalDepth`
 (the requested root is depth 0) and its match cap as `matchLimit`. Its

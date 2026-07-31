@@ -31,8 +31,7 @@ import {
 import {
   DEFAULT_MAX_RESPONSE_BYTES,
   handleGetTree,
-  compactTree,
-  truncateTree,
+  serializeGetTreeResponse,
 } from "./tools/inspect/get-tree.js";
 import { handleAudit } from "./tools/inspect/audit.js";
 import { handleExtractTokens } from "./tools/inspect/extract-tokens.js";
@@ -136,7 +135,8 @@ Use this path when the goal is understanding a design, not modifying it.
 4. figma_export_images if you need visual snapshots
 
 ## Context Rules
-- figma_get_tree preserves requested-root children when possible. Any vector compaction or 80KB pruning is explicit through truncated, omittedNodeCount, truncationReasons, and continuations.
+- figma_get_tree preserves requested-root children when possible. Its 80KB cap covers the complete pretty-printed response, including metadata and continuations; responseBytes is the UTF-8 byte length of that exact text.
+- Any vector compaction or size pruning is explicit through truncated, omittedNodeCount, truncationReasons, and continuations. Follow directChildren.nextOffset using childOffset for another wide-root page.
 - childCount is the source total; returnedChildCount is the number of real direct children present. Follow continuation nodeIds with focused figma_get_tree calls.
 - figma_find_nodes echoes traversalDepth and matchLimit, and marks truncated only after detecting a match beyond the limit.
 - figma_extract_tokens is the detailed style view. Do not request it unless token detail is actually needed.
@@ -301,7 +301,7 @@ server.resource(
 
 server.tool(
   "figma_get_tree",
-  "Fetch an enriched Figma node tree while preserving requested-root children whenever the 80KB compact-response cap permits. childCount is the source total and returnedChildCount is the number returned. Any vector compaction or size pruning sets truncated and reports omittedNodeCount, machine-readable truncationReasons, the applicable byte cap, and continuation nodeIds for focused follow-up calls. Inspection snapshots are keyed by file, node, depth, and style inclusion; responses report fromCache, snapshotAt, and cacheAgeMs.",
+  "Fetch an enriched Figma node tree while preserving requested-root children whenever the 80KB complete serialized-response cap permits. responseBytes is the UTF-8 size of the exact pretty-printed text. childCount is the source total and returnedChildCount is the number returned. nodeCount retains the serialized-node count (including synthetic markers), while returnedNodeCount counts real returned nodes. Any vector compaction or size pruning sets truncated and reports omittedNodeCount, machine-readable truncationReasons, the applicable byte cap, and continuations; pass directChildren.nextOffset as childOffset for the next wide-root page. Inspection snapshots are keyed by file, node, depth, and style inclusion.",
   getTreeInputSchema.shape,
   async (params) => {
     const { nodeId } = resolveParams(params);
@@ -313,29 +313,15 @@ server.tool(
       figmaSession.rememberRoot({ fileKey: ctx.rest.defaultFileKey, nodeId });
     }
 
-    const compact = compactTree(result.tree);
-    const report = truncateTree(compact, DEFAULT_MAX_RESPONSE_BYTES);
+    const response = serializeGetTreeResponse(result, {
+      maxResponseBytes: DEFAULT_MAX_RESPONSE_BYTES,
+      childOffset: params.childOffset,
+    });
 
     return {
       content: [{
         type: "text",
-        text: JSON.stringify({
-          nodeId: result.nodeId,
-          fromCache: result.fromCache,
-          snapshotAt: result.snapshotAt,
-          cacheAgeMs: result.cacheAgeMs,
-          nodeCount: report.nodeCount,
-          totalNodeCount: report.totalNodeCount,
-          truncated: report.truncated,
-          omittedNodeCount: report.omittedNodeCount,
-          truncationReasons: report.truncationReasons,
-          continuations: report.continuations,
-          responseBytes: report.responseBytes,
-          ...(report.maxResponseBytes !== undefined
-            ? { maxResponseBytes: report.maxResponseBytes }
-            : {}),
-          tree: report.tree,
-        }, null, 2),
+        text: response.text,
       }],
     };
   }
