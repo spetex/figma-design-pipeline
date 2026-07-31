@@ -217,7 +217,7 @@ function generateFallbackJs(
       case "create_text": {
         const fam = a.fontFamily || "Inter";
         const sty = weightToStyle(a.fontWeight || 400);
-        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); await figma.loadFontAsync({ family: "${fam}", style: "${sty}" }); const t = figma.createText(); markDocumentWrite(); t.fontName = { family: "${fam}", style: "${sty}" }; t.characters = ${j(a.characters)}; ${a.name ? `t.name = ${j(a.name)};` : ""} ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} t.textAutoResize = "${a.textAutoResize || "HEIGHT"}"; ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} parent.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} ${cr("create_text", "t.id")} }`);
+        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); await figma.loadFontAsync({ family: "${fam}", style: "${sty}" }); const t = figma.createText(); markDocumentWrite(); t.fontName = { family: "${fam}", style: "${sty}" }; t.characters = ${j(a.characters)}; ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} t.textAutoResize = "${a.textAutoResize || "HEIGHT"}"; ${a.name ? `t.name = ${j(a.name)};` : ""} parent.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} ${cr("create_text", "t.id")} }`);
         break;
       }
       case "delete_node":
@@ -303,7 +303,7 @@ function generateFallbackJs(
         lines.push(`{ ${g(a.instanceId)}.swapComponent(${g(a.newComponentId)}); markDocumentWrite(); results.push({ type: "swap_instance" }); }`);
         break;
       case "set_component_properties":
-        lines.push(`{ ${g(nid)}.setProperties(${j(a.properties)}); markDocumentWrite(); ${r("set_component_properties")} }`);
+        lines.push(`{ const n = ${g(nid)}; for (const [property, value] of Object.entries(${j(a.properties)})) { n.setProperties({ [property]: value }); markDocumentWrite(); } ${r("set_component_properties")} }`);
         break;
       case "define_component_property":
         lines.push(`{ ${g(nid)}.addComponentProperty(${j(a.propertyName)}, "${a.propertyType}", ${j(a.defaultValue)}); markDocumentWrite(); ${r("define_component_property")} }`);

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ACTION_TYPES } from "../src/shared/action-parity.js";
+import { actionSchema } from "../src/shared/actions.js";
 import { handleExecute } from "../src/tools/plugin/execute.js";
 
 type PluginFigma = {
@@ -79,6 +80,31 @@ describe("connected plugin batch execution", () => {
     expect(figma.triggerUndo).not.toHaveBeenCalled();
   });
 
+  it("rolls back a partial component-property write", async () => {
+    const applied: Array<Record<string, string | boolean>> = [];
+    const node = {
+      id: "instance",
+      type: "INSTANCE",
+      parent: { id: "parent" },
+      setProperties: (properties: Record<string, string | boolean>) => {
+        applied.push(properties);
+        if ("Second" in properties) throw new Error("Second rejected");
+      },
+    };
+    const figma = baseFigma(async () => node);
+
+    const result = await runPlugin(figma, [{
+      type: "set_component_properties",
+      nodeId: "instance",
+      properties: { First: "Applied", Second: true },
+    }]);
+
+    expect(applied).toEqual([{ First: "Applied" }, { Second: true }]);
+    expect(result.summary).toMatchObject({ applied: 0, failed: 1 });
+    expect(result.rollbackApplied).toBe(true);
+    expect(figma.triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     {
       label: "a non-container frame parent",
@@ -143,70 +169,103 @@ describe("connected plugin batch execution", () => {
 type ParityCase = {
   type: string;
   action: Record<string, unknown>;
-  operation: string;
 };
 
 const PAINT = { type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3, a: 0.4 } };
 const EFFECT = { type: "DROP_SHADOW", visible: true, radius: 4, blendMode: "NORMAL", color: { r: 0, g: 0, b: 0, a: 0.5 }, offset: { x: 1, y: 2 } };
 
 const BEHAVIORAL_PARITY_CASES: ParityCase[] = [
-  { type: "rename", action: { type: "rename", nodeId: "node", name: "Renamed" }, operation: "set:node.name" },
-  { type: "move", action: { type: "move", nodeId: "node", targetParentId: "parent", insertIndex: 0 }, operation: "call:parent.insertChild" },
-  { type: "create_text", action: { type: "create_text", parentId: "parent", characters: "Text", name: "Title", fontFamily: "Inter", fontWeight: 600, fontSize: 16, lineHeight: 20, letterSpacing: 1, fills: [PAINT], textCase: "UPPER", textAlignHorizontal: "CENTER", textAutoResize: "TRUNCATE", layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG", opacity: 0.5 }, operation: "call:figma.createText" },
-  { type: "create_frame", action: { type: "create_frame", name: "Frame", parentId: "parent", x: 1, y: 2, width: 100, height: 50 }, operation: "call:figma.createFrame" },
-  { type: "delete_node", action: { type: "delete_node", nodeId: "node", confirmed: true }, operation: "call:node.remove" },
-  { type: "set_layout_mode", action: { type: "set_layout_mode", nodeId: "node", mode: "HORIZONTAL", primaryAxisSizingMode: "AUTO", counterAxisSizingMode: "FIXED" }, operation: "set:node.layoutMode" },
-  { type: "set_spacing", action: { type: "set_spacing", nodeId: "node", itemSpacing: 8, paddingTop: 1, paddingRight: 2, paddingBottom: 3, paddingLeft: 4 }, operation: "set:node.paddingLeft" },
-  { type: "resize", action: { type: "resize", nodeId: "node", width: 100, height: 50 }, operation: "call:node.resize" },
-  { type: "create_component_from_node", action: { type: "create_component_from_node", nodeId: "source", name: "Component" }, operation: "call:figma.createComponentFromNode" },
-  { type: "create_component_set", action: { type: "create_component_set", componentIds: ["component"], name: "Variants" }, operation: "call:figma.combineAsVariants" },
-  { type: "create_instance", action: { type: "create_instance", componentId: "component", parentId: "parent", x: 1, y: 2 }, operation: "call:component.createInstance" },
-  { type: "swap_instance", action: { type: "swap_instance", instanceId: "instance", newComponentId: "component" }, operation: "call:instance.swapComponent" },
-  { type: "set_fills", action: { type: "set_fills", nodeId: "node", fills: [PAINT] }, operation: "set:node.fills" },
-  { type: "set_text_content", action: { type: "set_text_content", nodeId: "text", characters: "Updated" }, operation: "set:text.characters" },
-  { type: "set_text_style", action: { type: "set_text_style", nodeId: "text", fontFamily: "Inter", fontWeight: 600, fontSize: 18, lineHeight: 24, letterSpacing: 1 }, operation: "set:text.letterSpacing" },
-  { type: "set_corner_radius", action: { type: "set_corner_radius", nodeId: "node", radius: 8, radii: [1, 2, 3, 4] }, operation: "set:node.bottomLeftRadius" },
-  { type: "export_node", action: { type: "export_node", nodeId: "node", format: "PNG", scale: 2 }, operation: "call:node.exportAsync" },
-  { type: "set_position", action: { type: "set_position", nodeId: "node", x: 10, y: 20 }, operation: "set:node.y" },
-  { type: "set_layout_positioning", action: { type: "set_layout_positioning", nodeId: "node", positioning: "ABSOLUTE" }, operation: "set:node.layoutPositioning" },
-  { type: "set_visible", action: { type: "set_visible", nodeId: "node", visible: false }, operation: "set:node.visible" },
-  { type: "set_opacity", action: { type: "set_opacity", nodeId: "node", opacity: 0.5 }, operation: "set:node.opacity" },
-  { type: "set_strokes", action: { type: "set_strokes", nodeId: "node", strokes: [PAINT], strokeWeight: 2 }, operation: "set:node.strokeWeight" },
-  { type: "set_effects", action: { type: "set_effects", nodeId: "node", effects: [EFFECT] }, operation: "set:node.effects" },
-  { type: "set_alignment", action: { type: "set_alignment", nodeId: "node", primaryAxisAlignItems: "CENTER", counterAxisAlignItems: "BASELINE" }, operation: "set:node.counterAxisAlignItems" },
-  { type: "duplicate_node", action: { type: "duplicate_node", nodeId: "node" }, operation: "call:node.clone" },
-  { type: "set_component_properties", action: { type: "set_component_properties", nodeId: "instance", properties: { Variant: "Primary", Disabled: true } }, operation: "call:instance.setProperties" },
-  { type: "create_paint_style", action: { type: "create_paint_style", name: "Color/Primary", paints: [PAINT] }, operation: "call:figma.createPaintStyle" },
-  { type: "create_text_style", action: { type: "create_text_style", name: "Text/Body", fontFamily: "Inter", fontWeight: 500, fontSize: 16, lineHeight: 20, letterSpacing: 1 }, operation: "call:figma.createTextStyle" },
-  { type: "create_effect_style", action: { type: "create_effect_style", name: "Effect/Shadow", effects: [EFFECT] }, operation: "call:figma.createEffectStyle" },
-  { type: "set_child_layout_sizing", action: { type: "set_child_layout_sizing", nodeId: "node", layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG" }, operation: "set:node.layoutSizingVertical" },
-  { type: "set_constraints", action: { type: "set_constraints", nodeId: "node", horizontal: "SCALE", vertical: "STRETCH" }, operation: "set:node.constraints" },
-  { type: "set_min_max_size", action: { type: "set_min_max_size", nodeId: "node", minWidth: 1, maxWidth: 100, minHeight: 2, maxHeight: 200 }, operation: "set:node.maxHeight" },
-  { type: "create_page", action: { type: "create_page", name: "Page" }, operation: "call:figma.createPage" },
-  { type: "switch_page", action: { type: "switch_page", pageId: "page" }, operation: "call:figma.setCurrentPageAsync" },
-  { type: "set_gradient_fill", action: { type: "set_gradient_fill", nodeId: "node", gradientType: "LINEAR", stops: [{ position: 0, color: { r: 0, g: 0, b: 0, a: 1 } }, { position: 1, color: { r: 1, g: 1, b: 1, a: 1 } }], angle: 45 }, operation: "set:node.fills" },
-  { type: "set_image_fill", action: { type: "set_image_fill", nodeId: "node", imageBase64: "AQID", scaleMode: "CROP" }, operation: "set:node.fills" },
-  { type: "set_text_properties", action: { type: "set_text_properties", nodeId: "text", textAlignHorizontal: "CENTER", textAlignVertical: "BOTTOM", paragraphSpacing: 8, textCase: "TITLE", textDecoration: "UNDERLINE", textAutoResize: "HEIGHT" }, operation: "set:text.textAutoResize" },
-  { type: "apply_style", action: { type: "apply_style", nodeId: "node", styleId: "style", property: "effect" }, operation: "call:node.setEffectStyleIdAsync" },
-  { type: "set_description", action: { type: "set_description", nodeId: "component", description: "Description" }, operation: "set:component.description" },
-  { type: "define_component_property", action: { type: "define_component_property", nodeId: "component", propertyName: "Label", propertyType: "TEXT", defaultValue: "Default" }, operation: "call:component.addComponentProperty" },
-  { type: "create_variable_collection", action: { type: "create_variable_collection", name: "Tokens", modes: ["Light", "Dark"] }, operation: "call:variables.createVariableCollection" },
-  { type: "create_variable", action: { type: "create_variable", collectionId: "collection", name: "spacing/md", resolvedType: "FLOAT", value: 8, scopes: ["ALL_SCOPES"] }, operation: "call:variables.createVariable" },
-  { type: "bind_variable", action: { type: "bind_variable", nodeId: "node", property: "fills", variableId: "variable", paintIndex: 0 }, operation: "set:node.fills" },
+  { type: "rename", action: { type: "rename", nodeId: "node", name: "Renamed" } },
+  { type: "move", action: { type: "move", nodeId: "node", targetParentId: "parent", insertIndex: 0 } },
+  { type: "create_text", action: { type: "create_text", parentId: "parent", characters: "Text", name: "Title", fontFamily: "Inter", fontWeight: 600, fontSize: 16, lineHeight: 20, letterSpacing: 1, fills: [PAINT], textCase: "UPPER", textAlignHorizontal: "CENTER", textAutoResize: "TRUNCATE", layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG", opacity: 0.5 } },
+  { type: "create_frame", action: { type: "create_frame", name: "Frame", parentId: "parent", x: 1, y: 2, width: 100, height: 50 } },
+  { type: "delete_node", action: { type: "delete_node", nodeId: "node", confirmed: true } },
+  { type: "set_layout_mode", action: { type: "set_layout_mode", nodeId: "node", mode: "HORIZONTAL", primaryAxisSizingMode: "AUTO", counterAxisSizingMode: "FIXED" } },
+  { type: "set_spacing", action: { type: "set_spacing", nodeId: "node", itemSpacing: 8, paddingTop: 1, paddingRight: 2, paddingBottom: 3, paddingLeft: 4 } },
+  { type: "resize", action: { type: "resize", nodeId: "node", width: 100, height: 50 } },
+  { type: "create_component_from_node", action: { type: "create_component_from_node", nodeId: "source", name: "Component" } },
+  { type: "create_component_set", action: { type: "create_component_set", componentIds: ["component"], name: "Variants" } },
+  { type: "create_instance", action: { type: "create_instance", componentId: "component", parentId: "parent", x: 1, y: 2 } },
+  { type: "swap_instance", action: { type: "swap_instance", instanceId: "instance", newComponentId: "component" } },
+  { type: "set_fills", action: { type: "set_fills", nodeId: "node", fills: [PAINT] } },
+  { type: "set_text_content", action: { type: "set_text_content", nodeId: "text", characters: "Updated" } },
+  { type: "set_text_style", action: { type: "set_text_style", nodeId: "text", fontFamily: "Inter", fontWeight: 600, fontSize: 18, lineHeight: 24, letterSpacing: 1 } },
+  { type: "set_corner_radius", action: { type: "set_corner_radius", nodeId: "node", radius: 8, radii: [1, 2, 3, 4] } },
+  { type: "export_node", action: { type: "export_node", nodeId: "node", format: "PNG", scale: 2 } },
+  { type: "set_position", action: { type: "set_position", nodeId: "node", x: 10, y: 20 } },
+  { type: "set_layout_positioning", action: { type: "set_layout_positioning", nodeId: "node", positioning: "ABSOLUTE" } },
+  { type: "set_visible", action: { type: "set_visible", nodeId: "node", visible: false } },
+  { type: "set_opacity", action: { type: "set_opacity", nodeId: "node", opacity: 0.5 } },
+  { type: "set_strokes", action: { type: "set_strokes", nodeId: "node", strokes: [PAINT], strokeWeight: 2 } },
+  { type: "set_effects", action: { type: "set_effects", nodeId: "node", effects: [EFFECT] } },
+  { type: "set_alignment", action: { type: "set_alignment", nodeId: "node", primaryAxisAlignItems: "CENTER", counterAxisAlignItems: "BASELINE" } },
+  { type: "duplicate_node", action: { type: "duplicate_node", nodeId: "node" } },
+  { type: "set_component_properties", action: { type: "set_component_properties", nodeId: "instance", properties: { Variant: "Primary", Disabled: true } } },
+  { type: "create_paint_style", action: { type: "create_paint_style", name: "Color/Primary", paints: [PAINT] } },
+  { type: "create_text_style", action: { type: "create_text_style", name: "Text/Body", fontFamily: "Inter", fontWeight: 500, fontSize: 16, lineHeight: 20, letterSpacing: 1 } },
+  { type: "create_effect_style", action: { type: "create_effect_style", name: "Effect/Shadow", effects: [EFFECT] } },
+  { type: "set_child_layout_sizing", action: { type: "set_child_layout_sizing", nodeId: "node", layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG" } },
+  { type: "set_constraints", action: { type: "set_constraints", nodeId: "node", horizontal: "SCALE", vertical: "STRETCH" } },
+  { type: "set_min_max_size", action: { type: "set_min_max_size", nodeId: "node", minWidth: 1, maxWidth: 100, minHeight: 2, maxHeight: 200 } },
+  { type: "create_page", action: { type: "create_page", name: "Page" } },
+  { type: "switch_page", action: { type: "switch_page", pageId: "page" } },
+  { type: "set_gradient_fill", action: { type: "set_gradient_fill", nodeId: "node", gradientType: "LINEAR", stops: [{ position: 0, color: { r: 0, g: 0, b: 0, a: 1 } }, { position: 1, color: { r: 1, g: 1, b: 1, a: 1 } }], angle: 45 } },
+  { type: "set_image_fill", action: { type: "set_image_fill", nodeId: "node", imageBase64: "AQID", scaleMode: "CROP" } },
+  { type: "set_text_properties", action: { type: "set_text_properties", nodeId: "text", textAlignHorizontal: "CENTER", textAlignVertical: "BOTTOM", paragraphSpacing: 8, textCase: "TITLE", textDecoration: "UNDERLINE", textAutoResize: "HEIGHT" } },
+  { type: "apply_style", action: { type: "apply_style", nodeId: "node", styleId: "style", property: "effect" } },
+  { type: "set_description", action: { type: "set_description", nodeId: "component", description: "Description" } },
+  { type: "define_component_property", action: { type: "define_component_property", nodeId: "component", propertyName: "Label", propertyType: "TEXT", defaultValue: "Default" } },
+  { type: "create_variable_collection", action: { type: "create_variable_collection", name: "Tokens", modes: ["Light", "Dark"] } },
+  { type: "create_variable", action: { type: "create_variable", collectionId: "collection", name: "spacing/md", resolvedType: "FLOAT", value: 8, scopes: ["ALL_SCOPES"] } },
+  { type: "bind_variable", action: { type: "bind_variable", nodeId: "node", property: "fills", variableId: "variable", paintIndex: 0 } },
 ];
 
 function createBehavioralFigma() {
   const trace: string[] = [];
   const nodes = new Map<string, Record<string, unknown>>();
+  const nodeSnapshots = new Map<string, Record<string, unknown>>();
+  const createdVariables: Record<string, unknown>[] = [];
+  const observable = (value: unknown, seen = new WeakSet<object>()): unknown => {
+    if (value === null || typeof value !== "object") return value;
+    if (Array.isArray(value)) return value.map((item) => observable(item, seen));
+    if ("id" in value && typeof (value as { id?: unknown }).id === "string") {
+      return { nodeId: (value as { id: string }).id };
+    }
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+    return Object.fromEntries(
+      Object.entries(value).flatMap(([key, item]) =>
+        typeof item === "function" ? [] : [[key, observable(item, seen)]]
+      )
+    );
+  };
+  const snapshot = (value: Record<string, unknown>) => Object.fromEntries(
+    Object.entries(value).flatMap(([key, item]) =>
+      typeof item === "function" ? [] : [[key, observable(item)]]
+    )
+  );
+  const recordCall = (target: string, method: string, ...args: unknown[]) => {
+    trace.push(`call:${target}.${method}:${JSON.stringify(args.map((arg) => observable(arg)))}`);
+  };
+  const recordSet = (target: string, property: PropertyKey, value: unknown) => {
+    trace.push(`set:${target}.${String(property)}:${JSON.stringify(observable(value))}`);
+  };
   const parent = makeParityNode("parent", "FRAME");
   const page = makeParityNode("page", "PAGE");
   page.selection = [];
   const collection = {
     id: "collection",
     name: "Collection",
-    modes: [{ modeId: "mode" }],
-    renameMode: () => trace.push("call:collection.renameMode"),
-    addMode: () => trace.push("call:collection.addMode"),
+    modes: [{ modeId: "mode", name: "Default" }],
+    renameMode: (modeId: string, name: string) => {
+      recordCall("collection", "renameMode", modeId, name);
+      const mode = collection.modes.find((candidate) => candidate.modeId === modeId);
+      if (mode) mode.name = name;
+    },
+    addMode: (name: string) => {
+      recordCall("collection", "addMode", name);
+      collection.modes.push({ modeId: `mode-${collection.modes.length}`, name });
+    },
   };
   const variable = { id: "variable" };
 
@@ -254,26 +313,27 @@ function createBehavioralFigma() {
       fontName: { family: "Inter", style: "Regular" },
       characters: "Text",
       constraints: { horizontal: "MIN", vertical: "MIN" },
-      appendChild: () => trace.push(`call:${id}.appendChild`),
-      insertChild: () => trace.push(`call:${id}.insertChild`),
-      remove: () => trace.push(`call:${id}.remove`),
-      resize: () => trace.push(`call:${id}.resize`),
-      clone: () => { trace.push(`call:${id}.clone`); return makeParityNode("clone", "RECTANGLE"); },
-      createInstance: () => { trace.push(`call:${id}.createInstance`); return makeParityNode("created-instance", "INSTANCE"); },
-      swapComponent: () => trace.push(`call:${id}.swapComponent`),
-      setProperties: () => trace.push(`call:${id}.setProperties`),
+      appendChild: (child: unknown) => recordCall(id, "appendChild", child),
+      insertChild: (index: number, child: unknown) => recordCall(id, "insertChild", index, child),
+      remove: () => recordCall(id, "remove"),
+      resize: (width: number, height: number) => recordCall(id, "resize", width, height),
+      clone: () => { recordCall(id, "clone"); return makeParityNode("clone", "RECTANGLE"); },
+      createInstance: () => { recordCall(id, "createInstance"); return makeParityNode("created-instance", "INSTANCE"); },
+      swapComponent: (component: unknown) => recordCall(id, "swapComponent", component),
+      setProperties: (properties: unknown) => recordCall(id, "setProperties", properties),
       getRangeFontName: () => ({ family: "Inter", style: "Regular" }),
-      exportAsync: async () => { trace.push(`call:${id}.exportAsync`); return new Uint8Array([1]); },
-      addComponentProperty: () => trace.push(`call:${id}.addComponentProperty`),
-      setBoundVariable: () => trace.push(`call:${id}.setBoundVariable`),
-      setFillStyleIdAsync: async () => trace.push(`call:${id}.setFillStyleIdAsync`),
-      setStrokeStyleIdAsync: async () => trace.push(`call:${id}.setStrokeStyleIdAsync`),
-      setTextStyleIdAsync: async () => trace.push(`call:${id}.setTextStyleIdAsync`),
-      setEffectStyleIdAsync: async () => trace.push(`call:${id}.setEffectStyleIdAsync`),
+      exportAsync: async (settings: unknown) => { recordCall(id, "exportAsync", settings); return new Uint8Array([1]); },
+      addComponentProperty: (...args: unknown[]) => recordCall(id, "addComponentProperty", ...args),
+      setBoundVariable: (...args: unknown[]) => recordCall(id, "setBoundVariable", ...args),
+      setFillStyleIdAsync: async (...args: unknown[]) => recordCall(id, "setFillStyleIdAsync", ...args),
+      setStrokeStyleIdAsync: async (...args: unknown[]) => recordCall(id, "setStrokeStyleIdAsync", ...args),
+      setTextStyleIdAsync: async (...args: unknown[]) => recordCall(id, "setTextStyleIdAsync", ...args),
+      setEffectStyleIdAsync: async (...args: unknown[]) => recordCall(id, "setEffectStyleIdAsync", ...args),
     };
+    nodeSnapshots.set(id, node);
     return new Proxy(node, {
       set(target, property, value) {
-        trace.push(`set:${id}.${String(property)}`);
+        recordSet(id, property, value);
         Reflect.set(target, property, value);
         return true;
       },
@@ -289,40 +349,79 @@ function createBehavioralFigma() {
     mixed: Symbol("mixed"),
     getNodeById: (id: string) => nodes.get(id),
     getNodeByIdAsync: async (id: string) => nodes.get(id) ?? null,
-    loadFontAsync: async () => trace.push("call:figma.loadFontAsync"),
-    createFrame: () => { trace.push("call:figma.createFrame"); return makeParityNode("frame", "FRAME"); },
-    createText: () => { trace.push("call:figma.createText"); return makeParityNode("created-text", "TEXT"); },
-    createComponentFromNode: () => { trace.push("call:figma.createComponentFromNode"); return makeParityNode("created-component", "COMPONENT"); },
-    combineAsVariants: () => { trace.push("call:figma.combineAsVariants"); return makeParityNode("component-set", "COMPONENT_SET"); },
-    createPaintStyle: () => { trace.push("call:figma.createPaintStyle"); return makeParityNode("paint-style", "PAINT_STYLE"); },
-    createTextStyle: () => { trace.push("call:figma.createTextStyle"); return makeParityNode("text-style", "TEXT_STYLE"); },
-    createEffectStyle: () => { trace.push("call:figma.createEffectStyle"); return makeParityNode("effect-style", "EFFECT_STYLE"); },
-    createPage: () => { trace.push("call:figma.createPage"); return makeParityNode("created-page", "PAGE"); },
-    setCurrentPageAsync: async () => trace.push("call:figma.setCurrentPageAsync"),
-    createImage: () => { trace.push("call:figma.createImage"); return { hash: "image" }; },
-    base64Decode: () => new Uint8Array([1]),
-    base64Encode: () => "AQ==",
+    loadFontAsync: async (...args: unknown[]) => recordCall("figma", "loadFontAsync", ...args),
+    createFrame: () => { recordCall("figma", "createFrame"); return makeParityNode("frame", "FRAME"); },
+    createText: () => { recordCall("figma", "createText"); return makeParityNode("created-text", "TEXT"); },
+    createComponentFromNode: (...args: unknown[]) => { recordCall("figma", "createComponentFromNode", ...args); return makeParityNode("created-component", "COMPONENT"); },
+    combineAsVariants: (...args: unknown[]) => { recordCall("figma", "combineAsVariants", ...args); return makeParityNode("component-set", "COMPONENT_SET"); },
+    createPaintStyle: () => { recordCall("figma", "createPaintStyle"); return makeParityNode("paint-style", "PAINT_STYLE"); },
+    createTextStyle: () => { recordCall("figma", "createTextStyle"); return makeParityNode("text-style", "TEXT_STYLE"); },
+    createEffectStyle: () => { recordCall("figma", "createEffectStyle"); return makeParityNode("effect-style", "EFFECT_STYLE"); },
+    createPage: () => { recordCall("figma", "createPage"); return makeParityNode("created-page", "PAGE"); },
+    setCurrentPageAsync: async (...args: unknown[]) => recordCall("figma", "setCurrentPageAsync", ...args),
+    createImage: (...args: unknown[]) => { recordCall("figma", "createImage", ...args); return { hash: "image" }; },
+    base64Decode: (...args: unknown[]) => { recordCall("figma", "base64Decode", ...args); return new Uint8Array([1]); },
+    base64Encode: (...args: unknown[]) => { recordCall("figma", "base64Encode", ...args); return "AQ=="; },
     triggerUndo: vi.fn(),
     variables: {
       getVariableById: () => variable,
       getVariableCollectionById: () => collection,
-      setBoundVariableForPaint: (paint: Record<string, unknown>) => ({ ...paint, boundVariable: variable.id }),
-      createVariableCollection: () => { trace.push("call:variables.createVariableCollection"); return collection; },
-      createVariable: () => {
-        trace.push("call:variables.createVariable");
-        return { id: "created-variable", name: "variable", scopes: [], setValueForMode: () => trace.push("call:variable.setValueForMode") };
+      setBoundVariableForPaint: (...args: unknown[]) => {
+        recordCall("variables", "setBoundVariableForPaint", ...args);
+        return { ...(args[0] as Record<string, unknown>), boundVariable: variable.id };
+      },
+      createVariableCollection: (...args: unknown[]) => { recordCall("variables", "createVariableCollection", ...args); return collection; },
+      createVariable: (name: string, targetCollection: unknown, resolvedType: string) => {
+        recordCall("variables", "createVariable", name, targetCollection, resolvedType);
+        const created = {
+          id: "created-variable",
+          name,
+          resolvedType,
+          scopes: [] as unknown[],
+          values: {} as Record<string, unknown>,
+          setValueForMode: (modeId: string, value: unknown) => {
+            recordCall("created-variable", "setValueForMode", modeId, value);
+            created.values[modeId] = value;
+          },
+        };
+        createdVariables.push(created);
+        return new Proxy(created, {
+          set(target, property, value) {
+            recordSet("created-variable", property, value);
+            Reflect.set(target, property, value);
+            return true;
+          },
+        });
       },
     },
   };
-  return { figma, trace };
+  trace.length = 0;
+  return {
+    figma,
+    trace,
+    state: () => ({
+      nodes: Array.from(nodeSnapshots.entries()).map(([id, node]) => [id, snapshot(node)]),
+      collection: snapshot(collection),
+      variables: createdVariables.map((variableState) => snapshot(variableState)),
+    }),
+  };
 }
 
 describe("all-action behavioral parity", () => {
-  it("has one executable behavior case for every action schema", () => {
+  it("has a full-field behavior case for every action schema", () => {
     expect(BEHAVIORAL_PARITY_CASES.map(({ type }) => type).sort()).toEqual([...ACTION_TYPES].sort());
+    for (const { action } of BEHAVIORAL_PARITY_CASES) {
+      const parsed = actionSchema.parse(action);
+      const schema = actionSchema.options.find((option) => {
+        const shape = (option as unknown as { shape: Record<string, unknown> }).shape;
+        return (shape.type as { value: string }).value === parsed.type;
+      });
+      const shape = (schema as unknown as { shape: Record<string, unknown> }).shape;
+      expect(Object.keys(action).sort()).toEqual(Object.keys(shape).sort());
+    }
   });
 
-  it.each(BEHAVIORAL_PARITY_CASES)("executes $type with the same observable operation in fallback and connected plugin", async ({ action, operation }) => {
+  it.each(BEHAVIORAL_PARITY_CASES)("matches complete field-sensitive state and calls for $type", async ({ action }) => {
     const fallback = createBehavioralFigma();
     const generated = await handleExecute(null, { actions: [action] });
     const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
@@ -335,8 +434,12 @@ describe("all-action behavioral parity", () => {
 
     expect(fallbackResults).not.toEqual([expect.objectContaining({ status: "failed" })]);
     expect(pluginResult.summary).toMatchObject({ applied: 1, failed: 0 });
-    expect(fallback.trace).toContain(operation);
-    expect(connected.trace).toContain(operation);
+    // The bridge compiles required fonts before the connected executor runs;
+    // compare every action-observable call and write after that transport-only
+    // preflight difference has been removed.
+    expect(fallback.trace.filter((entry) => !entry.startsWith("call:figma.loadFontAsync:")))
+      .toEqual(connected.trace.filter((entry) => !entry.startsWith("call:figma.loadFontAsync:")));
+    expect(fallback.state()).toEqual(connected.state());
   });
 
   it("enforces the same delete_node safety precondition in both paths", async () => {
@@ -352,7 +455,7 @@ describe("all-action behavioral parity", () => {
 
     expect(fallbackResults).toEqual([expect.objectContaining({ actionIndex: 0, status: "failed" })]);
     expect(pluginResult.summary).toMatchObject({ applied: 0, failed: 1 });
-    expect(fallback.trace).not.toContain("call:page.remove");
-    expect(connected.trace).not.toContain("call:page.remove");
+    expect(fallback.trace.some((entry) => entry.startsWith("call:page.remove:"))).toBe(false);
+    expect(connected.trace.some((entry) => entry.startsWith("call:page.remove:"))).toBe(false);
   });
 });

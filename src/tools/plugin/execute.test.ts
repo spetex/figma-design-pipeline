@@ -319,6 +319,41 @@ describe("handleExecute fallback generation", () => {
     expect(triggerUndo).toHaveBeenCalledTimes(1);
   });
 
+  it("rolls back a partial set_component_properties mutation", async () => {
+    const triggerUndo = vi.fn();
+    const applied: Array<Record<string, string | boolean>> = [];
+    const node = {
+      id: "instance",
+      setProperties: (properties: Record<string, string | boolean>) => {
+        applied.push(properties);
+        if ("Second" in properties) throw new Error("Second rejected");
+      },
+    };
+    const fallback = await handleExecute(null, {
+      actions: [{
+        type: "set_component_properties",
+        nodeId: "instance",
+        properties: { First: "Applied", Second: true },
+      }],
+      rollbackOnError: true,
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: { getNodeById: () => typeof node; triggerUndo: typeof triggerUndo }) => Promise<Array<Record<string, unknown>>>;
+
+    const result = await new AsyncFunction("figma", fallback.fallbackJs!)({
+      getNodeById: () => node,
+      triggerUndo,
+    });
+
+    expect(applied).toEqual([{ First: "Applied" }, { Second: true }]);
+    expect(result).toEqual(expect.arrayContaining([
+      expect.objectContaining({ actionIndex: 0, status: "failed" }),
+      { type: "rollback", status: "applied" },
+    ]));
+    expect(triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
   it("implements dry-run, continuation, and rollback execution options", async () => {
     const dryRun = await handleExecute(null, {
       actions: [{ type: "rename", nodeId: "node", name: "Dry run" }],
