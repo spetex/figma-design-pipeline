@@ -1,5 +1,7 @@
 /// <reference types="@figma/plugin-typings" />
 
+import { isKnownActionType } from "../src/shared/action-parity";
+
 // ─── SPFR Design Pipeline Plugin v2 ──────────────────────────────
 // High-performance batch executor with font caching, symbolic refs,
 // before/after snapshots, dry-run, and rollback.
@@ -127,6 +129,7 @@ async function executeAction(action: Record<string, unknown>): Promise<{
   newNodeId?: string;
 }> {
   const type = action.type as string;
+  if (!isKnownActionType(type)) throw new Error(`Unknown action type: ${type}`);
 
   switch (type) {
     case "rename": {
@@ -161,9 +164,9 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       const text = figma.createText();
       text.fontName = { family, style };
       text.characters = (action.characters as string) || "";
-      if (action.fontSize) text.fontSize = action.fontSize as number;
-      if (action.lineHeight) text.lineHeight = { value: action.lineHeight as number, unit: "PIXELS" };
-      if (action.letterSpacing) text.letterSpacing = { value: action.letterSpacing as number, unit: "PIXELS" };
+      if (action.fontSize !== undefined) text.fontSize = action.fontSize as number;
+      if (action.lineHeight !== undefined) text.lineHeight = { value: action.lineHeight as number, unit: "PIXELS" };
+      if (action.letterSpacing !== undefined) text.letterSpacing = { value: action.letterSpacing as number, unit: "PIXELS" };
       if (action.fills) text.fills = sanitizePaints(action.fills as unknown[]);
       if (action.textCase) text.textCase = action.textCase as TextCase;
       if (action.textAlignHorizontal) text.textAlignHorizontal = action.textAlignHorizontal as "LEFT" | "CENTER" | "RIGHT" | "JUSTIFIED";
@@ -350,7 +353,7 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       const currentStyle = typeof currentFont === "symbol" ? "Regular" : currentFont.style;
       const family = (action.fontFamily as string) || currentFamily;
       const weight = action.fontWeight as number | undefined;
-      const style = weight ? weightToFontStyle(weight) : currentStyle;
+      const style = weight !== undefined ? weightToFontStyle(weight) : currentStyle;
       await ensureFonts([{ family, style }]);
       const before = { fontSize: node.fontSize, fontName: typeof currentFont === "symbol" ? "mixed" : currentFont };
       node.fontName = { family, style };
