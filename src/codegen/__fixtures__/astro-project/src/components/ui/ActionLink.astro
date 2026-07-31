@@ -1,0 +1,9 @@
+---
+interface Props {
+  label: unknown;
+}
+
+const { label } = Astro.props;
+---
+
+<a href="/">{String(label)}</a>

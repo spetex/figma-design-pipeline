@@ -1,0 +1,9 @@
+---
+interface Props {
+  items: unknown;
+}
+
+const { items } = Astro.props;
+---
+
+<div data-items={JSON.stringify(items)}></div>

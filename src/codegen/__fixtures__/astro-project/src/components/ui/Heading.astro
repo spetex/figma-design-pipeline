@@ -1,0 +1,9 @@
+---
+interface Props {
+  level: 1 | 2 | 3;
+}
+
+const { level } = Astro.props;
+---
+
+<h2 data-level={level}><slot /></h2>

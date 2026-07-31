@@ -1,0 +1,46 @@
+{
+  "version": "1.0.0",
+  "project": "astro-codegen-fixture",
+  "components": [
+    {
+      "id": "action-link",
+      "name": "ActionLink",
+      "path": "src/components/ui/ActionLink.astro",
+      "category": "ui",
+      "description": "UI action link",
+      "props": [{ "name": "label", "type": "unknown", "required": true }],
+      "figmaSignature": { "keywords": ["action"] },
+      "schemaFields": { "label": "actionLabel" }
+    },
+    {
+      "id": "feature-grid",
+      "name": "FeatureGrid",
+      "path": "src/components/blocks/FeatureGrid.astro",
+      "category": "blocks",
+      "description": "Feature block",
+      "props": [{ "name": "items", "type": "unknown", "required": true }],
+      "figmaSignature": { "keywords": ["features"] },
+      "schemaFields": { "items": "features" }
+    },
+    {
+      "id": "story-section",
+      "name": "StorySection",
+      "path": "src/components/sections/StorySection.astro",
+      "category": "sections",
+      "description": "Story section",
+      "props": [{ "name": "story", "type": "unknown", "required": true }],
+      "figmaSignature": { "keywords": ["story"] },
+      "schemaFields": { "story": "story" }
+    },
+    {
+      "id": "stats-panel",
+      "name": "StatsPanel",
+      "path": "src/components/sections/StatsPanel.tsx",
+      "category": "sections",
+      "description": "TSX stats section",
+      "props": [{ "name": "stats", "type": "unknown", "required": true }],
+      "figmaSignature": { "keywords": ["stats"] },
+      "schemaFields": { "stats": "stats" }
+    }
+  ]
+}

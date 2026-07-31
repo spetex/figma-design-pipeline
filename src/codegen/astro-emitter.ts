@@ -1,4 +1,10 @@
-import type { EnrichedNode, ComponentMapping, GeneratedFile } from "../shared/types.js";
+import { extname, posix } from "node:path";
+import type {
+  CodegenDiagnostic,
+  EnrichedNode,
+  ComponentMapping,
+  GeneratedFile,
+} from "../shared/types.js";
 import { toPascal } from "../shared/naming.js";
 
 interface EmitOptions {
@@ -8,15 +14,26 @@ interface EmitOptions {
   schemaId?: string;
 }
 
+export interface AstroEmitResult {
+  file: GeneratedFile;
+  diagnostics: CodegenDiagnostic[];
+  mappingsUsed: number;
+}
+
+const SUPPORTED_COMPONENT_EXTENSIONS = new Set([".astro", ".tsx", ".jsx"]);
+const TEMPLATE_DIRECTORY = "src/components/templates";
+
 /**
  * Generate an Astro page template from enriched tree and component mappings.
  * Emits a generic Astro-style page template from mapped Figma structure.
  */
-export function emitAstroTemplate(options: EmitOptions): GeneratedFile {
+export function emitAstroTemplate(options: EmitOptions): AstroEmitResult {
   const { mappings, tree, templateType, schemaId } = options;
 
   const imports = new Set<string>();
   const bodyLines: string[] = [];
+  const diagnostics: CodegenDiagnostic[] = [];
+  const componentSymbols = new Map<string, string>();
 
   // Always import base components
   imports.add('import Section from "@/components/ui/Section.astro";');
@@ -24,20 +41,39 @@ export function emitAstroTemplate(options: EmitOptions): GeneratedFile {
   imports.add('import Heading from "@/components/ui/Heading.astro";');
   imports.add('import Text from "@/components/ui/Text.astro";');
 
-  // Add imports for mapped components
+  const usedSymbols = new Set(["Section", "Container", "Heading", "Text"]);
+  const importedPaths = new Map<string, string>();
+
+  // Add imports for mapped components, retaining each registry entry's canonical path.
   for (const mapping of mappings) {
-    const compName = toPascal(mapping.cmsComponent.replace(/-/g, " "));
-    // Determine the import path based on component name
-    const isUi = ["Section", "Container", "Heading", "Text", "Button"].includes(compName);
-    const category = isUi ? "ui" : "blocks";
-    imports.add(`import ${compName} from "@/components/${category}/${compName}.astro";`);
+    const importPath = registryPathToImport(mapping, diagnostics);
+    const baseSymbol = componentSymbol(mapping);
+    if (!importPath || !baseSymbol) {
+      if (!baseSymbol) {
+        diagnostics.push(diagnostic(
+          mapping,
+          "INVALID_COMPONENT_NAME",
+          `Registry component ${mapping.cmsComponent} has no name that can be represented as an Astro import identifier.`
+        ));
+      }
+      continue;
+    }
+
+    let symbol = importedPaths.get(importPath);
+    if (!symbol) {
+      symbol = uniqueSymbol(baseSymbol, usedSymbols);
+      usedSymbols.add(symbol);
+      importedPaths.set(importPath, symbol);
+      imports.add(`import ${symbol} from ${JSON.stringify(importPath)};`);
+    }
+    componentSymbols.set(mapping.figmaNodeId, symbol);
   }
 
   // Generate Props interface
-  const propsInterface = generatePropsInterface(templateType, schemaId);
+  const propsInterface = generatePropsInterface(templateType);
 
   // Walk tree and emit component usage
-  emitNodeContent(tree, mappings, bodyLines, 0);
+  emitNodeContent(tree, mappings, componentSymbols, bodyLines, 0);
 
   // Assemble template
   const sortedImports = [...imports].sort();
@@ -57,15 +93,30 @@ ${bodyLines.join("\n")}
 `;
 
   return {
-    path: `src/components/templates/${toPascal(templateType)}Template.astro`,
-    content,
-    type: "astro",
+    file: {
+      path: `src/components/templates/${toPascal(templateType)}Template.astro`,
+      content,
+      type: "astro",
+    },
+    diagnostics,
+    mappingsUsed: componentSymbols.size,
   };
 }
 
-function generatePropsInterface(templateType: string, schemaId?: string): string {
+function generatePropsInterface(templateType: string): string {
   const typeName = `${toPascal(templateType)}Data`;
-  return `interface Props {
+  return `interface ${typeName} {
+  id: string;
+  title?: string;
+  description?: string;
+  image?: {
+    url?: string;
+    alt?: string;
+  };
+  [field: string]: any;
+}
+
+interface Props {
   data: ${typeName};
   isPreview?: boolean;
 }
@@ -76,15 +127,16 @@ const { data, isPreview = false } = Astro.props;`;
 function emitNodeContent(
   node: EnrichedNode,
   mappings: ComponentMapping[],
+  componentSymbols: Map<string, string>,
   lines: string[],
   indent: number
 ): void {
   const pad = "  ".repeat(indent);
   const mapping = mappings.find((m) => m.figmaNodeId === node.id);
+  const compName = mapping ? componentSymbols.get(mapping.figmaNodeId) : undefined;
 
-  if (mapping) {
+  if (mapping && compName) {
     // Emit mapped component
-    const compName = toPascal(mapping.cmsComponent.replace(/-/g, " "));
     const props = Object.entries(mapping.propMappings)
       .map(([prop, field]) => `${prop}={data.${field}}`)
       .join("\n    ");
@@ -105,7 +157,7 @@ function emitNodeContent(
     lines.push(`${pad}<Section>`);
     lines.push(`${pad}  <Container>`);
     for (const child of node.children) {
-      emitNodeContent(child, mappings, lines, indent + 2);
+      emitNodeContent(child, mappings, componentSymbols, lines, indent + 2);
     }
     lines.push(`${pad}  </Container>`);
     lines.push(`${pad}</Section>`);
@@ -144,7 +196,87 @@ function emitNodeContent(
   // For container nodes, recurse into children
   if (node.children.length > 0) {
     for (const child of node.children) {
-      emitNodeContent(child, mappings, lines, indent);
+      emitNodeContent(child, mappings, componentSymbols, lines, indent);
     }
   }
+}
+
+function registryPathToImport(
+  mapping: ComponentMapping,
+  diagnostics: CodegenDiagnostic[]
+): string | null {
+  const registryPath = mapping.componentPath;
+  if (
+    !registryPath ||
+    registryPath.includes("\\") ||
+    registryPath.includes("\0") ||
+    registryPath.includes("\n") ||
+    registryPath.includes("\r") ||
+    registryPath.includes("?") ||
+    registryPath.includes("#") ||
+    posix.isAbsolute(registryPath) ||
+    /^[A-Za-z]:/.test(registryPath)
+  ) {
+    diagnostics.push(diagnostic(
+      mapping,
+      "INVALID_COMPONENT_PATH",
+      `Registry path ${JSON.stringify(registryPath)} is not a portable project-relative component path.`
+    ));
+    return null;
+  }
+
+  const normalized = registryPath.replace(/^\.\//, "");
+  if (normalized === ".." || normalized.startsWith("../") || normalized.includes("/../")) {
+    diagnostics.push(diagnostic(
+      mapping,
+      "INVALID_COMPONENT_PATH",
+      `Registry path ${JSON.stringify(registryPath)} escapes the target project.`
+    ));
+    return null;
+  }
+
+  const extension = extname(normalized).toLowerCase();
+  if (!SUPPORTED_COMPONENT_EXTENSIONS.has(extension)) {
+    diagnostics.push(diagnostic(
+      mapping,
+      "UNSUPPORTED_COMPONENT_EXTENSION",
+      `Astro codegen cannot represent registry component ${mapping.cmsComponent} at ${JSON.stringify(registryPath)}; supported extensions are .astro, .tsx, and .jsx.`
+    ));
+    return null;
+  }
+
+  if (normalized.startsWith("src/")) return `@/${normalized.slice(4)}`;
+
+  const relativePath = posix.relative(TEMPLATE_DIRECTORY, normalized);
+  return relativePath.startsWith(".") ? relativePath : `./${relativePath}`;
+}
+
+function componentSymbol(mapping: ComponentMapping): string | null {
+  if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(mapping.componentName)) {
+    return mapping.componentName;
+  }
+  const fallback = toPascal(mapping.componentName || mapping.cmsComponent.replace(/-/g, " "));
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(fallback) ? fallback : null;
+}
+
+function uniqueSymbol(base: string, used: Set<string>): string {
+  if (!used.has(base)) return base;
+  let suffix = 2;
+  while (used.has(`${base}${suffix}`)) suffix++;
+  return `${base}${suffix}`;
+}
+
+function diagnostic(
+  mapping: ComponentMapping,
+  code: CodegenDiagnostic["code"],
+  message: string
+): CodegenDiagnostic {
+  return {
+    severity: "error",
+    code,
+    message,
+    figmaNodeId: mapping.figmaNodeId,
+    component: mapping.cmsComponent,
+    path: mapping.componentPath,
+  };
 }

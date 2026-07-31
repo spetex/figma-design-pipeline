@@ -245,9 +245,25 @@ export interface ComponentMapping {
   figmaNodeId: string;
   figmaNodeName: string;
   cmsComponent: string;
+  componentName: string;
+  componentPath: string;
+  componentCategory: ComponentRegistryEntry["category"];
+  componentProps: ComponentProp[];
   confidence: number;
   propMappings: Record<string, string>;
   hints?: string[];
+}
+
+export interface CodegenDiagnostic {
+  severity: "error" | "warning";
+  code:
+    | "INVALID_COMPONENT_PATH"
+    | "UNSUPPORTED_COMPONENT_EXTENSION"
+    | "INVALID_COMPONENT_NAME";
+  message: string;
+  figmaNodeId: string;
+  component: string;
+  path: string;
 }
 
 export interface GeneratedFile {
