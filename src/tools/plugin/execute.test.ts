@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeServer } from "../../plugin/bridge.js";
 import { compileBatch, CREATE_TYPES } from "../../plugin/batch-compiler.js";
-import { ACTION_PARITY, ACTION_TYPES } from "../../shared/action-parity.js";
+import { ACTION_PARITY, ACTION_TYPES, actionWritesDocument } from "../../shared/action-parity.js";
+import { weightToFontStyle } from "../../shared/font.js";
 import { handleExecute } from "./execute.js";
 import { actionSchema } from "../../shared/actions.js";
 
@@ -76,24 +77,83 @@ describe("handleExecute fallback generation", () => {
     { type: "bind_variable", action: { type: "bind_variable", nodeId: "node", property: "fills", variableId: "variable", paintIndex: 1 }, expectedOperations: ["figma.variables.setBoundVariableForPaint", "const paintIndex = 1", "n.fills = paints"] },
   ];
 
+  const fallbackFragmentsForField = (type: keyof typeof ACTION_PARITY, field: string, value: unknown): string[] => {
+    if (field === "fontWeight") return [`"${weightToFontStyle(value as number)}"`];
+    if (type === "set_gradient_fill" && field === "gradientType") return [`GRADIENT_${value}`];
+    if (type === "apply_style" && field === "property") {
+      const methodByProperty = {
+        fill: "setFillStyleIdAsync",
+        stroke: "setStrokeStyleIdAsync",
+        text: "setTextStyleIdAsync",
+        effect: "setEffectStyleIdAsync",
+      } as const;
+      return [methodByProperty[value as keyof typeof methodByProperty]];
+    }
+    if (type === "bind_variable" && field === "property") {
+      return value === "fills" || value === "strokes"
+        ? [`n.${value}`]
+        : [`setBoundVariable("${value}"`];
+    }
+    if (field === "radii") {
+      return (value as number[]).map((radius, index) =>
+        [`topLeftRadius=${radius}`, `topRightRadius=${radius}`, `bottomRightRadius=${radius}`, `bottomLeftRadius=${radius}`][index]
+      );
+    }
+    if (typeof value === "string") return [JSON.stringify(value)];
+    if (typeof value === "number" || typeof value === "boolean") return [String(value)];
+    return [JSON.stringify(value)];
+  };
+
   it("defines an exhaustive shared parity contract for the action schemas", () => {
     expect(PARITY_CASES.map(({ type }) => type).sort()).toEqual([...ACTION_TYPES].sort());
   });
 
-  it.each(PARITY_CASES)("emits $type operations with every declared schema parameter", async ({ type, action, expectedOperations }) => {
+  it.each(PARITY_CASES)("emits $type operations for every validated parameter", async ({ type, action }) => {
     const parsed = actionSchema.parse(action);
     expect(Object.keys(parsed).filter((key) => key !== "type").sort()).toEqual(
       [...ACTION_PARITY[type].schemaFields].sort()
     );
 
     const result = await handleExecute(null, { actions: [action] });
-    for (const operation of expectedOperations) {
-      expect(result.fallbackJs).toContain(operation);
+    for (const field of ACTION_PARITY[type].operationFields) {
+      const value = (parsed as Record<string, unknown>)[field];
+      for (const fragment of fallbackFragmentsForField(type, field, value)) {
+        expect(result.fallbackJs).toContain(fragment);
+      }
     }
     const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
       ...args: string[]
     ) => unknown;
     expect(() => new AsyncFunction("figma", result.fallbackJs!)).not.toThrow();
+  });
+
+  it.each(PARITY_CASES)("keeps $type defaults and omitted optional fields executable", async ({ type, action }) => {
+    const raw = { ...(action as Record<string, unknown>) };
+    for (const field of ACTION_PARITY[type].schemaFields) {
+      const omitted = { ...raw };
+      delete omitted[field];
+      const parsed = actionSchema.safeParse(omitted);
+      if (!parsed.success) continue;
+
+      const fallback = await handleExecute(null, { actions: [omitted] });
+      const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+        ...args: string[]
+      ) => unknown;
+      expect(() => new AsyncFunction("figma", fallback.fallbackJs!)).not.toThrow();
+      for (const operationField of ACTION_PARITY[type].operationFields) {
+        if (!(operationField in parsed.data)) continue;
+        const value = (parsed.data as Record<string, unknown>)[operationField];
+        for (const fragment of fallbackFragmentsForField(type, operationField, value)) {
+          expect(fallback.fallbackJs).toContain(fragment);
+        }
+      }
+    }
+  });
+
+  it("uses the shared write contract to exclude read-only actions from rollback eligibility", () => {
+    expect(actionWritesDocument("export_node")).toBe(false);
+    expect(actionWritesDocument("switch_page")).toBe(false);
+    expect(actionWritesDocument("rename")).toBe(true);
   });
 
   it("preserves the current font when set_text_style omits font fields", async () => {
@@ -127,6 +187,40 @@ describe("handleExecute fallback generation", () => {
     expect(compileBatch([action]).requiredFonts).toEqual([]);
   });
 
+  it("preserves mixed text fonts and loads every range font before changing text metrics", async () => {
+    const mixed = Symbol("mixed");
+    const node = {
+      id: "text",
+      characters: "AB",
+      fontName: mixed,
+      fontSize: 12,
+      getRangeFontName: (start: number) => start === 0
+        ? { family: "Roboto", style: "Regular" }
+        : { family: "Roboto", style: "Bold" },
+    };
+    const loadedFonts: Array<{ family: string; style: string }> = [];
+    const figma = {
+      mixed,
+      getNodeById: () => node,
+      loadFontAsync: async (font: { family: string; style: string }) => { loadedFonts.push(font); },
+    };
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof figma) => Promise<unknown>;
+
+    const fallback = await handleExecute(null, {
+      actions: [{ type: "set_text_style", nodeId: "text", fontSize: 18, lineHeight: 24, letterSpacing: 0.5 }],
+    });
+    await new AsyncFunction("figma", fallback.fallbackJs!)(figma);
+
+    expect(node.fontName).toBe(mixed);
+    expect(node.fontSize).toBe(18);
+    expect(loadedFonts).toEqual([
+      { family: "Roboto", style: "Regular" },
+      { family: "Roboto", style: "Bold" },
+    ]);
+  });
+
   it("binds paint variables through setBoundVariableForPaint", async () => {
     const paint = { type: "SOLID", color: { r: 1, g: 0, b: 0 } };
     const node = { id: "node", fills: [paint] };
@@ -150,6 +244,102 @@ describe("handleExecute fallback generation", () => {
 
     expect(setBoundVariableForPaint).toHaveBeenCalledWith(paint, "color", variable);
     expect(node.fills).toEqual([{ ...paint, boundVariableId: variable.id }]);
+  });
+
+  it.each([
+    { label: "missing", paints: [] },
+    { label: "non-solid", paints: [{ type: "GRADIENT_LINEAR" }] },
+  ])("fails $label paint-variable bindings instead of reporting success", async ({ paints }) => {
+    const setBoundVariableForPaint = vi.fn();
+    const figma = {
+      getNodeById: () => ({ id: "node", fills: paints }),
+      variables: {
+        getVariableById: () => ({ id: "variable" }),
+        setBoundVariableForPaint,
+      },
+    };
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof figma) => Promise<Array<Record<string, unknown>>>;
+    const fallback = await handleExecute(null, {
+      actions: [{ type: "bind_variable", nodeId: "node", property: "fills", variableId: "variable" }],
+    });
+    const result = await new AsyncFunction("figma", fallback.fallbackJs!)(figma);
+
+    expect(result).toEqual([expect.objectContaining({ actionIndex: 0, status: "failed" })]);
+    expect(setBoundVariableForPaint).not.toHaveBeenCalled();
+  });
+
+  it("fails rollback preflight before any fallback mutation when undo is unavailable", async () => {
+    const node = { id: "node", name: "Before" };
+    const fallback = await handleExecute(null, {
+      actions: [{ type: "rename", nodeId: "node", name: "After" }],
+      rollbackOnError: true,
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: { getNodeById: () => typeof node }) => Promise<unknown>;
+
+    await expect(new AsyncFunction("figma", fallback.fallbackJs!)({ getNodeById: () => node })).rejects.toThrow("does not support rollback");
+    expect(node.name).toBe("Before");
+  });
+
+  it("does not create a detached node when a fallback create dependency is invalid", async () => {
+    const createFrame = vi.fn();
+    const fallback = await handleExecute(null, {
+      actions: [{ type: "create_frame", name: "Frame", parentId: "missing" }],
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: { getNodeById: () => undefined; createFrame: typeof createFrame }) => Promise<Array<Record<string, unknown>>>;
+    const result = await new AsyncFunction("figma", fallback.fallbackJs!)({
+      getNodeById: () => undefined,
+      createFrame,
+    });
+
+    expect(result).toEqual([expect.objectContaining({ actionIndex: 0, status: "failed" })]);
+    expect(createFrame).not.toHaveBeenCalled();
+  });
+
+  it("only rolls back fallback batches after document writes, including partial writes", async () => {
+    const triggerUndo = vi.fn();
+    const exported = {
+      id: "exported",
+      exportAsync: async () => new Uint8Array([1]),
+    };
+    const exportFallback = await handleExecute(null, {
+      actions: [
+        { type: "export_node", nodeId: "exported" },
+        { type: "rename", nodeId: "missing", name: "Fails" },
+      ],
+      rollbackOnError: true,
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: Record<string, unknown>) => Promise<unknown>;
+    await new AsyncFunction("figma", exportFallback.fallbackJs!)({
+      getNodeById: (id: string) => id === "exported" ? exported : undefined,
+      base64Encode: () => "AQ==",
+      triggerUndo,
+    });
+    expect(triggerUndo).not.toHaveBeenCalled();
+
+    let x = 0;
+    const partiallyWritable = { id: "node" } as { id: string; x: number; y: number };
+    Object.defineProperties(partiallyWritable, {
+      x: { get: () => x, set: (value: number) => { x = value; }, enumerable: true },
+      y: { get: () => 0, set: () => { throw new Error("y rejected"); }, enumerable: true },
+    });
+    const partialFallback = await handleExecute(null, {
+      actions: [{ type: "set_position", nodeId: "node", x: 12, y: 24 }],
+      rollbackOnError: true,
+    });
+    await new AsyncFunction("figma", partialFallback.fallbackJs!)({
+      getNodeById: () => partiallyWritable,
+      triggerUndo,
+    });
+    expect(x).toBe(12);
+    expect(triggerUndo).toHaveBeenCalledTimes(1);
   });
 
   it("implements dry-run, continuation, and rollback execution options", async () => {
@@ -209,7 +399,8 @@ describe("handleExecute fallback generation", () => {
     expect(result.fallbackJs).toContain("const resolveRefId = (id) => {");
     expect(result.fallbackJs).toContain("const createdNodeIds = new Map();");
     expect(result.fallbackJs).toContain('const getNode = (id) => figma.getNodeById(resolveRefId(id));');
-    expect(result.fallbackJs).toContain('getNode("$ref:node-0").appendChild(f);');
+    expect(result.fallbackJs).toContain('const parent = requireNode("$ref:node-0");');
+    expect(result.fallbackJs).toContain("parent.appendChild(f);");
   });
 
   it("matches plugin create-order references for every create action type", async () => {

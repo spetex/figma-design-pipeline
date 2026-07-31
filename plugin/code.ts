@@ -1,6 +1,6 @@
 /// <reference types="@figma/plugin-typings" />
 
-import { isKnownActionType } from "../src/shared/action-parity";
+import { actionWritesDocument, isKnownActionType } from "../src/shared/action-parity";
 
 // ─── SPFR Design Pipeline Plugin v2 ──────────────────────────────
 // High-performance batch executor with font caching, symbolic refs,
@@ -52,6 +52,25 @@ async function findSceneNode(nodeId: string): Promise<SceneNode> {
   const node = await findNode(nodeId);
   if (!("parent" in node)) throw new Error(`Not a scene node: ${nodeId}`);
   return node as SceneNode;
+}
+
+/** Load every font needed to modify a text node without replacing its font. */
+async function ensureTextNodeFonts(node: TextNode): Promise<void> {
+  const fontName = node.fontName;
+  if (typeof fontName !== "symbol") {
+    await ensureFonts([{ family: fontName.family, style: fontName.style }]);
+    return;
+  }
+
+  const seen = new Set<string>();
+  for (let i = 0; i < node.characters.length; i++) {
+    const font = node.getRangeFontName(i, i + 1) as FontName;
+    const key = `${font.family}|${font.style}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      await ensureFonts([font]);
+    }
+  }
 }
 
 // ─── Font Weight Helpers ────────────────────────────────────────
@@ -123,7 +142,10 @@ type ActionResult = {
   error?: string;
 };
 
-async function executeAction(action: Record<string, unknown>): Promise<{
+async function executeAction(
+  action: Record<string, unknown>,
+  markDocumentWrite: () => void
+): Promise<{
   before?: Record<string, unknown>;
   after?: Record<string, unknown>;
   newNodeId?: string;
@@ -162,6 +184,7 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       const style = weightToFontStyle(weight);
       await ensureFonts([{ family, style }]);
       const text = figma.createText();
+      markDocumentWrite();
       text.fontName = { family, style };
       text.characters = (action.characters as string) || "";
       if (action.fontSize !== undefined) text.fontSize = action.fontSize as number;
@@ -184,6 +207,7 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       if (!("children" in parent)) throw new Error(`Parent ${action.parentId} is not a container`);
       const container = parent as FrameNode;
       const frame = figma.createFrame();
+      markDocumentWrite();
       frame.name = action.name as string;
       frame.resize((action.width as number) || 100, (action.height as number) || 100);
       container.appendChild(frame);
@@ -214,8 +238,14 @@ async function executeAction(action: Record<string, unknown>): Promise<{
     case "set_position": {
       const node = await findSceneNode(action.nodeId as string);
       const before = { x: node.x, y: node.y };
-      if (action.x !== undefined) node.x = action.x as number;
-      if (action.y !== undefined) node.y = action.y as number;
+      if (action.x !== undefined) {
+        node.x = action.x as number;
+        markDocumentWrite();
+      }
+      if (action.y !== undefined) {
+        node.y = action.y as number;
+        markDocumentWrite();
+      }
       return { before, after: { x: node.x, y: node.y } };
     }
 
@@ -231,8 +261,15 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       const frame = node as FrameNode;
       const before = { layoutMode: frame.layoutMode };
       frame.layoutMode = action.mode as "HORIZONTAL" | "VERTICAL" | "NONE";
-      if (action.primaryAxisSizingMode) frame.primaryAxisSizingMode = action.primaryAxisSizingMode as "FIXED" | "AUTO";
-      if (action.counterAxisSizingMode) frame.counterAxisSizingMode = action.counterAxisSizingMode as "FIXED" | "AUTO";
+      markDocumentWrite();
+      if (action.primaryAxisSizingMode) {
+        frame.primaryAxisSizingMode = action.primaryAxisSizingMode as "FIXED" | "AUTO";
+        markDocumentWrite();
+      }
+      if (action.counterAxisSizingMode) {
+        frame.counterAxisSizingMode = action.counterAxisSizingMode as "FIXED" | "AUTO";
+        markDocumentWrite();
+      }
       return { before, after: { layoutMode: frame.layoutMode } };
     }
 
@@ -251,8 +288,14 @@ async function executeAction(action: Record<string, unknown>): Promise<{
         primaryAxisAlignItems: frame.primaryAxisAlignItems,
         counterAxisAlignItems: frame.counterAxisAlignItems,
       };
-      if (action.primaryAxisAlignItems) frame.primaryAxisAlignItems = action.primaryAxisAlignItems as "MIN" | "CENTER" | "MAX" | "SPACE_BETWEEN";
-      if (action.counterAxisAlignItems) frame.counterAxisAlignItems = action.counterAxisAlignItems as "MIN" | "CENTER" | "MAX" | "BASELINE";
+      if (action.primaryAxisAlignItems) {
+        frame.primaryAxisAlignItems = action.primaryAxisAlignItems as "MIN" | "CENTER" | "MAX" | "SPACE_BETWEEN";
+        markDocumentWrite();
+      }
+      if (action.counterAxisAlignItems) {
+        frame.counterAxisAlignItems = action.counterAxisAlignItems as "MIN" | "CENTER" | "MAX" | "BASELINE";
+        markDocumentWrite();
+      }
       return { before, after: { primaryAxisAlignItems: frame.primaryAxisAlignItems, counterAxisAlignItems: frame.counterAxisAlignItems } };
     }
 
@@ -265,11 +308,26 @@ async function executeAction(action: Record<string, unknown>): Promise<{
         paddingTop: frame.paddingTop, paddingRight: frame.paddingRight,
         paddingBottom: frame.paddingBottom, paddingLeft: frame.paddingLeft,
       };
-      if (action.itemSpacing !== undefined) frame.itemSpacing = action.itemSpacing as number;
-      if (action.paddingTop !== undefined) frame.paddingTop = action.paddingTop as number;
-      if (action.paddingRight !== undefined) frame.paddingRight = action.paddingRight as number;
-      if (action.paddingBottom !== undefined) frame.paddingBottom = action.paddingBottom as number;
-      if (action.paddingLeft !== undefined) frame.paddingLeft = action.paddingLeft as number;
+      if (action.itemSpacing !== undefined) {
+        frame.itemSpacing = action.itemSpacing as number;
+        markDocumentWrite();
+      }
+      if (action.paddingTop !== undefined) {
+        frame.paddingTop = action.paddingTop as number;
+        markDocumentWrite();
+      }
+      if (action.paddingRight !== undefined) {
+        frame.paddingRight = action.paddingRight as number;
+        markDocumentWrite();
+      }
+      if (action.paddingBottom !== undefined) {
+        frame.paddingBottom = action.paddingBottom as number;
+        markDocumentWrite();
+      }
+      if (action.paddingLeft !== undefined) {
+        frame.paddingLeft = action.paddingLeft as number;
+        markDocumentWrite();
+      }
       return { before, after: { itemSpacing: frame.itemSpacing, paddingTop: frame.paddingTop, paddingRight: frame.paddingRight, paddingBottom: frame.paddingBottom, paddingLeft: frame.paddingLeft } };
     }
 
@@ -284,7 +342,11 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       const node = await findSceneNode(action.nodeId as string) as GeometryMixin & SceneNode;
       const before = { strokes: safeSerialize(node.strokes), strokeWeight: safeSerialize((node as FrameNode).strokeWeight) };
       node.strokes = sanitizePaints(action.strokes as unknown[]);
-      if (action.strokeWeight !== undefined) (node as FrameNode).strokeWeight = action.strokeWeight as number;
+      markDocumentWrite();
+      if (action.strokeWeight !== undefined) {
+        (node as FrameNode).strokeWeight = action.strokeWeight as number;
+        markDocumentWrite();
+      }
       return { before, after: { strokes: safeSerialize(node.strokes) } };
     }
 
@@ -300,13 +362,18 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       const before = { cornerRadius: node.cornerRadius };
       if (action.radius !== undefined) {
         node.cornerRadius = action.radius as number;
+        markDocumentWrite();
       }
       if (action.radii) {
         const [tl, tr, br, bl] = action.radii as [number, number, number, number];
         node.topLeftRadius = tl;
+        markDocumentWrite();
         node.topRightRadius = tr;
+        markDocumentWrite();
         node.bottomRightRadius = br;
+        markDocumentWrite();
         node.bottomLeftRadius = bl;
+        markDocumentWrite();
       }
       return { before, after: { cornerRadius: node.cornerRadius } };
     }
@@ -327,20 +394,7 @@ async function executeAction(action: Record<string, unknown>): Promise<{
 
     case "set_text_content": {
       const node = await findSceneNode(action.nodeId as string) as TextNode;
-      // Handle mixed fonts: load all unique fonts in the text range
-      const fontName = node.fontName;
-      if (typeof fontName === "symbol") {
-        // Mixed fonts — load all unique fonts by scanning segments
-        const len = node.characters.length;
-        const seen = new Set<string>();
-        for (let i = 0; i < len; i++) {
-          const f = node.getRangeFontName(i, i + 1) as FontName;
-          const key = `${f.family}|${f.style}`;
-          if (!seen.has(key)) { seen.add(key); await ensureFonts([f]); }
-        }
-      } else {
-        await ensureFonts([{ family: fontName.family, style: fontName.style }]);
-      }
+      await ensureTextNodeFonts(node);
       const before = { characters: node.characters };
       node.characters = action.characters as string;
       return { before, after: { characters: node.characters } };
@@ -349,23 +403,39 @@ async function executeAction(action: Record<string, unknown>): Promise<{
     case "set_text_style": {
       const node = await findSceneNode(action.nodeId as string) as TextNode;
       const currentFont = node.fontName;
-      const currentFamily = typeof currentFont === "symbol" ? "Inter" : currentFont.family;
-      const currentStyle = typeof currentFont === "symbol" ? "Regular" : currentFont.style;
-      const family = (action.fontFamily as string) || currentFamily;
-      const weight = action.fontWeight as number | undefined;
-      const style = weight !== undefined ? weightToFontStyle(weight) : currentStyle;
-      await ensureFonts([{ family, style }]);
       const before = { fontSize: node.fontSize, fontName: typeof currentFont === "symbol" ? "mixed" : currentFont };
-      node.fontName = { family, style };
-      if (action.fontSize !== undefined) node.fontSize = action.fontSize as number;
-      if (action.lineHeight !== undefined) node.lineHeight = { value: action.lineHeight as number, unit: "PIXELS" };
-      if (action.letterSpacing !== undefined) node.letterSpacing = { value: action.letterSpacing as number, unit: "PIXELS" };
+      const hasFontOverride = Boolean(action.fontFamily) || action.fontWeight !== undefined;
+      if (hasFontOverride) {
+        const currentFamily = typeof currentFont === "symbol" ? "Inter" : currentFont.family;
+        const currentStyle = typeof currentFont === "symbol" ? "Regular" : currentFont.style;
+        const family = (action.fontFamily as string) || currentFamily;
+        const weight = action.fontWeight as number | undefined;
+        const style = weight !== undefined ? weightToFontStyle(weight) : currentStyle;
+        await ensureFonts([{ family, style }]);
+        node.fontName = { family, style };
+        markDocumentWrite();
+      } else {
+        await ensureTextNodeFonts(node);
+      }
+      if (action.fontSize !== undefined) {
+        node.fontSize = action.fontSize as number;
+        markDocumentWrite();
+      }
+      if (action.lineHeight !== undefined) {
+        node.lineHeight = { value: action.lineHeight as number, unit: "PIXELS" };
+        markDocumentWrite();
+      }
+      if (action.letterSpacing !== undefined) {
+        node.letterSpacing = { value: action.letterSpacing as number, unit: "PIXELS" };
+        markDocumentWrite();
+      }
       return { before, after: { fontSize: node.fontSize, fontName: node.fontName } };
     }
 
     case "create_component_from_node": {
       const node = await findSceneNode(action.nodeId as string);
       const comp = figma.createComponentFromNode(node);
+      markDocumentWrite();
       comp.name = action.name as string;
       return { after: { id: comp.id, name: comp.name }, newNodeId: comp.id };
     }
@@ -380,14 +450,16 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       const parent = comps[0].parent;
       if (!parent || !("appendChild" in parent)) throw new Error("Component has no valid parent for variant set");
       const set = figma.combineAsVariants(comps, parent as FrameNode);
+      markDocumentWrite();
       set.name = action.name as string;
       return { after: { id: set.id, name: set.name }, newNodeId: set.id };
     }
 
     case "create_instance": {
       const comp = await findNode(action.componentId as string) as ComponentNode;
-      const instance = comp.createInstance();
       const parent = await findNode(action.parentId as string) as FrameNode;
+      const instance = comp.createInstance();
+      markDocumentWrite();
       parent.appendChild(instance);
       if (action.x !== undefined) instance.x = action.x as number;
       if (action.y !== undefined) instance.y = action.y as number;
@@ -410,12 +482,14 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       const props = action.properties as Record<string, string | boolean>;
       for (const [key, value] of Object.entries(props)) {
         node.setProperties({ [key]: value });
+        markDocumentWrite();
       }
       return { after: { properties: props } };
     }
 
     case "create_paint_style": {
       const style = figma.createPaintStyle();
+      markDocumentWrite();
       style.name = action.name as string;
       style.paints = sanitizePaints((action.paints as unknown[]) || []);
       return { after: { id: style.id, name: style.name }, newNodeId: style.id };
@@ -427,6 +501,7 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       const fontStyle = weightToFontStyle(weight);
       await ensureFonts([{ family, style: fontStyle }]);
       const style = figma.createTextStyle();
+      markDocumentWrite();
       style.name = action.name as string;
       style.fontName = { family, style: fontStyle };
       style.fontSize = action.fontSize as number;
@@ -437,6 +512,7 @@ async function executeAction(action: Record<string, unknown>): Promise<{
 
     case "create_effect_style": {
       const style = figma.createEffectStyle();
+      markDocumentWrite();
       style.name = action.name as string;
       style.effects = action.effects as Effect[];
       return { after: { id: style.id, name: style.name }, newNodeId: style.id };
@@ -461,8 +537,14 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       const before: Record<string, unknown> = {};
       if ("layoutSizingHorizontal" in node) before.layoutSizingHorizontal = (node as FrameNode).layoutSizingHorizontal;
       if ("layoutSizingVertical" in node) before.layoutSizingVertical = (node as FrameNode).layoutSizingVertical;
-      if (action.layoutSizingHorizontal) (node as FrameNode).layoutSizingHorizontal = action.layoutSizingHorizontal as "FILL" | "HUG" | "FIXED";
-      if (action.layoutSizingVertical) (node as FrameNode).layoutSizingVertical = action.layoutSizingVertical as "FILL" | "HUG" | "FIXED";
+      if (action.layoutSizingHorizontal) {
+        (node as FrameNode).layoutSizingHorizontal = action.layoutSizingHorizontal as "FILL" | "HUG" | "FIXED";
+        markDocumentWrite();
+      }
+      if (action.layoutSizingVertical) {
+        (node as FrameNode).layoutSizingVertical = action.layoutSizingVertical as "FILL" | "HUG" | "FIXED";
+        markDocumentWrite();
+      }
       return { before, after: { layoutSizingHorizontal: (node as FrameNode).layoutSizingHorizontal, layoutSizingVertical: (node as FrameNode).layoutSizingVertical } };
     }
 
@@ -470,8 +552,14 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       const node = await findSceneNode(action.nodeId as string);
       if (!("constraints" in node)) throw new Error(`Node ${action.nodeId} does not support constraints`);
       const before = { constraints: (node as FrameNode).constraints };
-      if (action.horizontal) (node as FrameNode).constraints = { ...(node as FrameNode).constraints, horizontal: action.horizontal as ConstraintType };
-      if (action.vertical) (node as FrameNode).constraints = { ...(node as FrameNode).constraints, vertical: action.vertical as ConstraintType };
+      if (action.horizontal) {
+        (node as FrameNode).constraints = { ...(node as FrameNode).constraints, horizontal: action.horizontal as ConstraintType };
+        markDocumentWrite();
+      }
+      if (action.vertical) {
+        (node as FrameNode).constraints = { ...(node as FrameNode).constraints, vertical: action.vertical as ConstraintType };
+        markDocumentWrite();
+      }
       return { before, after: { constraints: (node as FrameNode).constraints } };
     }
 
@@ -480,10 +568,22 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       const before: Record<string, unknown> = {};
       if ("minWidth" in node) before.minWidth = (node as FrameNode).minWidth;
       if ("maxWidth" in node) before.maxWidth = (node as FrameNode).maxWidth;
-      if (action.minWidth !== undefined) (node as FrameNode).minWidth = action.minWidth as number;
-      if (action.maxWidth !== undefined) (node as FrameNode).maxWidth = action.maxWidth as number;
-      if (action.minHeight !== undefined) (node as FrameNode).minHeight = action.minHeight as number;
-      if (action.maxHeight !== undefined) (node as FrameNode).maxHeight = action.maxHeight as number;
+      if (action.minWidth !== undefined) {
+        (node as FrameNode).minWidth = action.minWidth as number;
+        markDocumentWrite();
+      }
+      if (action.maxWidth !== undefined) {
+        (node as FrameNode).maxWidth = action.maxWidth as number;
+        markDocumentWrite();
+      }
+      if (action.minHeight !== undefined) {
+        (node as FrameNode).minHeight = action.minHeight as number;
+        markDocumentWrite();
+      }
+      if (action.maxHeight !== undefined) {
+        (node as FrameNode).maxHeight = action.maxHeight as number;
+        markDocumentWrite();
+      }
       return { before, after: { minWidth: (node as FrameNode).minWidth, maxWidth: (node as FrameNode).maxWidth, minHeight: (node as FrameNode).minHeight, maxHeight: (node as FrameNode).maxHeight } };
     }
 
@@ -491,6 +591,7 @@ async function executeAction(action: Record<string, unknown>): Promise<{
 
     case "create_page": {
       const page = figma.createPage();
+      markDocumentWrite();
       page.name = action.name as string;
       return { after: { id: page.id, name: page.name }, newNodeId: page.id };
     }
@@ -547,24 +648,30 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       if (action.textAlignHorizontal) {
         before.textAlignHorizontal = node.textAlignHorizontal;
         node.textAlignHorizontal = action.textAlignHorizontal as "LEFT" | "CENTER" | "RIGHT" | "JUSTIFIED";
+        markDocumentWrite();
       }
       if (action.textAlignVertical) {
         before.textAlignVertical = node.textAlignVertical;
         node.textAlignVertical = action.textAlignVertical as "TOP" | "CENTER" | "BOTTOM";
+        markDocumentWrite();
       }
       if (action.paragraphSpacing !== undefined) {
         before.paragraphSpacing = node.paragraphSpacing;
         node.paragraphSpacing = action.paragraphSpacing as number;
+        markDocumentWrite();
       }
       if (action.textCase) {
         node.textCase = action.textCase as TextCase;
+        markDocumentWrite();
       }
       if (action.textDecoration) {
         node.textDecoration = action.textDecoration as TextDecoration;
+        markDocumentWrite();
       }
       if (action.textAutoResize) {
         before.textAutoResize = node.textAutoResize;
         node.textAutoResize = action.textAutoResize as "NONE" | "WIDTH_AND_HEIGHT" | "HEIGHT" | "TRUNCATE";
+        markDocumentWrite();
       }
       return { before, after: {
         textAlignHorizontal: node.textAlignHorizontal,
@@ -624,6 +731,7 @@ async function executeAction(action: Record<string, unknown>): Promise<{
 
     case "create_variable_collection": {
       const collection = figma.variables.createVariableCollection(action.name as string);
+      markDocumentWrite();
       const modes = (action.modes as string[]) || ["Default"];
       // Rename the default mode
       if (modes[0]) collection.renameMode(collection.modes[0].modeId, modes[0]);
@@ -643,6 +751,7 @@ async function executeAction(action: Record<string, unknown>): Promise<{
         collection,
         action.resolvedType as VariableResolvedDataType
       );
+      markDocumentWrite();
       // Set scopes if provided
       if (action.scopes) variable.scopes = action.scopes as VariableScope[];
       // Set value for each mode
@@ -679,10 +788,11 @@ async function executeAction(action: Record<string, unknown>): Promise<{
       if (property === "fills" || property === "strokes") {
         const paintsProp = property as "fills" | "strokes";
         const paints = [...((node as GeometryMixin)[paintsProp] as Paint[])];
-        if (paints[paintIndex]) {
-          paints[paintIndex] = figma.variables.setBoundVariableForPaint(paints[paintIndex] as SolidPaint, "color", variable);
-          (node as GeometryMixin)[paintsProp] = paints;
-        }
+        const paint = paints[paintIndex];
+        if (!paint) throw new Error(`Paint index ${paintIndex} does not exist in ${property}`);
+        if (paint.type !== "SOLID") throw new Error(`Paint index ${paintIndex} in ${property} is not a solid paint`);
+        paints[paintIndex] = figma.variables.setBoundVariableForPaint(paint, "color", variable);
+        (node as GeometryMixin)[paintsProp] = paints;
       } else {
         // Numeric properties: spacing, radius, opacity, size
         (node as SceneNode).setBoundVariable(property as VariableBindableNodeField, variable);
@@ -727,7 +837,7 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
 
   const results: ActionResult[] = [];
   let applied = 0;
-  let mutated = 0; // actual mutations (for rollback count)
+  let documentWrites = 0;
   let failed = 0;
   let skipped = 0;
   let stopProcessing = false;
@@ -749,6 +859,7 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
       continue;
     }
 
+    let actionWroteDocument = false;
     try {
       // Resolve any $ref: in nodeId, parentId, targetParentId, componentId, instanceId, componentIds
       for (const key of ["nodeId", "parentId", "targetParentId", "componentId", "instanceId"]) {
@@ -762,7 +873,9 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
         );
       }
 
-      const result = await executeAction(action);
+      const result = await executeAction(action, () => {
+        actionWroteDocument = true;
+      });
 
       // Register new node ID for symbolic ref
       if (result.newNodeId && action._ref) {
@@ -779,8 +892,11 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
         after: result.after,
       });
       applied++;
-      mutated++;
+      if (actionWroteDocument || (isKnownActionType(actionType) && actionWritesDocument(actionType))) {
+        documentWrites++;
+      }
     } catch (err) {
+      if (actionWroteDocument) documentWrites++;
       const message = err instanceof Error ? err.message : String(err);
       results.push({ actionIndex: i, type: actionType, status: "failed", error: message });
       failed++;
@@ -791,7 +907,7 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
   // Rollback: Figma coalesces rapid plugin mutations into a single undo entry,
   // so we call triggerUndo() exactly ONCE to undo the entire batch.
   let rollbackApplied = false;
-  if (batch.rollbackOnError && failed > 0 && mutated > 0) {
+  if (batch.rollbackOnError && failed > 0 && documentWrites > 0) {
     figma.triggerUndo();
     rollbackApplied = true;
   }

@@ -59,6 +59,18 @@ export const ACTION_PARITY = {
 
 export const ACTION_TYPES = Object.keys(ACTION_PARITY) as ActionType[];
 
+/** Actions that do not change the document and must never make rollback eligible. */
+export const NON_DOCUMENT_WRITE_ACTION_TYPES = [
+  "export_node",
+  "switch_page",
+] as const satisfies readonly ActionType[];
+
 export function isKnownActionType(type: string): type is ActionType {
   return Object.prototype.hasOwnProperty.call(ACTION_PARITY, type);
+}
+
+export function actionWritesDocument(type: ActionType): boolean {
+  return !NON_DOCUMENT_WRITE_ACTION_TYPES.includes(
+    type as typeof NON_DOCUMENT_WRITE_ACTION_TYPES[number]
+  );
 }
