@@ -1,4 +1,5 @@
 import type { Action } from "../shared/actions.js";
+import { isKnownActionType } from "../shared/action-parity.js";
 import { WEIGHT_TO_STYLE } from "../shared/font.js";
 
 interface CompiledBatch {
@@ -47,6 +48,9 @@ export function compileBatch(actions: Action[], options: CompileOptions = {}): C
   let refCounter = 0;
 
   for (const action of actions) {
+    if (!isKnownActionType(action.type)) {
+      throw new Error(`Unknown action type: ${action.type}`);
+    }
     const entry = { ...action } as Record<string, unknown>;
 
     // Assign symbolic ref for create-type actions
@@ -55,13 +59,6 @@ export function compileBatch(actions: Action[], options: CompileOptions = {}): C
     }
 
     // Hoist font requirements
-    if (action.type === "set_text_style") {
-      const family = action.fontFamily || "Inter";
-      const weight = action.fontWeight || 400;
-      const style = WEIGHT_TO_STYLE[Math.round(weight / 100) * 100] || "Regular";
-      const key = `${family}|${style}`;
-      if (!fonts.has(key)) fonts.set(key, { family, style });
-    }
     if (action.type === "create_text") {
       const family = (action.fontFamily as string) || "Inter";
       const weight = (action.fontWeight as number) || 400;
