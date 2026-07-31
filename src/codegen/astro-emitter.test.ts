@@ -135,6 +135,89 @@ import GenericTemplate from "@/components/templates/GenericTemplate.astro";
     expect(mappingsUsed).toBe(0);
   });
 
+  it("diagnoses malformed raw string and numeric literal prop types", async () => {
+    const invalidTypes = ['"\\xZZ"', '"\\u{ZZ}"', "01", "-01"];
+    const children = invalidTypes.map((_, index) =>
+      fixtureNode(`invalid-type-${index}`, `Invalid Type ${index}`, "cta", 1)
+    );
+    const tree = {
+      ...fixtureNode("invalid-types", "Invalid Types", "unknown", 0),
+      childCount: children.length,
+      children,
+    };
+    const mappings = children.map((node, index) => mappingFor(node, {
+      componentProps: [{ name: "label", type: invalidTypes[index], required: true }],
+      propMappings: { label: `invalidField${index}` },
+    }));
+
+    const { file, diagnostics, mappingsUsed } = emitAstroTemplate({
+      mappings,
+      tree,
+      templateType: "generic",
+    });
+
+    expect(diagnostics).toHaveLength(4);
+    expect(diagnostics).toEqual(invalidTypes.map((type, index) =>
+      expect.objectContaining({
+        severity: "error",
+        code: "UNSUPPORTED_COMPONENT_PROP_TYPE",
+        figmaNodeId: children[index].id,
+        message: expect.stringContaining(JSON.stringify(type)),
+      })
+    ));
+    expect(mappingsUsed).toBe(0);
+    for (const type of invalidTypes) expect(file.content).not.toContain(type);
+
+    const { stdout } = await checkGeneratedFile(file, `---
+import GenericTemplate from "@/components/templates/GenericTemplate.astro";
+---
+<GenericTemplate data={{ id: "invalid-types" }} />`);
+    expect(stdout).toContain("- 0 errors");
+  }, 30_000);
+
+  it("capitalizes lowercase and native-tag component aliases", async () => {
+    const action = fixtureNode("lower-action", "Lower Action", "cta", 1);
+    const nativeDiv = fixtureNode("native-div", "Native Div", "cta", 1);
+    const tree = {
+      ...fixtureNode("lowercase-components", "Lowercase Components", "unknown", 0),
+      childCount: 2,
+      children: [action, nativeDiv],
+    };
+    const mappings = [
+      mappingFor(action, {
+        componentName: "actionLink",
+        componentProps: [{ name: "label", type: "string", required: true }],
+        propMappings: { label: "actionLabel" },
+      }),
+      mappingFor(nativeDiv, {
+        cmsComponent: "native-div",
+        componentName: "div",
+        componentPath: "src/components/ui/NativeDiv.astro",
+      }),
+    ];
+
+    const { file, diagnostics, mappingsUsed } = emitAstroTemplate({
+      mappings,
+      tree,
+      templateType: "generic",
+    });
+
+    expect(diagnostics).toEqual([]);
+    expect(mappingsUsed).toBe(2);
+    expect(file.content).toContain('import ActionLink from "@/components/ui/ActionLink.astro";');
+    expect(file.content).toContain('import Div from "@/components/ui/NativeDiv.astro";');
+    expect(file.content).toContain("<ActionLink");
+    expect(file.content).toContain("<Div />");
+    expect(file.content).not.toContain("<actionLink");
+    expect(file.content).not.toContain("<div />");
+
+    const { stdout } = await checkGeneratedFile(file, `---
+import GenericTemplate from "@/components/templates/GenericTemplate.astro";
+---
+<GenericTemplate data={{ id: "lowercase", actionLabel: "Start" }} />`);
+    expect(stdout).toContain("- 0 errors");
+  }, 30_000);
+
   it("counts only mappings rendered into the emitted tree", () => {
     const child = fixtureNode("child", "Child", "cta", 1);
     const tree = {

@@ -458,7 +458,11 @@ function validateComponentName(
 }
 
 function componentSymbol(mapping: ComponentMapping): string {
-  if (isSafeIdentifier(mapping.componentName)) return mapping.componentName;
+  if (isAstroComponentIdentifier(mapping.componentName)) return mapping.componentName;
+  if (isSafeIdentifier(mapping.componentName)) {
+    const capitalized = `${mapping.componentName.charAt(0).toUpperCase()}${mapping.componentName.slice(1)}`;
+    if (isAstroComponentIdentifier(capitalized)) return capitalized;
+  }
 
   const pascalName = toPascal(mapping.componentName || mapping.cmsComponent.replace(/-/g, " "));
   let symbol = pascalName || "MappedComponent";
@@ -466,11 +470,15 @@ function componentSymbol(mapping: ComponentMapping): string {
   if (RESERVED_IDENTIFIERS.has(mapping.componentName) || RESERVED_IDENTIFIERS.has(symbol)) {
     symbol = `${symbol.charAt(0).toUpperCase()}${symbol.slice(1)}Component`;
   }
-  return isSafeIdentifier(symbol) ? symbol : "MappedComponent";
+  return isAstroComponentIdentifier(symbol) ? symbol : "MappedComponent";
 }
 
 function isSafeIdentifier(value: string): boolean {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(value) && !RESERVED_IDENTIFIERS.has(value);
+}
+
+function isAstroComponentIdentifier(value: string): boolean {
+  return /^[A-Z][A-Za-z0-9_$]*$/.test(value) && isSafeIdentifier(value);
 }
 
 function uniqueSymbol(base: string, used: Set<string>): string {
@@ -520,7 +528,9 @@ function tokenizeType(source: string): TypeToken[] | null {
         }
       }
       if (!closed) return null;
-      tokens.push({ kind: "string", value: source.slice(start, index) });
+      const literal = normalizeStringTypeLiteral(source.slice(start, index));
+      if (!literal) return null;
+      tokens.push({ kind: "string", value: literal });
       continue;
     }
     const word = source.slice(index).match(/^[A-Za-z_$][A-Za-z0-9_$]*/)?.[0];
@@ -529,7 +539,9 @@ function tokenizeType(source: string): TypeToken[] | null {
       index += word.length;
       continue;
     }
-    const number = source.slice(index).match(/^-?(?:\d+(?:\.\d+)?|\.\d+)/)?.[0];
+    const number = source
+      .slice(index)
+      .match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/)?.[0];
     if (number) {
       tokens.push({ kind: "number", value: number });
       index += number.length;
@@ -538,6 +550,21 @@ function tokenizeType(source: string): TypeToken[] | null {
     return null;
   }
   return tokens.length > 0 ? tokens : null;
+}
+
+function normalizeStringTypeLiteral(source: string): string | null {
+  if (source.startsWith('"')) {
+    try {
+      const value: unknown = JSON.parse(source);
+      return typeof value === "string" ? JSON.stringify(value) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  const value = source.slice(1, -1);
+  if (value.includes("\\") || value.includes("'") || /[\r\n]/.test(value)) return null;
+  return JSON.stringify(value);
 }
 
 class RegistryTypeParser {
