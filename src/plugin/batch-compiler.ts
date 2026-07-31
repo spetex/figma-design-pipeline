@@ -22,6 +22,24 @@ export const CREATE_TYPES: ReadonlySet<Action["type"]> = new Set([
   "create_page", "create_variable_collection", "create_variable",
 ]);
 
+function createReference(index: number): string {
+  return `$ref:node-${index}`;
+}
+
+/**
+ * Return the reference that the compiler will assign to the next create action.
+ *
+ * Plans can use this before adding their create action so dependent actions use
+ * the same create-order reference as the compiled plugin batch and fallback.
+ */
+export function getNextCreateReference(actions: readonly Action[]): string {
+  let createCount = 0;
+  for (const action of actions) {
+    if (CREATE_TYPES.has(action.type)) createCount++;
+  }
+  return createReference(createCount);
+}
+
 /** Compile validated actions into an optimized batch with font hoisting and symbolic refs. */
 export function compileBatch(actions: Action[], options: CompileOptions = {}): CompiledBatch {
   const fonts = new Map<string, { family: string; style: string }>();
@@ -33,7 +51,7 @@ export function compileBatch(actions: Action[], options: CompileOptions = {}): C
 
     // Assign symbolic ref for create-type actions
     if (CREATE_TYPES.has(action.type)) {
-      entry._ref = `$ref:node-${refCounter++}`;
+      entry._ref = createReference(refCounter++);
     }
 
     // Hoist font requirements

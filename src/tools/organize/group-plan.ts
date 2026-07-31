@@ -1,6 +1,7 @@
 import type { ToolContext } from "../../shared/context.js";
 import type { EnrichedNode } from "../../shared/types.js";
 import type { Action } from "../../shared/actions.js";
+import { getNextCreateReference } from "../../plugin/batch-compiler.js";
 import { toSlashName } from "../../shared/naming.js";
 import { handleGetTree } from "../inspect/get-tree.js";
 
@@ -53,22 +54,8 @@ function planSemanticGrouping(node: EnrichedNode, actions: Action[]): void {
     if (members.length < 2) continue;
     if (classification === "unknown") continue;
 
-    // Calculate bounding box for the group
-    const bounds = computeGroupBounds(members);
-    if (!bounds) continue;
-
     const frameName = toSlashName("Section", classification);
-
-    // Create frame action
-    actions.push({
-      type: "create_frame",
-      name: frameName,
-      parentId: node.id,
-      x: bounds.x,
-      y: bounds.y,
-      width: bounds.width,
-      height: bounds.height,
-    });
+    addGroupingActions(actions, node, frameName, members);
   }
 
   // Recurse into children
@@ -91,18 +78,12 @@ function planSpatialGrouping(node: EnrichedNode, actions: Action[]): void {
     const cluster = clusters[i];
     if (cluster.length < 2) continue;
 
-    const bounds = computeGroupBounds(cluster);
-    if (!bounds) continue;
-
-    actions.push({
-      type: "create_frame",
-      name: clusters.length === 1 ? "Group/Cluster" : `Group/Cluster-${i + 1}`,
-      parentId: node.id,
-      x: bounds.x,
-      y: bounds.y,
-      width: bounds.width,
-      height: bounds.height,
-    });
+    addGroupingActions(
+      actions,
+      node,
+      clusters.length === 1 ? "Group/Cluster" : `Group/Cluster-${i + 1}`,
+      cluster
+    );
   }
 
   for (const child of node.children) planSpatialGrouping(child, actions);
@@ -118,18 +99,7 @@ function planMinimalGrouping(node: EnrichedNode, actions: Action[]): void {
   );
 
   if (cards.length >= 3) {
-    const bounds = computeGroupBounds(cards);
-    if (bounds) {
-      actions.push({
-        type: "create_frame",
-        name: "Grid/Cards",
-        parentId: node.id,
-        x: bounds.x,
-        y: bounds.y,
-        width: bounds.width,
-        height: bounds.height,
-      });
-    }
+    addGroupingActions(actions, node, "Grid/Cards", cards);
   }
 
   for (const child of node.children) planMinimalGrouping(child, actions);
@@ -147,6 +117,59 @@ function computeGroupBounds(
   const maxY = Math.max(...boundsNodes.map((n) => n.bounds!.y + n.bounds!.height));
 
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+/**
+ * Create one frame and put all grouped members inside it.
+ *
+ * REST bounds are absolute canvas coordinates. Once a frame is appended to its
+ * parent, Figma interprets its x/y coordinates relative to that parent. Moving
+ * a node also changes the coordinate space of its x/y values, so restore each
+ * bounded member's local coordinates after moving it to preserve its position
+ * on the canvas.
+ */
+function addGroupingActions(
+  actions: Action[],
+  parent: EnrichedNode,
+  frameName: string,
+  members: EnrichedNode[]
+): void {
+  const bounds = computeGroupBounds(members);
+  if (!bounds) return;
+
+  const frameRef = getNextCreateReference(actions);
+  const parentX = parent.bounds?.x ?? 0;
+  const parentY = parent.bounds?.y ?? 0;
+
+  actions.push({
+    type: "create_frame",
+    name: frameName,
+    parentId: parent.id,
+    x: bounds.x - parentX,
+    y: bounds.y - parentY,
+    width: bounds.width,
+    height: bounds.height,
+  });
+
+  // The create action must run first so this canonical compiler-assigned ref
+  // resolves to the newly created frame for every member move.
+  for (const member of members) {
+    actions.push({
+      type: "move",
+      nodeId: member.id,
+      targetParentId: frameRef,
+    });
+  }
+
+  for (const member of members) {
+    if (!member.bounds) continue;
+    actions.push({
+      type: "set_position",
+      nodeId: member.id,
+      x: member.bounds.x - bounds.x,
+      y: member.bounds.y - bounds.y,
+    });
+  }
 }
 
 function findSpatialClusters(nodes: EnrichedNode[]): EnrichedNode[][] {
