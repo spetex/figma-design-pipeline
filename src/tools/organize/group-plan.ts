@@ -10,6 +10,25 @@ interface PlanGroupingParams {
   strategy?: "semantic" | "spatial" | "minimal";
 }
 
+const ELIGIBLE_PARENT_TYPES = new Set([
+  "CANVAS",
+  "FRAME",
+  "COMPONENT",
+  "SECTION",
+]);
+
+const ELIGIBLE_MEMBER_TYPES = new Set([
+  "FRAME",
+  "INSTANCE",
+  "VECTOR",
+  "STAR",
+  "LINE",
+  "ELLIPSE",
+  "RECTANGLE",
+  "TEXT",
+  "SHAPE_WITH_TEXT",
+]);
+
 export async function handlePlanGrouping(
   ctx: ToolContext,
   params: PlanGroupingParams
@@ -35,7 +54,7 @@ export async function handlePlanGrouping(
  * Semantic grouping: group children by their classification into named frames.
  */
 function planSemanticGrouping(node: EnrichedNode, actions: Action[]): void {
-  if (node.isInstance) return;
+  if (!isEligibleGroupingParent(node)) return;
 
   // Only process nodes with many direct children that could benefit from grouping
   if (node.childCount < 5) {
@@ -53,7 +72,7 @@ function planSemanticGrouping(node: EnrichedNode, actions: Action[]): void {
 
   // Create frames for groups with 2+ members
   for (const [classification, members] of groups) {
-    const groupableMembers = members.filter(isGroupableMember);
+    const groupableMembers = members.filter(isEligibleGroupingMember);
     if (groupableMembers.length < 2) continue;
     if (classification === "unknown") continue;
 
@@ -69,7 +88,7 @@ function planSemanticGrouping(node: EnrichedNode, actions: Action[]): void {
  * Spatial grouping: group by physical proximity on canvas.
  */
 function planSpatialGrouping(node: EnrichedNode, actions: Action[]): void {
-  if (node.isInstance) return;
+  if (!isEligibleGroupingParent(node)) return;
 
   if (node.childCount < 3) {
     for (const child of node.children) planSpatialGrouping(child, actions);
@@ -77,7 +96,7 @@ function planSpatialGrouping(node: EnrichedNode, actions: Action[]): void {
   }
 
   // Find clusters of spatially close nodes
-  const clusters = findSpatialClusters(node.children.filter(isGroupableMember));
+  const clusters = findSpatialClusters(node.children.filter(isEligibleGroupingMember));
 
   for (let i = 0; i < clusters.length; i++) {
     const cluster = clusters[i];
@@ -98,12 +117,12 @@ function planSpatialGrouping(node: EnrichedNode, actions: Action[]): void {
  * Minimal grouping: only group obviously related items (e.g., card grids).
  */
 function planMinimalGrouping(node: EnrichedNode, actions: Action[]): void {
-  if (node.isInstance) return;
+  if (!isEligibleGroupingParent(node)) return;
 
   // Only group card-like patterns
   const cards = node.children.filter(
     (c) =>
-      isGroupableMember(c) &&
+      isEligibleGroupingMember(c) &&
       (c.classification === "card" || c.classification === "metric")
   );
 
@@ -145,7 +164,11 @@ function addGroupingActions(
 ): void {
   // Do not create an incomplete wrapper: every moved node needs bounds to be
   // reparented and restored to its original visible position.
-  if (members.length === 0 || members.some((member) => !isGroupableMember(member))) {
+  if (
+    !isEligibleGroupingParent(parent) ||
+    members.length === 0 ||
+    members.some((member) => !isEligibleGroupingMember(member))
+  ) {
     return;
   }
 
@@ -166,7 +189,7 @@ function addGroupingActions(
     height: bounds.height,
   });
 
-  if (hasAutoLayout(parent)) {
+  if (hasLayoutParent(parent)) {
     // A wrapper in an auto-layout parent must be absolute before it contains
     // members; otherwise it participates in flow and Figma ignores its
     // requested coordinates. Reset its position after making it absolute.
@@ -205,27 +228,51 @@ function addGroupingActions(
 }
 
 /**
- * The planner only emits moves for scene nodes with absolute bounds. Instance
- * subtrees are skipped by the callers above because their owned descendants
- * cannot be safely reparented.
+ * Parent and member eligibility is deliberately allow-listed. Component sets
+ * restrict their children, slots and several special node kinds cannot be
+ * safely reparented, and group/boolean or transformed hierarchies require
+ * transform composition that this plan does not model.
  */
-function isGroupableMember(node: EnrichedNode): boolean {
+function isEligibleGroupingParent(node: EnrichedNode): boolean {
   return (
-    node.bounds !== undefined &&
-    node.type !== "DOCUMENT" &&
-    node.type !== "CANVAS"
+    !node.isInstance &&
+    ELIGIBLE_PARENT_TYPES.has(node.type) &&
+    !hasNonIdentityTransform(node)
   );
 }
 
-function hasAutoLayout(node: EnrichedNode): boolean {
+function isEligibleGroupingMember(node: EnrichedNode): boolean {
+  return (
+    node.bounds !== undefined &&
+    ELIGIBLE_MEMBER_TYPES.has(node.type) &&
+    !hasNonIdentityTransform(node)
+  );
+}
+
+function hasLayoutParent(node: EnrichedNode): boolean {
   return (
     node.layoutInfo?.mode === "horizontal" ||
-    node.layoutInfo?.mode === "vertical"
+    node.layoutInfo?.mode === "vertical" ||
+    node.layoutInfo?.mode === "grid"
+  );
+}
+
+function hasNonIdentityTransform(node: EnrichedNode): boolean {
+  const transform = node.absoluteTransform;
+  if (!transform) return false;
+
+  const [[a, b], [c, d]] = transform;
+  const epsilon = 1e-6;
+  return (
+    Math.abs(a - 1) > epsilon ||
+    Math.abs(b) > epsilon ||
+    Math.abs(c) > epsilon ||
+    Math.abs(d - 1) > epsilon
   );
 }
 
 function findSpatialClusters(nodes: EnrichedNode[]): EnrichedNode[][] {
-  const withBounds = nodes.filter((n) => n.bounds);
+  const withBounds = nodes.filter(isEligibleGroupingMember);
   if (withBounds.length < 2) return [];
 
   // Simple cluster: group nodes that are within 50px of each other

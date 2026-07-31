@@ -256,6 +256,46 @@ describe("handlePlanGrouping", () => {
     ]);
   });
 
+  it("makes GRID wrappers absolute, then moves and restores every member", async () => {
+    const root: FigmaRawNode = {
+      id: "parent",
+      name: "Grid dashboard",
+      type: "FRAME",
+      layoutMode: "GRID",
+      absoluteBoundingBox: parentBounds,
+      children: [
+        node("card-1", "Card one", 520, 330),
+        node("card-2", "Card two", 640, 330),
+        node("card-3", "Card three", 760, 330),
+      ],
+    };
+
+    const result = await handlePlanGrouping(contextFor(root), {
+      nodeId: root.id,
+      strategy: "minimal",
+    });
+
+    expect(result.actions).toEqual([
+      {
+        type: "create_frame",
+        name: "Grid/Cards",
+        parentId: "parent",
+        x: 20,
+        y: 30,
+        width: 320,
+        height: 60,
+      },
+      { type: "set_layout_positioning", nodeId: "$ref:node-0", positioning: "ABSOLUTE" },
+      { type: "set_position", nodeId: "$ref:node-0", x: 20, y: 30 },
+      { type: "move", nodeId: "card-1", targetParentId: "$ref:node-0" },
+      { type: "move", nodeId: "card-2", targetParentId: "$ref:node-0" },
+      { type: "move", nodeId: "card-3", targetParentId: "$ref:node-0" },
+      { type: "set_position", nodeId: "card-1", x: 0, y: 0 },
+      { type: "set_position", nodeId: "card-2", x: 120, y: 0 },
+      { type: "set_position", nodeId: "card-3", x: 240, y: 0 },
+    ]);
+  });
+
   it("does not plan inside instance-owned subtrees for any grouping strategy", async () => {
     const root: FigmaRawNode = {
       id: "parent",
@@ -367,6 +407,120 @@ describe("handlePlanGrouping", () => {
         strategy,
       });
       expect(result.actions).toEqual([]);
+    }
+  });
+
+  it("filters SLOT members before every strategy applies its minimum", async () => {
+    const slot = (id: string, name: string, x: number, y: number): FigmaRawNode => ({
+      id,
+      name,
+      type: "SLOT",
+      absoluteBoundingBox: { x, y, width: 80, height: 60 },
+    });
+    const scenarios: Array<{ strategy: "semantic" | "spatial" | "minimal"; root: FigmaRawNode }> = [
+      {
+        strategy: "semantic",
+        root: {
+          id: "parent",
+          name: "Dashboard",
+          type: "FRAME",
+          absoluteBoundingBox: parentBounds,
+          children: [
+            node("card-1", "Card one", 520, 330),
+            slot("slot", "Card slot", 600, 330),
+            node("other-1", "Other one", 520, 430),
+            node("other-2", "Other two", 640, 430),
+            node("other-3", "Other three", 760, 430),
+          ],
+        },
+      },
+      {
+        strategy: "spatial",
+        root: {
+          id: "parent",
+          name: "Dashboard",
+          type: "FRAME",
+          absoluteBoundingBox: parentBounds,
+          children: [
+            node("item", "Item", 520, 330),
+            slot("slot", "Item slot", 600, 330),
+            node("far-away", "Far away", 980, 600),
+          ],
+        },
+      },
+      {
+        strategy: "minimal",
+        root: {
+          id: "parent",
+          name: "Dashboard",
+          type: "FRAME",
+          absoluteBoundingBox: parentBounds,
+          children: [
+            node("card-1", "Card one", 520, 330),
+            node("card-2", "Card two", 640, 330),
+            slot("slot", "Card slot", 760, 330),
+          ],
+        },
+      },
+    ];
+
+    for (const { strategy, root } of scenarios) {
+      const result = await handlePlanGrouping(contextFor(root), {
+        nodeId: root.id,
+        strategy,
+      });
+      expect(result.actions).toEqual([]);
+    }
+  });
+
+  it("skips component sets and transform-unsafe grouping parents", async () => {
+    const cards = [
+      node("card-1", "Card one", 520, 330),
+      node("card-2", "Card two", 600, 330),
+      node("card-3", "Card three", 680, 330),
+      node("card-4", "Card four", 520, 430),
+      node("card-5", "Card five", 600, 430),
+    ];
+    const parents: FigmaRawNode[] = [
+      {
+        id: "component-set",
+        name: "Cards",
+        type: "COMPONENT_SET",
+        absoluteBoundingBox: parentBounds,
+        children: cards,
+      },
+      {
+        id: "group",
+        name: "Cards group",
+        type: "GROUP",
+        absoluteBoundingBox: parentBounds,
+        children: cards,
+      },
+      {
+        id: "boolean",
+        name: "Cards boolean",
+        type: "BOOLEAN_OPERATION",
+        absoluteBoundingBox: parentBounds,
+        children: cards,
+      },
+      {
+        id: "rotated-frame",
+        name: "Rotated cards",
+        type: "FRAME",
+        absoluteBoundingBox: parentBounds,
+        absoluteTransform: [[0, -1, 500], [1, 0, 300]],
+        children: cards,
+      },
+    ];
+
+    for (const parent of parents) {
+      for (const strategy of ["semantic", "spatial", "minimal"] as const) {
+        const result = await handlePlanGrouping(contextFor(parent), {
+          nodeId: parent.id,
+          strategy,
+        });
+        expect(result.actions).toEqual([]);
+      }
     }
   });
 });

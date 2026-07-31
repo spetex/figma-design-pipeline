@@ -191,6 +191,7 @@ function enrichNode(
     depth,
     childCount: children.length,
     bounds,
+    absoluteTransform: raw.absoluteTransform,
     tokens,
     layoutInfo: raw.layoutMode
       ? {
@@ -199,6 +200,8 @@ function enrichNode(
               ? "horizontal"
               : raw.layoutMode === "VERTICAL"
                 ? "vertical"
+                : raw.layoutMode === "GRID"
+                  ? "grid"
                 : "none",
           spacing: raw.itemSpacing,
           padding:
