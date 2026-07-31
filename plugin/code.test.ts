@@ -372,7 +372,12 @@ function createBehavioralFigma() {
     createPaintStyle: () => { recordCall("figma", "createPaintStyle"); return makeParityNode("paint-style", "PAINT_STYLE"); },
     createTextStyle: () => { recordCall("figma", "createTextStyle"); return makeParityNode("text-style", "TEXT_STYLE"); },
     createEffectStyle: () => { recordCall("figma", "createEffectStyle"); return makeParityNode("effect-style", "EFFECT_STYLE"); },
-    createPage: () => { recordCall("figma", "createPage"); return makeParityNode("created-page", "PAGE"); },
+    createPage: () => {
+      recordCall("figma", "createPage");
+      const created = makeParityNode("created-page", "PAGE");
+      nodes.set(created.id as string, created);
+      return created;
+    },
     setCurrentPageAsync: async (...args: unknown[]) => recordCall("figma", "setCurrentPageAsync", ...args),
     createImage: (...args: unknown[]) => { recordCall("figma", "createImage", ...args); return { hash: "image" }; },
     base64Decode: (...args: unknown[]) => { recordCall("figma", "base64Decode", ...args); return new Uint8Array([1]); },
@@ -457,10 +462,34 @@ describe("all-action behavioral parity", () => {
     expect(fallback.state()).toEqual(connected.state());
   });
 
+  it("resolves create_page references before switch_page validation in both paths", async () => {
+    const actions = [
+      { type: "create_page", name: "Created page" },
+      { type: "switch_page", pageId: "$ref:node-0" },
+    ];
+    const fallback = createBehavioralFigma();
+    const generated = await handleExecute(null, { actions });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<Array<Record<string, unknown>>>;
+    const fallbackResults = await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+
+    const connected = createBehavioralFigma();
+    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, actions, { preloadFonts: true });
+
+    expect(fallbackResults).not.toEqual(expect.arrayContaining([expect.objectContaining({ status: "failed" })]));
+    expect(pluginResult.summary).toMatchObject({ applied: 2, failed: 0 });
+    expect(normalizeBridgeTransportFontPreloads(fallback.trace, actions))
+      .toEqual(normalizeBridgeTransportFontPreloads(connected.trace, actions));
+    expect(fallback.trace).toContain('call:figma.setCurrentPageAsync:[{"nodeId":"created-page"}]');
+    expect(fallback.state()).toEqual(connected.state());
+  });
+
   const PRECONDITION_PARITY_CASES: Array<{
     label: string;
     action: Record<string, unknown>;
     configure: (nodes: Map<string, Record<string, unknown>>) => void;
+    forbidImageStoreMutation?: boolean;
   }> = [
     {
       label: "a protected page deletion",
@@ -532,14 +561,37 @@ describe("all-action behavioral parity", () => {
       action: { type: "switch_page", pageId: "page" },
       configure: (nodes) => { nodes.delete("page"); },
     },
+    {
+      label: "an unresolved page reference",
+      action: { type: "switch_page", pageId: "$ref:node-0" },
+      configure: () => {},
+    },
+    {
+      label: "a missing image-fill target",
+      action: { type: "set_image_fill", nodeId: "node", imageBase64: "AQID", scaleMode: "CROP" },
+      configure: (nodes) => { nodes.delete("node"); },
+      forbidImageStoreMutation: true,
+    },
+    {
+      label: "an image-fill target without fills",
+      action: { type: "set_image_fill", nodeId: "node", imageBase64: "AQID", scaleMode: "CROP" },
+      configure: (nodes) => { delete nodes.get("node")!.fills; },
+      forbidImageStoreMutation: true,
+    },
+    {
+      label: "an unresolved image-fill target reference",
+      action: { type: "set_image_fill", nodeId: "$ref:node-0", imageBase64: "AQID", scaleMode: "CROP" },
+      configure: () => {},
+      forbidImageStoreMutation: true,
+    },
   ];
 
-  it.each(PRECONDITION_PARITY_CASES)("fails without mutation for $label in both paths", async ({ action, configure }) => {
+  it.each(PRECONDITION_PARITY_CASES)("fails without mutation for $label in both paths", async ({ action, configure, forbidImageStoreMutation }) => {
     const fallback = createBehavioralFigma();
     configure(fallback.nodes);
     fallback.trace.length = 0;
     const fallbackBefore = fallback.state();
-    const generated = await handleExecute(null, { actions: [action] });
+    const generated = await handleExecute(null, { actions: [action], rollbackOnError: true });
     const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
       ...args: string[]
     ) => (figmaApi: typeof fallback.figma) => Promise<Array<Record<string, unknown>>>;
@@ -556,5 +608,13 @@ describe("all-action behavioral parity", () => {
       .toEqual(normalizeBridgeTransportFontPreloads(connected.trace, [action]));
     expect(fallback.state()).toEqual(fallbackBefore);
     expect(connected.state()).toEqual(connectedBefore);
+    expect(fallback.figma.triggerUndo).not.toHaveBeenCalled();
+    expect(connected.figma.triggerUndo).not.toHaveBeenCalled();
+    if (forbidImageStoreMutation) {
+      for (const trace of [fallback.trace, connected.trace]) {
+        expect(trace.some((entry) => entry.startsWith("call:figma.base64Decode:"))).toBe(false);
+        expect(trace.some((entry) => entry.startsWith("call:figma.createImage:"))).toBe(false);
+      }
+    }
   });
 });

@@ -167,6 +167,16 @@ function generateFallbackJs(
   lines.push("  if (typeof node.appendChild !== \"function\") throw new Error(`Node ${resolveRefId(id)} is not a container`);");
   lines.push("  return node;");
   lines.push("};");
+  lines.push("const requireSceneNode = (id) => {");
+  lines.push("  const node = requireNode(id);");
+  lines.push("  if (!(\"parent\" in node)) throw new Error(`Not a scene node: ${resolveRefId(id)}`);");
+  lines.push("  return node;");
+  lines.push("};");
+  lines.push("const requireFills = (id) => {");
+  lines.push("  const node = requireSceneNode(id);");
+  lines.push("  if (!(\"fills\" in node)) throw new Error(`Node ${resolveRefId(id)} does not support fills`);");
+  lines.push("  return node;");
+  lines.push("};");
   lines.push(`const cannotDeleteNode = (node) => !node || ${j(FORBIDDEN_DELETE_NODE_TYPES)}.includes(node.type);`);
   lines.push("const sanitizePaints = (paints) => (paints || []).map((paint) => {");
   lines.push("  if (!paint || typeof paint !== \"object\" || !paint.color || typeof paint.color !== \"object\") return paint;");
@@ -274,7 +284,7 @@ function generateFallbackJs(
         lines.push(`{ const n = ${g(nid)}; const angle = ${(a.angle ?? 0)} * Math.PI / 180; n.fills = [{ type: "GRADIENT_${a.gradientType}", gradientStops: ${j(a.stops)}, gradientTransform: [[Math.cos(angle), Math.sin(angle), 0], [-Math.sin(angle), Math.cos(angle), 0]] }]; markDocumentWrite(); ${r("set_gradient_fill")} }`);
         break;
       case "set_image_fill":
-        lines.push(`{ const img = figma.createImage(figma.base64Decode(${j(a.imageBase64)})); ${g(nid)}.fills = [{ type: "IMAGE", imageHash: img.hash, scaleMode: "${a.scaleMode || "FILL"}" }]; markDocumentWrite(); ${r("set_image_fill")} }`);
+        lines.push(`{ const n = requireFills(${j(nid)}); const img = figma.createImage(figma.base64Decode(${j(a.imageBase64)})); n.fills = [{ type: "IMAGE", imageHash: img.hash, scaleMode: "${a.scaleMode || "FILL"}" }]; markDocumentWrite(); ${r("set_image_fill")} }`);
         break;
       case "set_strokes":
         lines.push(`{ const n = ${g(nid)}; n.strokes = sanitizePaints(${j(a.strokes)}); markDocumentWrite(); ${a.strokeWeight !== undefined ? `n.strokeWeight = ${a.strokeWeight}; markDocumentWrite();` : ""} ${r("set_strokes")} }`);

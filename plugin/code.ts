@@ -628,7 +628,7 @@ async function executeAction(
     }
 
     case "switch_page": {
-      const pageNode = await figma.getNodeByIdAsync(action.pageId as string);
+      const pageNode = await findNode(action.pageId as string);
       if (!pageNode || pageNode.type !== "PAGE") throw new Error(`Node ${action.pageId} is not a page`);
       await figma.setCurrentPageAsync(pageNode as PageNode);
       return { after: { pageId: pageNode.id, pageName: pageNode.name } };
@@ -660,6 +660,7 @@ async function executeAction(
 
     case "set_image_fill": {
       const node = await findSceneNode(action.nodeId as string) as GeometryMixin & SceneNode;
+      if (!("fills" in node)) throw new Error(`Node ${action.nodeId} does not support fills`);
       const before = { fills: safeSerialize(node.fills) };
       const base64 = action.imageBase64 as string;
       const image = figma.createImage(figma.base64Decode(base64));
