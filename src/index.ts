@@ -163,7 +163,7 @@ Alternative (REST API):
 3. Apply changes via the official Figma MCP's use_figma
 
 ## Export Paths
-- figma_export_tokens with format "tailwind", "css", or "json"
+- figma_export_tokens with format "tailwind", "css", "json", or "style-dictionary"
 `;
 
 const CODEGEN_GUIDE = `# Figma Codegen Guide
@@ -341,7 +341,7 @@ server.tool(
 
 server.tool(
   "figma_extract_tokens",
-  "Extract design tokens (colors, fonts, spacing, radius, shadows) with Tailwind class mapping",
+  "Extract design tokens (colors, fonts, spacing, radius, layered shadows, opacity) with Tailwind class mapping",
   extractTokensInputSchema.shape,
   async (params) => {
     const { nodeId } = resolveParams(params);
@@ -488,7 +488,7 @@ server.tool(
 
 server.tool(
   "figma_export_tokens",
-  "Export extracted design tokens as Tailwind config, CSS variables, or JSON",
+  "Export extracted design tokens as Tailwind config, CSS variables, JSON, or DTCG Style Dictionary",
   exportTokensInputSchema.shape,
   async (params) => {
     const { nodeId } = resolveParams(params);

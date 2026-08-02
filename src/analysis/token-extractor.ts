@@ -1,5 +1,6 @@
-import type { FigmaRawNode, FigmaColor, DesignToken } from "../shared/types.js";
+import type { FigmaRawNode, FigmaColor, DesignToken, ShadowTokenValue } from "../shared/types.js";
 import { rgbaToHex } from "../shared/color.js";
+import { shadowToCss } from "../shared/shadow.js";
 
 export interface ExtractedTokens {
   colors: DesignToken[];
@@ -102,17 +103,33 @@ export function extractTokens(
 
     // Shadows
     if (typeSet.has("shadow")) {
+      const layers: ShadowTokenValue[] = [];
       for (const effect of node.effects || []) {
-        if (effect.type === "DROP_SHADOW" && effect.visible) {
-          const shadowKey = `${effect.radius || 0}|${effect.color?.r ?? 0}|${effect.color?.g ?? 0}|${effect.color?.b ?? 0}|${effect.offset?.x ?? 0}|${effect.offset?.y ?? 0}`;
-          if (!seenShadows.has(shadowKey)) {
-            seenShadows.add(shadowKey);
-            result.shadows.push({
-              type: "shadow",
-              raw: `${effect.radius || 0}px`,
-              tailwind: mapShadowToTailwind(effect.radius || 0),
-            });
-          }
+        if (
+          (effect.type !== "DROP_SHADOW" && effect.type !== "INNER_SHADOW") ||
+          effect.visible === false
+        ) continue;
+
+        layers.push({
+          offsetX: effect.offset?.x ?? 0,
+          offsetY: effect.offset?.y ?? 0,
+          blur: effect.radius ?? 0,
+          spread: effect.spread ?? 0,
+          color: effect.color ?? { r: 0, g: 0, b: 0, a: 1 },
+          inset: effect.type === "INNER_SHADOW",
+        });
+      }
+
+      if (layers.length > 0) {
+        const shadowKey = JSON.stringify(layers);
+        if (!seenShadows.has(shadowKey)) {
+          seenShadows.add(shadowKey);
+          result.shadows.push({
+            type: "shadow",
+            raw: shadowToCss(layers),
+            shadow: layers,
+            tailwind: mapShadowToTailwind(Math.max(...layers.map((layer) => layer.blur))),
+          });
         }
       }
     }

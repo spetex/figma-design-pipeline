@@ -45,7 +45,7 @@ These all hit the Figma REST API. They need `FIGMA_ACCESS_TOKEN` set in your MCP
 |---|---|---|
 | `figma_get_tree` | Enriched node tree with explicit completeness metadata and an 80 KB complete-response cap. | First call when exploring any file. |
 | `figma_audit` | Structural audit: naming, layout, components, tokens, accessibility. | Bounded list of issues before a cleanup pass. |
-| `figma_extract_tokens` | Colors, fonts, spacing, radius, shadows — with Tailwind mapping. | Token sync, theming, brand audits. |
+| `figma_extract_tokens` | Colors, fonts, spacing, radius, layered shadows, and opacity — with Tailwind mapping. | Token sync, theming, brand audits. |
 | `figma_find_nodes` | Filter nodes by name / type / classification / text / size, with explicit limit and depth metadata. | "Where is the button styled like X?" |
 | `figma_get_components` | List published components. | Before mapping to your code components. |
 | `figma_get_styles` | List published color/text/effect styles. | Token drift check. |
@@ -183,6 +183,10 @@ Set `dryRun: true` to validate the action batch without applying it. Useful when
 | `figma_generate_page` | Page template (defaults to Astro). |
 | `figma_generate_schema` | CMS schema from Figma structure. |
 | `figma_export_tokens` | Tokens as Tailwind config, CSS variables, JSON, or Style Dictionary. |
+
+All token formats include extracted opacity and complete layered shadows. Plain JSON retains a
+CSS-compatible `raw` shadow string and adds lossless structured `shadow` layers; Style Dictionary
+uses DTCG 2025.10 composite values.
 
 Set `COMPONENT_REGISTRY_DIR` to your code's registry directory so the agent knows what components exist on the code side.
 

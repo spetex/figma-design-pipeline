@@ -7,6 +7,7 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 ### Fixed
 - Tree enumeration no longer silently compacts direct root children. Vector compaction, oversized scalar fields, and response-size pruning now report exact omission metrics, machine-readable reasons, full serialized-response byte metrics, compatible node counts and notes, and focused or strictly advancing paginated continuations.
 - Node searches now distinguish an exact-limit complete result from a genuinely truncated result and expose their traversal depth and match limit.
+- Token export now preserves arbitrary-size same-hue palettes, layered outer/inner shadow structure, alpha and spread, and opacity across Tailwind, CSS, JSON, and DTCG Style Dictionary output. Existing JSON shadow consumers retain a complete CSS-compatible `raw` string alongside the new lossless `shadow` layers.
 
 ## [0.8.1] - 2026-07-29
 
