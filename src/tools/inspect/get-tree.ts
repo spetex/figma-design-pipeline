@@ -588,6 +588,39 @@ function byteLength(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
+function extractLayoutInfo(raw: FigmaRawNode): EnrichedNode["layoutInfo"] {
+  if (
+    raw.layoutMode === "HORIZONTAL" ||
+    raw.layoutMode === "VERTICAL" ||
+    raw.layoutMode === "GRID"
+  ) {
+    return {
+      mode:
+        raw.layoutMode === "HORIZONTAL"
+          ? "horizontal"
+          : raw.layoutMode === "VERTICAL"
+            ? "vertical"
+            : "grid",
+      spacing: raw.itemSpacing,
+      padding:
+        raw.paddingTop !== undefined
+          ? {
+              top: raw.paddingTop || 0,
+              right: raw.paddingRight || 0,
+              bottom: raw.paddingBottom || 0,
+              left: raw.paddingLeft || 0,
+            }
+          : undefined,
+    };
+  }
+
+  if (raw.type === "FRAME" || raw.type === "GROUP") {
+    return { mode: "absolute" };
+  }
+
+  return raw.layoutMode === "NONE" ? { mode: "none" } : undefined;
+}
+
 function enrichNode(
   raw: FigmaRawNode,
   depth: number,
@@ -621,30 +654,7 @@ function enrichNode(
     bounds,
     absoluteTransform: raw.absoluteTransform,
     tokens,
-    layoutInfo: raw.layoutMode
-      ? {
-          mode:
-            raw.layoutMode === "HORIZONTAL"
-              ? "horizontal"
-              : raw.layoutMode === "VERTICAL"
-                ? "vertical"
-                : raw.layoutMode === "GRID"
-                  ? "grid"
-                : "none",
-          spacing: raw.itemSpacing,
-          padding:
-            raw.paddingTop !== undefined
-              ? {
-                  top: raw.paddingTop || 0,
-                  right: raw.paddingRight || 0,
-                  bottom: raw.paddingBottom || 0,
-                  left: raw.paddingLeft || 0,
-                }
-              : undefined,
-        }
-      : bounds
-        ? { mode: "absolute" }
-        : undefined,
+    layoutInfo: extractLayoutInfo(raw),
     textContent: raw.characters,
     isComponent: raw.type === "COMPONENT" || raw.type === "COMPONENT_SET",
     isInstance: raw.type === "INSTANCE",
