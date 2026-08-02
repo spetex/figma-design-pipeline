@@ -136,6 +136,73 @@ describe("handleGetTree freshness", () => {
   });
 });
 
+describe("handleGetTree token enrichment", () => {
+  it("includes each distinct item spacing and padding value once per node", async () => {
+    const autoLayout: FigmaRawNode = {
+      ...node("root", "Auto layout", 0, 1000),
+      layoutMode: "HORIZONTAL",
+      itemSpacing: 5,
+      paddingTop: 7,
+      paddingRight: 9,
+      paddingBottom: 11,
+      paddingLeft: 7,
+    };
+    const { ctx } = makeContext(new Map([["root", autoLayout]]));
+
+    const result = await handleGetTree(ctx, {
+      nodeId: "root",
+      includeStyles: true,
+    });
+
+    expect(
+      result.tree.tokens
+        .filter(token => token.type === "spacing")
+        .map(token => token.raw)
+    ).toEqual([5, 7, 9, 11]);
+  });
+});
+
+describe("handleGetTree layout enrichment", () => {
+  it.each([
+    ["NONE", "absolute"],
+    [undefined, "absolute"],
+    ["HORIZONTAL", "horizontal"],
+    ["VERTICAL", "vertical"],
+    ["GRID", "grid"],
+  ] as const)("maps frame layout mode %s to %s", async (layoutMode, expectedMode) => {
+    const frame: FigmaRawNode = {
+      ...node("root", "Container", 0, 1000),
+      ...(layoutMode === undefined ? {} : { layoutMode }),
+    };
+    const { ctx } = makeContext(new Map([["root", frame]]));
+
+    const result = await handleGetTree(ctx, { nodeId: "root" });
+
+    expect(result.tree.layoutInfo?.mode).toBe(expectedMode);
+  });
+
+  it.each([
+    ["NONE", "none"],
+    [undefined, undefined],
+  ] as const)("does not classify a leaf with layout mode %s as absolute", async (
+    layoutMode,
+    expectedMode
+  ) => {
+    const leaf: FigmaRawNode = {
+      id: "root",
+      name: "Leaf",
+      type: "RECTANGLE",
+      absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+      ...(layoutMode === undefined ? {} : { layoutMode }),
+    };
+    const { ctx } = makeContext(new Map([["root", leaf]]));
+
+    const result = await handleGetTree(ctx, { nodeId: "root" });
+
+    expect(result.tree.layoutInfo?.mode).toBe(expectedMode);
+  });
+});
+
 describe("tree completeness reporting", () => {
   it("preserves all 39 direct children when the requested root is vector-heavy", async () => {
     const children = Array.from({ length: 39 }, (_, index): FigmaRawNode => ({

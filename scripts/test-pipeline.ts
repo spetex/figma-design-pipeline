@@ -1,6 +1,7 @@
 import "dotenv/config";
-import { FigmaRestClient } from "../src/bridge/figma-rest.js";
-import { PipelineStateManager } from "../src/pipeline/state.js";
+import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import { FigmaRestClient } from "../src/shared/figma-rest.js";
 import { SnapshotCache } from "../src/pipeline/snapshot.js";
 import { handleGetTree } from "../src/tools/inspect/get-tree.js";
 import { handleAudit } from "../src/tools/inspect/audit.js";
@@ -10,7 +11,7 @@ import type { ToolContext } from "../src/shared/context.js";
 
 const FIGMA_URL = process.argv[2];
 
-async function main() {
+export async function main() {
   const token = process.env.FIGMA_ACCESS_TOKEN;
   if (!token) throw new Error("FIGMA_ACCESS_TOKEN not set");
   if (!FIGMA_URL) {
@@ -24,10 +25,8 @@ async function main() {
   console.log();
 
   const rest = new FigmaRestClient(token, parsed.fileKey);
-  const stateManager = new PipelineStateManager(parsed.fileKey);
   const snapshotCache = new SnapshotCache();
-  const hub = { hasPlugin: () => false } as any;
-  const ctx: ToolContext = { rest, hub, stateManager, snapshotCache };
+  const ctx: ToolContext = { rest, snapshotCache };
 
   const nodeId = parsed.nodeId || "0:1";
 
@@ -93,4 +92,10 @@ async function main() {
   console.log("=== Pipeline test complete ===");
 }
 
-main().catch(console.error);
+const entrypoint = process.argv[1];
+if (entrypoint && fileURLToPath(import.meta.url) === resolve(entrypoint)) {
+  main().catch((error: unknown) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

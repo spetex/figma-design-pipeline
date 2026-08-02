@@ -12,9 +12,7 @@ export interface ExtractedTokens {
   opacities: DesignToken[];
 }
 
-/**
- * Extract design tokens from a Figma node tree.
- */
+/** Extract design tokens from a Figma node tree. */
 export function extractTokens(
   root: FigmaRawNode,
   types: string[] = ["color", "font", "spacing", "radius", "shadow", "opacity"]
@@ -37,7 +35,6 @@ export function extractTokens(
   const typeSet = new Set(types);
 
   walkForTokens(root, (node) => {
-    // Colors
     if (typeSet.has("color")) {
       for (const fill of node.fills || []) {
         if (fill.type === "SOLID" && fill.color) {
@@ -54,51 +51,31 @@ export function extractTokens(
       }
     }
 
-    // Fonts
     if (typeSet.has("font") && node.style) {
       const fontKey = `${node.style.fontFamily || ""}|${node.style.fontSize || ""}|${node.style.fontWeight || ""}`;
       if (fontKey !== "||" && !seenFonts.has(fontKey)) {
         seenFonts.add(fontKey);
-        result.fonts.push({
-          type: "font",
-          raw: fontKey,
-          cssVar: undefined,
-        });
+        result.fonts.push({ type: "font", raw: fontKey });
       }
     }
 
-    // Spacing (from auto-layout or padding)
     if (typeSet.has("spacing")) {
-      for (const val of [
-        node.itemSpacing,
-        node.paddingTop,
-        node.paddingRight,
-        node.paddingBottom,
-        node.paddingLeft,
-      ]) {
-        if (val !== undefined && val > 0 && !seenSpacing.has(val)) {
-          seenSpacing.add(val);
-          result.spacing.push({
-            type: "spacing",
-            raw: val,
-          });
+      for (const token of extractSpacingTokens(node)) {
+        if (!seenSpacing.has(token.raw)) {
+          seenSpacing.add(token.raw);
+          result.spacing.push(token);
         }
       }
     }
 
-    // Border radius
     if (typeSet.has("radius")) {
-      const r = node.cornerRadius;
-      if (r !== undefined && r > 0 && !seenRadii.has(r)) {
-        seenRadii.add(r);
-        result.radii.push({
-          type: "radius",
-          raw: r,
-        });
+      const radius = node.cornerRadius;
+      if (radius !== undefined && radius > 0 && !seenRadii.has(radius)) {
+        seenRadii.add(radius);
+        result.radii.push({ type: "radius", raw: radius });
       }
     }
 
-    // Shadows
     if (typeSet.has("shadow")) {
       const layers: ShadowTokenValue[] = [];
       for (const effect of node.effects || []) {
@@ -130,36 +107,30 @@ export function extractTokens(
       }
     }
 
-    // Opacity
-    if (typeSet.has("opacity")) {
-      if (node.opacity !== undefined && node.opacity < 1 && !seenOpacities.has(node.opacity)) {
-        seenOpacities.add(node.opacity);
-        result.opacities.push({
-          type: "opacity",
-          raw: node.opacity,
-        });
-      }
+    if (
+      typeSet.has("opacity") &&
+      node.opacity !== undefined &&
+      node.opacity < 1 &&
+      !seenOpacities.has(node.opacity)
+    ) {
+      seenOpacities.add(node.opacity);
+      result.opacities.push({ type: "opacity", raw: node.opacity });
     }
   });
 
-  // Sort spacing and radii numerically
   result.spacing.sort((a, b) => (a.raw as number) - (b.raw as number));
   result.radii.sort((a, b) => (a.raw as number) - (b.raw as number));
   applyTailwindHints(result);
-
   return result;
 }
 
-/** Extract tokens for a single node (used during enrichment) */
+/** Extract tokens for a single node (used during enrichment). */
 export function extractNodeTokens(node: FigmaRawNode): DesignToken[] {
   const tokens: DesignToken[] = [];
 
   for (const fill of node.fills || []) {
     if (fill.type === "SOLID" && fill.color) {
-      tokens.push({
-        type: "color",
-        raw: rgbaToHex(fill.color),
-      });
+      tokens.push({ type: "color", raw: rgbaToHex(fill.color) });
     }
   }
 
@@ -171,16 +142,31 @@ export function extractNodeTokens(node: FigmaRawNode): DesignToken[] {
   }
 
   if (node.cornerRadius && node.cornerRadius > 0) {
-    tokens.push({
-      type: "radius",
-      raw: node.cornerRadius,
-    });
+    tokens.push({ type: "radius", raw: node.cornerRadius });
   }
 
+  tokens.push(...extractSpacingTokens(node));
   return tokens;
 }
 
-function walkForTokens(node: FigmaRawNode, visit: (n: FigmaRawNode) => void): void {
+/** Extract distinct positive auto-layout spacing values for one node. */
+function extractSpacingTokens(
+  node: FigmaRawNode
+): Array<DesignToken & { type: "spacing"; raw: number }> {
+  const values = new Set([
+    node.itemSpacing,
+    node.paddingTop,
+    node.paddingRight,
+    node.paddingBottom,
+    node.paddingLeft,
+  ]);
+
+  return [...values]
+    .filter((value): value is number => value !== undefined && value > 0)
+    .map((value) => ({ type: "spacing", raw: value }));
+}
+
+function walkForTokens(node: FigmaRawNode, visit: (node: FigmaRawNode) => void): void {
   visit(node);
   for (const child of node.children || []) walkForTokens(child, visit);
 }

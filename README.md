@@ -92,7 +92,8 @@ See [CHANGELOG.md](CHANGELOG.md) for prior releases.
 npm install
 npm run dev          # tsx src/index.ts
 npm run build        # build server + plugin
-npm run check        # tsc --noEmit
+npm run check        # type-check server source and Node-side scripts
+npm run check:scripts
 npm test             # vitest run
 npm run test:watch
 ```
