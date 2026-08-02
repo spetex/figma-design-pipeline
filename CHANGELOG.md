@@ -4,10 +4,22 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-08-02
+
+### Changed
+- Package publishing now uses GitHub Actions trusted publishing instead of a long-lived npm token.
+
 ### Fixed
-- Tree enumeration no longer silently compacts direct root children. Vector compaction, oversized scalar fields, and response-size pruning now report exact omission metrics, machine-readable reasons, full serialized-response byte metrics, compatible node counts and notes, and focused or strictly advancing paginated continuations.
-- Node searches now distinguish an exact-limit complete result from a genuinely truncated result and expose their traversal depth and match limit.
-- Token export now preserves arbitrary-size same-hue palettes, layered outer/inner shadow structure, full RGBA precision, alpha and spread, and opacity across Tailwind, CSS, JSON, and DTCG Style Dictionary output. Extracted Tailwind hints and exported theme keys now share one deterministic projection, including collision-safe fractional opacity and repeated/different shadows. Existing JSON shadow consumers retain a complete CSS-compatible `raw` string alongside the new lossless `shadow` layers.
+- The installer now forwards optional Figma environment variables correctly for Codex, Claude Code, and Gemini, including `FIGMA_PLUGIN_PORT`, without writing literal placeholder values into Codex configuration.
+- Inspection reads now offer explicit freshness controls and cache provenance, key snapshots by all result-shaping inputs, and invalidate cached data after connected writes or plugin document changes.
+- Grouping plans now create real groups by moving every selected node into a correctly positioned parent-relative frame while preserving visible child positions and rejecting unsafe hierarchies.
+- Remembered root nodes are now scoped to their Figma file, preventing a node from one file from being reused silently after switching to another file.
+- Tree enumeration no longer silently compacts direct root children. Vector compaction, oversized scalar fields, and response-size pruning now report exact omission metrics, machine-readable reasons, serialized-response byte metrics, compatible node counts and notes, and focused or strictly advancing paginated continuations. Node searches now distinguish an exact-limit complete result from a genuinely truncated result and expose traversal depth and match limit.
+- Disconnected-plugin fallback JavaScript now matches all 43 plugin action contracts, preserving layout, gradient, typography, variable, export, font, and paint-binding fields as well as dry-run, stop-on-error, and rollback semantics.
+- Astro code generation now emits concrete props data types, preserves component registry names, paths, categories, props, and supported file extensions, and reports entries that cannot be represented instead of producing invalid imports.
+- The live pipeline validation script now uses the current REST client and tool context, loads without stale imports, and is covered by Node-side script type checking.
+- Design audits now receive distinct item-spacing and padding tokens, correctly classify non-auto-layout containers, and deduplicate repeated spacing violations.
+- Token export now preserves arbitrary-size same-hue palettes, layered outer/inner shadow structure, full RGBA precision, alpha and spread, and opacity across Tailwind, CSS, JSON, and DTCG Style Dictionary output. Extracted Tailwind hints and exported theme keys share one deterministic projection, including collision-safe fractional opacity and repeated or distinct shadows. Existing JSON shadow consumers retain a complete CSS-compatible `raw` string alongside lossless `shadow` layers.
 
 ## [0.8.1] - 2026-07-29
 
