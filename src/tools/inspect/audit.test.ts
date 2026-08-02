@@ -75,3 +75,49 @@ describe("handleAudit token checks", () => {
     expect(result.violations[0]?.message).toBe("Spacing 7px is not on the 4px grid");
   });
 });
+
+describe("handleAudit layout checks", () => {
+  function frame(layoutMode?: FigmaRawNode["layoutMode"]): FigmaRawNode {
+    return {
+      id: "root",
+      name: "Container",
+      type: "FRAME",
+      absoluteBoundingBox: { x: 0, y: 0, width: 200, height: 100 },
+      ...(layoutMode === undefined ? {} : { layoutMode }),
+      children: [
+        { id: "child-a", name: "First", type: "RECTANGLE" },
+        { id: "child-b", name: "Second", type: "RECTANGLE" },
+      ],
+    };
+  }
+
+  it.each([
+    ["explicit NONE", "NONE"],
+    ["omitted layoutMode", undefined],
+  ] as const)("reports absolute positioning for %s", async (_label, layoutMode) => {
+    const result = await handleAudit(makeContext(frame(layoutMode)), {
+      nodeId: "root",
+      checks: ["layout"],
+    });
+
+    expect(result.violations).toEqual([
+      expect.objectContaining({
+        nodeId: "root",
+        category: "layout",
+        message: "Uses absolute positioning with multiple children — consider auto-layout",
+      }),
+    ]);
+  });
+
+  it.each(["HORIZONTAL", "VERTICAL", "GRID"] as const)(
+    "does not report %s auto-layout as absolute",
+    async layoutMode => {
+      const result = await handleAudit(makeContext(frame(layoutMode)), {
+        nodeId: "root",
+        checks: ["layout"],
+      });
+
+      expect(result.violations).toEqual([]);
+    }
+  );
+});

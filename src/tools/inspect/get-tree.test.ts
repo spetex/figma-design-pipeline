@@ -162,6 +162,47 @@ describe("handleGetTree token enrichment", () => {
   });
 });
 
+describe("handleGetTree layout enrichment", () => {
+  it.each([
+    ["NONE", "absolute"],
+    [undefined, "absolute"],
+    ["HORIZONTAL", "horizontal"],
+    ["VERTICAL", "vertical"],
+    ["GRID", "grid"],
+  ] as const)("maps frame layout mode %s to %s", async (layoutMode, expectedMode) => {
+    const frame: FigmaRawNode = {
+      ...node("root", "Container", 0, 1000),
+      ...(layoutMode === undefined ? {} : { layoutMode }),
+    };
+    const { ctx } = makeContext(new Map([["root", frame]]));
+
+    const result = await handleGetTree(ctx, { nodeId: "root" });
+
+    expect(result.tree.layoutInfo?.mode).toBe(expectedMode);
+  });
+
+  it.each([
+    ["NONE", "none"],
+    [undefined, undefined],
+  ] as const)("does not classify a leaf with layout mode %s as absolute", async (
+    layoutMode,
+    expectedMode
+  ) => {
+    const leaf: FigmaRawNode = {
+      id: "root",
+      name: "Leaf",
+      type: "RECTANGLE",
+      absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+      ...(layoutMode === undefined ? {} : { layoutMode }),
+    };
+    const { ctx } = makeContext(new Map([["root", leaf]]));
+
+    const result = await handleGetTree(ctx, { nodeId: "root" });
+
+    expect(result.tree.layoutInfo?.mode).toBe(expectedMode);
+  });
+});
+
 describe("tree completeness reporting", () => {
   it("preserves all 39 direct children when the requested root is vector-heavy", async () => {
     const children = Array.from({ length: 39 }, (_, index): FigmaRawNode => ({
