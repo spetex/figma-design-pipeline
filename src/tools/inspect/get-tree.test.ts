@@ -136,6 +136,32 @@ describe("handleGetTree freshness", () => {
   });
 });
 
+describe("handleGetTree token enrichment", () => {
+  it("includes each distinct item spacing and padding value once per node", async () => {
+    const autoLayout: FigmaRawNode = {
+      ...node("root", "Auto layout", 0, 1000),
+      layoutMode: "HORIZONTAL",
+      itemSpacing: 5,
+      paddingTop: 7,
+      paddingRight: 9,
+      paddingBottom: 11,
+      paddingLeft: 7,
+    };
+    const { ctx } = makeContext(new Map([["root", autoLayout]]));
+
+    const result = await handleGetTree(ctx, {
+      nodeId: "root",
+      includeStyles: true,
+    });
+
+    expect(
+      result.tree.tokens
+        .filter(token => token.type === "spacing")
+        .map(token => token.raw)
+    ).toEqual([5, 7, 9, 11]);
+  });
+});
+
 describe("tree completeness reporting", () => {
   it("preserves all 39 direct children when the requested root is vector-heavy", async () => {
     const children = Array.from({ length: 39 }, (_, index): FigmaRawNode => ({

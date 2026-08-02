@@ -69,20 +69,11 @@ export function extractTokens(
 
     // Spacing (from auto-layout or padding)
     if (typeSet.has("spacing")) {
-      for (const val of [
-        node.itemSpacing,
-        node.paddingTop,
-        node.paddingRight,
-        node.paddingBottom,
-        node.paddingLeft,
-      ]) {
-        if (val !== undefined && val > 0 && !seenSpacing.has(val)) {
-          seenSpacing.add(val);
-          result.spacing.push({
-            type: "spacing",
-            raw: val,
-            tailwind: mapSpacingToTailwind(val),
-          });
+      for (const token of extractSpacingTokens(node)) {
+        const value = token.raw;
+        if (!seenSpacing.has(value)) {
+          seenSpacing.add(value);
+          result.spacing.push(token);
         }
       }
     }
@@ -167,7 +158,30 @@ export function extractNodeTokens(node: FigmaRawNode): DesignToken[] {
     });
   }
 
+  tokens.push(...extractSpacingTokens(node));
+
   return tokens;
+}
+
+/** Extract distinct positive auto-layout spacing values for one node. */
+function extractSpacingTokens(
+  node: FigmaRawNode
+): Array<DesignToken & { type: "spacing"; raw: number }> {
+  const values = new Set([
+    node.itemSpacing,
+    node.paddingTop,
+    node.paddingRight,
+    node.paddingBottom,
+    node.paddingLeft,
+  ]);
+
+  return [...values]
+    .filter((value): value is number => value !== undefined && value > 0)
+    .map(value => ({
+      type: "spacing",
+      raw: value,
+      tailwind: mapSpacingToTailwind(value),
+    }));
 }
 
 // ─── Tailwind Mapping Helpers ────────────────────────────────────────

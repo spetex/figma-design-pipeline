@@ -197,9 +197,12 @@ function checkComponents(node: EnrichedNode, violations: AuditViolation[]): void
 
 function checkTokens(node: EnrichedNode, violations: AuditViolation[]): void {
   // Non-standard spacing values
+  const checkedSpacing = new Set<number>();
   for (const token of node.tokens) {
     if (token.type === "spacing" && typeof token.raw === "number") {
       const val = token.raw;
+      if (checkedSpacing.has(val)) continue;
+      checkedSpacing.add(val);
       // Check if it's a standard 4px grid value
       if (val % 4 !== 0 && val > 1) {
         violations.push({
