@@ -1,5 +1,7 @@
-import type { FigmaRawNode, FigmaColor, DesignToken } from "../shared/types.js";
+import type { FigmaRawNode, DesignToken, ShadowTokenValue } from "../shared/types.js";
 import { rgbaToHex } from "../shared/color.js";
+import { shadowToCss } from "../shared/shadow.js";
+import { applyTailwindHints } from "../shared/tailwind-tokens.js";
 
 export interface ExtractedTokens {
   colors: DesignToken[];
@@ -10,9 +12,7 @@ export interface ExtractedTokens {
   opacities: DesignToken[];
 }
 
-/**
- * Extract design tokens from a Figma node tree.
- */
+/** Extract design tokens from a Figma node tree. */
 export function extractTokens(
   root: FigmaRawNode,
   types: string[] = ["color", "font", "spacing", "radius", "shadow", "opacity"]
@@ -35,7 +35,6 @@ export function extractTokens(
   const typeSet = new Set(types);
 
   walkForTokens(root, (node) => {
-    // Colors
     if (typeSet.has("color")) {
       for (const fill of node.fills || []) {
         if (fill.type === "SOLID" && fill.color) {
@@ -45,7 +44,6 @@ export function extractTokens(
             result.colors.push({
               type: "color",
               raw: hex,
-              tailwind: mapColorToTailwind(fill.color),
               cssVar: `--color-${hex.slice(1)}`,
             });
           }
@@ -53,92 +51,86 @@ export function extractTokens(
       }
     }
 
-    // Fonts
     if (typeSet.has("font") && node.style) {
       const fontKey = `${node.style.fontFamily || ""}|${node.style.fontSize || ""}|${node.style.fontWeight || ""}`;
       if (fontKey !== "||" && !seenFonts.has(fontKey)) {
         seenFonts.add(fontKey);
-        result.fonts.push({
-          type: "font",
-          raw: fontKey,
-          tailwind: mapFontToTailwind(node.style),
-          cssVar: undefined,
-        });
+        result.fonts.push({ type: "font", raw: fontKey });
       }
     }
 
-    // Spacing (from auto-layout or padding)
     if (typeSet.has("spacing")) {
       for (const token of extractSpacingTokens(node)) {
-        const value = token.raw;
-        if (!seenSpacing.has(value)) {
-          seenSpacing.add(value);
+        if (!seenSpacing.has(token.raw)) {
+          seenSpacing.add(token.raw);
           result.spacing.push(token);
         }
       }
     }
 
-    // Border radius
     if (typeSet.has("radius")) {
-      const r = node.cornerRadius;
-      if (r !== undefined && r > 0 && !seenRadii.has(r)) {
-        seenRadii.add(r);
-        result.radii.push({
-          type: "radius",
-          raw: r,
-          tailwind: mapRadiusToTailwind(r),
-        });
+      const radius = node.cornerRadius;
+      if (radius !== undefined && radius > 0 && !seenRadii.has(radius)) {
+        seenRadii.add(radius);
+        result.radii.push({ type: "radius", raw: radius });
       }
     }
 
-    // Shadows
     if (typeSet.has("shadow")) {
+      const layers: ShadowTokenValue[] = [];
       for (const effect of node.effects || []) {
-        if (effect.type === "DROP_SHADOW" && effect.visible) {
-          const shadowKey = `${effect.radius || 0}|${effect.color?.r ?? 0}|${effect.color?.g ?? 0}|${effect.color?.b ?? 0}|${effect.offset?.x ?? 0}|${effect.offset?.y ?? 0}`;
-          if (!seenShadows.has(shadowKey)) {
-            seenShadows.add(shadowKey);
-            result.shadows.push({
-              type: "shadow",
-              raw: `${effect.radius || 0}px`,
-              tailwind: mapShadowToTailwind(effect.radius || 0),
-            });
-          }
+        if (
+          (effect.type !== "DROP_SHADOW" && effect.type !== "INNER_SHADOW") ||
+          effect.visible === false
+        ) continue;
+
+        layers.push({
+          offsetX: effect.offset?.x ?? 0,
+          offsetY: effect.offset?.y ?? 0,
+          blur: effect.radius ?? 0,
+          spread: effect.spread ?? 0,
+          color: effect.color ?? { r: 0, g: 0, b: 0, a: 1 },
+          inset: effect.type === "INNER_SHADOW",
+        });
+      }
+
+      if (layers.length > 0) {
+        const shadowKey = JSON.stringify(layers);
+        if (!seenShadows.has(shadowKey)) {
+          seenShadows.add(shadowKey);
+          result.shadows.push({
+            type: "shadow",
+            raw: shadowToCss(layers),
+            shadow: layers,
+          });
         }
       }
     }
 
-    // Opacity
-    if (typeSet.has("opacity")) {
-      if (node.opacity !== undefined && node.opacity < 1 && !seenOpacities.has(node.opacity)) {
-        seenOpacities.add(node.opacity);
-        result.opacities.push({
-          type: "opacity",
-          raw: node.opacity,
-          tailwind: `opacity-${Math.round(node.opacity * 100)}`,
-        });
-      }
+    if (
+      typeSet.has("opacity") &&
+      node.opacity !== undefined &&
+      node.opacity < 1 &&
+      !seenOpacities.has(node.opacity)
+    ) {
+      seenOpacities.add(node.opacity);
+      result.opacities.push({ type: "opacity", raw: node.opacity });
     }
   });
 
-  // Sort spacing and radii numerically
   result.spacing.sort((a, b) => (a.raw as number) - (b.raw as number));
   result.radii.sort((a, b) => (a.raw as number) - (b.raw as number));
-
+  applyTailwindHints(result);
   return result;
 }
 
-/** Extract tokens for a single node (used during enrichment) */
+/** Extract tokens for a single node (used during enrichment). */
 export function extractNodeTokens(node: FigmaRawNode): DesignToken[] {
   const tokens: DesignToken[] = [];
 
   for (const fill of node.fills || []) {
     if (fill.type === "SOLID" && fill.color) {
-      tokens.push({
-        type: "color",
-        raw: rgbaToHex(fill.color),
-        tailwind: mapColorToTailwind(fill.color),
-      });
+      tokens.push({ type: "color", raw: rgbaToHex(fill.color) });
     }
   }
 
@@ -146,20 +138,14 @@ export function extractNodeTokens(node: FigmaRawNode): DesignToken[] {
     tokens.push({
       type: "font",
       raw: `${node.style.fontFamily || "Inter"}/${node.style.fontSize}/${node.style.fontWeight || 400}`,
-      tailwind: mapFontToTailwind(node.style),
     });
   }
 
   if (node.cornerRadius && node.cornerRadius > 0) {
-    tokens.push({
-      type: "radius",
-      raw: node.cornerRadius,
-      tailwind: mapRadiusToTailwind(node.cornerRadius),
-    });
+    tokens.push({ type: "radius", raw: node.cornerRadius });
   }
 
   tokens.push(...extractSpacingTokens(node));
-
   return tokens;
 }
 
@@ -177,104 +163,10 @@ function extractSpacingTokens(
 
   return [...values]
     .filter((value): value is number => value !== undefined && value > 0)
-    .map(value => ({
-      type: "spacing",
-      raw: value,
-      tailwind: mapSpacingToTailwind(value),
-    }));
+    .map((value) => ({ type: "spacing", raw: value }));
 }
 
-// ─── Tailwind Mapping Helpers ────────────────────────────────────────
-
-const COLOR_MAP: Record<string, string> = {
-  "#000000": "black",
-  "#ffffff": "white",
-  "#f8fafc": "slate-50",
-  "#f1f5f9": "slate-100",
-  "#e2e8f0": "slate-200",
-  "#cbd5e1": "slate-300",
-  "#94a3b8": "slate-400",
-  "#64748b": "slate-500",
-  "#475569": "slate-600",
-  "#334155": "slate-700",
-  "#1e293b": "slate-800",
-  "#0f172a": "slate-900",
-  "#111827": "gray-900",
-  "#1f2937": "gray-800",
-  "#374151": "gray-700",
-  "#6b7280": "gray-500",
-  "#9ca3af": "gray-400",
-  "#d1d5db": "gray-300",
-  "#e5e7eb": "gray-200",
-  "#f3f4f6": "gray-100",
-  "#f9fafb": "gray-50",
-};
-
-const FONT_SIZE_MAP: Record<number, string> = {
-  12: "text-xs", 14: "text-sm", 16: "text-base", 18: "text-lg",
-  20: "text-xl", 24: "text-2xl", 30: "text-3xl", 36: "text-4xl",
-  48: "text-5xl", 60: "text-6xl", 72: "text-7xl", 96: "text-8xl",
-};
-
-const FONT_WEIGHT_MAP: Record<number, string> = {
-  100: "font-thin", 200: "font-extralight", 300: "font-light",
-  400: "font-normal", 500: "font-medium", 600: "font-semibold",
-  700: "font-bold", 800: "font-extrabold", 900: "font-black",
-};
-
-const SPACING_MAP: Record<number, string> = {
-  0: "0", 1: "px", 2: "0.5", 4: "1", 6: "1.5", 8: "2", 10: "2.5",
-  12: "3", 14: "3.5", 16: "4", 20: "5", 24: "6", 28: "7", 32: "8",
-  36: "9", 40: "10", 44: "11", 48: "12", 56: "14", 64: "16",
-  80: "20", 96: "24", 112: "28", 128: "32", 144: "36", 160: "40",
-};
-
-function mapColorToTailwind(c: FigmaColor): string {
-  const hex = rgbaToHex(c);
-  return COLOR_MAP[hex.toLowerCase()] || `[${hex}]`;
-}
-
-function mapFontToTailwind(style: {
-  fontSize?: number;
-  fontWeight?: number;
-  lineHeightPx?: number;
-}): string {
-  const parts: string[] = [];
-  const fontSize = style.fontSize || 16;
-  parts.push(FONT_SIZE_MAP[fontSize] || `text-[${fontSize}px]`);
-  if (style.fontWeight && style.fontWeight !== 400) {
-    parts.push(FONT_WEIGHT_MAP[style.fontWeight] || `font-[${style.fontWeight}]`);
-  }
-  return parts.join(" ");
-}
-
-function mapSpacingToTailwind(px: number): string {
-  return SPACING_MAP[px] ? `gap-${SPACING_MAP[px]}` : `gap-[${px}px]`;
-}
-
-function mapRadiusToTailwind(px: number): string {
-  if (px <= 0) return "rounded-none";
-  if (px <= 2) return "rounded-sm";
-  if (px <= 4) return "rounded";
-  if (px <= 6) return "rounded-md";
-  if (px <= 8) return "rounded-lg";
-  if (px <= 12) return "rounded-xl";
-  if (px <= 16) return "rounded-2xl";
-  if (px <= 24) return "rounded-3xl";
-  if (px >= 9999) return "rounded-full";
-  return `rounded-[${px}px]`;
-}
-
-function mapShadowToTailwind(radius: number): string {
-  if (radius <= 1) return "shadow-sm";
-  if (radius <= 3) return "shadow";
-  if (radius <= 6) return "shadow-md";
-  if (radius <= 10) return "shadow-lg";
-  if (radius <= 15) return "shadow-xl";
-  return "shadow-2xl";
-}
-
-function walkForTokens(node: FigmaRawNode, visit: (n: FigmaRawNode) => void): void {
+function walkForTokens(node: FigmaRawNode, visit: (node: FigmaRawNode) => void): void {
   visit(node);
   for (const child of node.children || []) walkForTokens(child, visit);
 }

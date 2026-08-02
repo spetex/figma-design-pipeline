@@ -1,0 +1,43 @@
+{
+  "id": "root",
+  "name": "Token fidelity fixture",
+  "type": "FRAME",
+  "opacity": 0.42,
+  "itemSpacing": 12,
+  "cornerRadius": 6,
+  "style": { "fontFamily": "Inter", "fontSize": 16, "fontWeight": 400 },
+  "effects": [
+    {
+      "type": "DROP_SHADOW",
+      "visible": true,
+      "offset": { "x": -2, "y": 4 },
+      "radius": 8,
+      "spread": 3,
+      "color": { "r": 0.1, "g": 0.2, "b": 0.3, "a": 0.25 }
+    },
+    {
+      "type": "INNER_SHADOW",
+      "visible": true,
+      "offset": { "x": 1.5, "y": -1 },
+      "radius": 2.5,
+      "spread": -0.5,
+      "color": { "r": 1, "g": 0, "b": 0, "a": 0.6 }
+    }
+  ],
+  "children": [
+    { "id": "red-01", "name": "Red 01", "type": "RECTANGLE", "fills": [{ "type": "SOLID", "color": { "r": 1, "g": 0.02, "b": 0.01, "a": 1 } }] },
+    { "id": "red-02", "name": "Red 02", "type": "RECTANGLE", "fills": [{ "type": "SOLID", "color": { "r": 0.96, "g": 0.018, "b": 0.009, "a": 1 } }] },
+    { "id": "red-03", "name": "Red 03", "type": "RECTANGLE", "fills": [{ "type": "SOLID", "color": { "r": 0.92, "g": 0.016, "b": 0.008, "a": 1 } }] },
+    { "id": "red-04", "name": "Red 04", "type": "RECTANGLE", "fills": [{ "type": "SOLID", "color": { "r": 0.88, "g": 0.014, "b": 0.007, "a": 1 } }] },
+    { "id": "red-05", "name": "Red 05", "type": "RECTANGLE", "fills": [{ "type": "SOLID", "color": { "r": 0.84, "g": 0.012, "b": 0.006, "a": 1 } }] },
+    { "id": "red-06", "name": "Red 06", "type": "RECTANGLE", "fills": [{ "type": "SOLID", "color": { "r": 0.8, "g": 0.01, "b": 0.005, "a": 1 } }] },
+    { "id": "red-07", "name": "Red 07", "type": "RECTANGLE", "fills": [{ "type": "SOLID", "color": { "r": 0.76, "g": 0.009, "b": 0.004, "a": 1 } }] },
+    { "id": "red-08", "name": "Red 08", "type": "RECTANGLE", "fills": [{ "type": "SOLID", "color": { "r": 0.72, "g": 0.008, "b": 0.003, "a": 1 } }] },
+    { "id": "red-09", "name": "Red 09", "type": "RECTANGLE", "fills": [{ "type": "SOLID", "color": { "r": 0.68, "g": 0.007, "b": 0.002, "a": 1 } }] },
+    { "id": "red-10", "name": "Red 10", "type": "RECTANGLE", "fills": [{ "type": "SOLID", "color": { "r": 0.64, "g": 0.006, "b": 0.001, "a": 1 } }] },
+    { "id": "red-11", "name": "Red 11", "type": "RECTANGLE", "fills": [{ "type": "SOLID", "color": { "r": 0.6, "g": 0.005, "b": 0, "a": 1 } }] },
+    { "id": "red-12", "name": "Red 12", "type": "RECTANGLE", "fills": [{ "type": "SOLID", "color": { "r": 0.56, "g": 0.004, "b": 0, "a": 1 } }] },
+    { "id": "red-13", "name": "Red 13", "type": "RECTANGLE", "opacity": 0.421, "fills": [{ "type": "SOLID", "color": { "r": 0.52, "g": 0.003, "b": 0, "a": 1 } }] },
+    { "id": "red-14", "name": "Red 14", "type": "RECTANGLE", "opacity": 0, "fills": [{ "type": "SOLID", "color": { "r": 0.48, "g": 0.002, "b": 0, "a": 1 } }] }
+  ]
+}

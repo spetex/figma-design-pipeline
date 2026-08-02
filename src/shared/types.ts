@@ -101,7 +101,7 @@ export interface FigmaRawNode {
   style?: FigmaTypeStyle;
   componentId?: string;
   opacity?: number;
-  effects?: Array<{ type: string; visible: boolean; radius?: number; color?: FigmaColor; offset?: { x: number; y: number }; spread?: number }>;
+  effects?: Array<{ type: string; visible?: boolean; radius?: number; color?: FigmaColor; offset?: { x: number; y: number }; spread?: number }>;
   clipsContent?: boolean;
   background?: FigmaPaint[];
   backgroundColor?: FigmaColor;
@@ -144,9 +144,21 @@ export type NodeClassification =
   | "container"
   | "unknown";
 
+export interface ShadowTokenValue {
+  offsetX: number;
+  offsetY: number;
+  blur: number;
+  spread: number;
+  color: FigmaColor;
+  inset: boolean;
+}
+
 export interface DesignToken {
   type: "color" | "font" | "spacing" | "radius" | "shadow" | "opacity";
   raw: string | number;
+  /** Lossless layered shadow data. `raw` remains a CSS string for compatibility. */
+  shadow?: ShadowTokenValue[];
+  /** Tailwind utility/key hint, present only when derived from the matching exported theme. */
   tailwind?: string;
   cssVar?: string;
 }
