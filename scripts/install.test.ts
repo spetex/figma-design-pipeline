@@ -82,7 +82,7 @@ describe.each(environmentCases)("installer with %s optional environment variable
 
 function install(client: "claude" | "codex" | "gemini", environment: Record<string, string>, overrides: Record<string, string> = {}) {
   const home = overrides.HOME ?? createTempHome();
-  const env = { ...process.env, ...environment, HOME: home, ...overrides };
+  const env: NodeJS.ProcessEnv = { ...process.env, ...environment, HOME: home, ...overrides };
   for (const name of forwardedEnvVars) {
     if (!(name in environment)) {
       delete env[name];

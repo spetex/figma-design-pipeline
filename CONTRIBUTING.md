@@ -11,7 +11,8 @@ Thanks for contributing to SPFR Figma Design Pipeline.
 
 ```bash
 npm install
-npm run check          # TypeScript type checking (tsc --noEmit)
+npm run check          # Type-check server source and Node-side TypeScript scripts
+npm run check:scripts  # Type-check scripts without loading Figma plugin globals
 npm test               # Run tests (vitest)
 npm run build          # Build server + plugin
 npm run build:server   # Server only -> dist/index.js
@@ -22,6 +23,11 @@ npm run dev            # Run the MCP server with tsx
 ## Testing
 
 ```bash
+# Smoke-test the live REST analysis pipeline (requires a Figma personal access
+# token, network access, and a Figma file/node URL that the token can read)
+FIGMA_ACCESS_TOKEN=figd_... npx tsx scripts/test-pipeline.ts \
+  'https://www.figma.com/design/FILE_KEY/FILE_NAME?node-id=1-2'
+
 # Install for your CLI
 npm run install:clients
 
