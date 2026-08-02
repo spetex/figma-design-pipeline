@@ -21,12 +21,8 @@ function formatNumber(value: number): string {
   return Object.is(value, -0) ? "0" : String(value);
 }
 
-function formatAlpha(value: number): string {
-  return String(Number(value.toFixed(4)));
-}
-
 function colorToCss({ r, g, b, a }: FigmaColor): string {
-  return `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${formatAlpha(a)})`;
+  return `color(srgb ${formatNumber(r)} ${formatNumber(g)} ${formatNumber(b)} / ${formatNumber(a)})`;
 }
 
 function layerToCss(layer: ShadowTokenValue): string {

@@ -1,7 +1,12 @@
 import type { ToolContext } from "../../shared/context.js";
-import type { DesignToken, GeneratedFile } from "../../shared/types.js";
+import type { GeneratedFile } from "../../shared/types.js";
 import { hexToRgba } from "../../shared/color.js";
 import { colorToDtcg, shadowToCss, shadowToDtcg } from "../../shared/shadow.js";
+import {
+  classifyFontFamily,
+  createTailwindProjection,
+  parseFontToken,
+} from "../../shared/tailwind-tokens.js";
 import { handleExtractTokens } from "../inspect/extract-tokens.js";
 import type { ExtractedTokens } from "../../analysis/token-extractor.js";
 
@@ -85,126 +90,16 @@ function hexToHsl(hex: string): { h: number; s: number; l: number } {
   return rgbToHsl(rgb.r, rgb.g, rgb.b);
 }
 
-function hueBucketName(hue: number, saturation: number): string {
-  if (saturation < 0.08) return "gray";
-  if (hue < 15) return "red";
-  if (hue < 40) return "orange";
-  if (hue < 65) return "yellow";
-  if (hue < 160) return "green";
-  if (hue < 200) return "cyan";
-  if (hue < 260) return "blue";
-  if (hue < 300) return "purple";
-  if (hue < 340) return "pink";
-  return "red";
-}
-
-function groupColorsByHue(colors: ExtractedTokens["colors"]): Record<string, string> {
-  const buckets: Record<string, Array<{ hex: string; lightness: number }>> = {};
-  for (const token of colors) {
-    const hex = String(token.raw);
-    if (!hex.startsWith("#")) continue;
-    const { h, s, l } = hexToHsl(hex);
-    const name = hueBucketName(h, s);
-    if (!buckets[name]) buckets[name] = [];
-    buckets[name].push({ hex, lightness: l });
-  }
-
-  const result: Record<string, string> = {};
-  for (const [bucket, shades] of Object.entries(buckets)) {
-    shades.sort((a, b) => b.lightness - a.lightness);
-    if (shades.length === 1) {
-      result[bucket] = shades[0].hex;
-    } else {
-      const scale = generateScale(shades.length);
-      for (let i = 0; i < shades.length; i++) {
-        result[`${bucket}-${scale[i]}`] = shades[i].hex;
-      }
-    }
-  }
-  return result;
-}
-
-export function generateScale(n: number): number[] {
-  if (n === 1) return [500];
-  if (n === 2) return [300, 700];
-  const full = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950];
-  if (n > full.length) {
-    return full.concat(Array.from({ length: n - full.length }, (_, index) => 1000 + index * 50));
-  }
-  if (n === full.length) return full;
-  const step = (full.length - 1) / (n - 1);
-  return Array.from({ length: n }, (_, i) => full[Math.round(i * step)]);
-}
-
 // ─── Font helpers ───────────────────────────────────────────────────
 
-function parseFontFamily(raw: DesignToken["raw"]): string {
-  return String(raw).split("|")[0] || String(raw);
-}
-
-function classifyFont(family: string): "sans" | "serif" | "mono" {
-  const lower = family.toLowerCase();
-  if (/mono|courier|consolas|fira\s*code|jetbrains|menlo|source\s*code/i.test(lower)) return "mono";
-  if (/serif|georgia|times|garamond|palatino|baskerville/i.test(lower)) {
-    if (/sans[-\s]?serif/i.test(lower)) return "sans";
-    return "serif";
-  }
-  return "sans";
+function parseFontFamily(raw: string | number): string {
+  return parseFontToken(raw).family;
 }
 
 // ─── Tailwind config emitter ────────────────────────────────────────
 
 function emitTailwindConfig(tokens: ExtractedTokens): GeneratedFile {
-  const colors = groupColorsByHue(tokens.colors);
-
-  const spacing: Record<string, string> = {};
-  for (const px of [...tokens.spacing].map(t => Number(t.raw)).filter(n => !isNaN(n)).sort((a, b) => a - b)) {
-    spacing[String(px)] = `${px}px`;
-  }
-
-  const fontFamily: Record<string, string[]> = {};
-  const seenFamilies = new Set<string>();
-  for (const token of tokens.fonts) {
-    const family = parseFontFamily(token.raw);
-    if (seenFamilies.has(family)) continue;
-    seenFamilies.add(family);
-    const cls = classifyFont(family);
-    if (!fontFamily[cls]) fontFamily[cls] = [];
-    fontFamily[cls].push(family);
-  }
-
-  const borderRadius: Record<string, string> = {};
-  const radiusLabels = ["sm", "DEFAULT", "md", "lg", "xl", "2xl", "3xl", "full"];
-  const radiiSorted = [...tokens.radii].map(t => Number(t.raw)).filter(n => !isNaN(n)).sort((a, b) => a - b);
-  for (let i = 0; i < radiiSorted.length; i++) {
-    borderRadius[i < radiusLabels.length ? radiusLabels[i] : `${i + 1}`] = `${radiiSorted[i]}px`;
-  }
-
-  const boxShadow: Record<string, string> = {};
-  if (tokens.shadows.length > 0) {
-    const labels = ["sm", "DEFAULT", "md", "lg", "xl", "2xl"];
-    for (let i = 0; i < tokens.shadows.length; i++) {
-      boxShadow[i < labels.length ? labels[i] : `${i + 1}`] = shadowToCss(
-        tokens.shadows[i].shadow ?? tokens.shadows[i].raw
-      );
-    }
-  }
-
-  const opacity: Record<string, string> = {};
-  for (const value of tokens.opacities
-    .map((token) => Number(token.raw))
-    .filter((value) => Number.isFinite(value))
-    .sort((a, b) => a - b)) {
-    const baseLabel = opacityLabel(value);
-    let label = baseLabel;
-    let suffix = 2;
-    while (label in opacity) label = `${baseLabel}-${suffix++}`;
-    opacity[label] = String(value);
-  }
-
-  const config: Record<string, unknown> = { colors, spacing, fontFamily, borderRadius };
-  if (Object.keys(boxShadow).length > 0) config.boxShadow = boxShadow;
-  if (Object.keys(opacity).length > 0) config.opacity = opacity;
+  const config = createTailwindProjection(tokens).theme;
 
   const content = `// Auto-generated from Figma design tokens
 // Add these to your tailwind.config.ts extend section
@@ -213,10 +108,6 @@ export const figmaTokens = ${JSON.stringify(config, null, 2)};
 `;
 
   return { path: "figma-tokens.ts", content, type: "typescript" };
-}
-
-function opacityLabel(value: number): string {
-  return String(Number((value * 100).toPrecision(15)));
 }
 
 function quoteCssString(value: string): string {
@@ -249,7 +140,7 @@ function emitCssVariables(tokens: ExtractedTokens): GeneratedFile {
     const family = parseFontFamily(token.raw);
     if (seenFamilies.has(family)) continue;
     seenFamilies.add(family);
-    const cls = classifyFont(family);
+    const cls = classifyFontFamily(family);
     if (!fontsByClass[cls]) fontsByClass[cls] = [];
     fontsByClass[cls].push(family);
   }

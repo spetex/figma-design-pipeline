@@ -5,6 +5,7 @@
   "opacity": 0.42,
   "itemSpacing": 12,
   "cornerRadius": 6,
+  "style": { "fontFamily": "Inter", "fontSize": 16, "fontWeight": 400 },
   "effects": [
     {
       "type": "DROP_SHADOW",

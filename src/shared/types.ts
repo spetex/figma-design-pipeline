@@ -158,6 +158,7 @@ export interface DesignToken {
   raw: string | number;
   /** Lossless layered shadow data. `raw` remains a CSS string for compatibility. */
   shadow?: ShadowTokenValue[];
+  /** Tailwind utility/key hint, present only when derived from the matching exported theme. */
   tailwind?: string;
   cssVar?: string;
 }
