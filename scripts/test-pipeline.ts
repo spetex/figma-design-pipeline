@@ -92,7 +92,8 @@ export async function main() {
   console.log("=== Pipeline test complete ===");
 }
 
-if (fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+const entrypoint = process.argv[1];
+if (entrypoint && fileURLToPath(import.meta.url) === resolve(entrypoint)) {
   main().catch((error: unknown) => {
     console.error(error);
     process.exitCode = 1;
