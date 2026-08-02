@@ -52,12 +52,12 @@ The official Figma MCP handles Figma reads and file creation via OAuth — no pe
 
 ## What's new
 
-**0.8.1** (2026-07-29)
-- Published the maintained fork as `@spetex/figma-design-pipeline`, with new `spetex-*` commands and compatibility aliases for the previous `spfr-*` executable names.
-- Refreshed production dependencies and added a release audit gate; `npm audit --omit=dev` now reports zero vulnerabilities.
-- Hardened the plugin bridge with a 16 MiB per-message limit, disabled compression, and bounded chunk transport for large export results.
-- Fixed fallback symbolic node references when create actions are interleaved with ordinary actions.
-- Fixed inferred layout padding so `figma_plan_layout` emits schema-valid `set_spacing` actions.
+**0.8.2** (2026-08-02)
+- Added explicit inspection-cache freshness controls and complete tree-enumeration metadata, including safe pagination when responses exceed the byte budget.
+- Fixed grouping plans, cross-file root continuity, spacing audits, and disconnected-plugin fallback parity across all 43 actions.
+- Fixed Astro registry-based code generation and the live pipeline validation script.
+- Preserved arbitrary-size color palettes, layered shadows, opacity, and full color precision across every token export format.
+- Corrected optional environment forwarding in generated Codex, Claude Code, and Gemini MCP configurations.
 
 See [CHANGELOG.md](CHANGELOG.md) for prior releases.
 

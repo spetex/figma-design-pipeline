@@ -22,17 +22,16 @@ Releases are made by the GitHub Actions trusted-publisher workflow (`.github/wor
 ## Before Publishing
 
 ```bash
-npm install
-npm run check          # tsc --noEmit
+npm ci
+npm audit --omit=dev
+npm run check          # type-check server source and Node-side scripts
 npm test               # vitest
 npm run build          # builds server + plugin
-npm pack               # verify package contents
+npm pack --dry-run --json
+git diff --check
 ```
 
-Verify the plugin dist is included:
-```bash
-tar tzf *.tgz | grep plugin
-```
+Inspect the dry-run JSON and verify that the plugin distribution is included.
 
 ## npm Trusted Publisher
 
