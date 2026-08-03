@@ -44,6 +44,8 @@ allowed-tools:
 
 Keep context tight. Load only the sections needed for the task. For detailed design heuristics, open [references/design-guidance.md](references/design-guidance.md) only when the task requires synthesis or design creation.
 
+Treat inspection cache and completeness metadata as authoritative. Request fresh data when current state matters, and follow continuation guidance until you have enough context for the task.
+
 ## Tool Routing Rules (MUST FOLLOW)
 
 | Operation | Tool | Server |
