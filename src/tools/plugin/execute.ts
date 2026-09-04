@@ -468,8 +468,8 @@ function generateFallbackJs(
   lines.push("    if (result.status !== 'failed' && result.status !== 'skipped') {");
   lines.push("      result.rolledBack = true;");
   lines.push("      delete result.after;");
-  lines.push("      delete result.newNodeId;");
-  lines.push("      delete result.nodeId;");
+  lines.push("      if (result.newNodeId && transientNodeIds.has(result.newNodeId)) delete result.newNodeId;");
+  lines.push("      if (result.nodeId && transientNodeIds.has(result.nodeId)) delete result.nodeId;");
   lines.push("    }");
   lines.push("    results[index] = redactTransientIds(result, transientNodeIds);");
   lines.push("  }");

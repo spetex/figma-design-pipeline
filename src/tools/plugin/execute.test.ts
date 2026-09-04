@@ -632,8 +632,58 @@ describe("handleExecute fallback generation", () => {
       expect.objectContaining({ type: "rename", rolledBack: true }),
       { type: "rollback", status: "applied" },
     ]));
-    expect(result[1]).not.toHaveProperty("nodeId");
+    expect(result[1]).toHaveProperty("nodeId", "node");
     expect(triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves preexisting IDs and removes transient IDs from fallback rollback results", async () => {
+    const parent = { id: "parent", appendChild: vi.fn() };
+    const existingParent = { id: "existing-parent" };
+    const existing: Record<string, unknown> = {
+      id: "existing-1", name: "Before", parent: existingParent,
+    };
+    const transient: Record<string, unknown> = {
+      id: "transient-1", name: "", fills: [], x: 0, y: 0,
+      resize: vi.fn(),
+      appendChild: vi.fn((child: Record<string, unknown>) => { child.parent = transient; }),
+    };
+    const commitUndo = vi.fn();
+    const triggerUndo = vi.fn();
+    const fallback = await handleExecute(null, {
+      actions: [
+        { type: "create_frame", parentId: "parent", name: "Transient", as: "transient" },
+        { type: "rename", nodeId: "existing-1", name: "Renamed" },
+        { type: "move", nodeId: "existing-1", targetParentId: "$transient" },
+        { type: "rename", nodeId: "missing", name: "Fails" },
+      ],
+      rollbackOnError: true,
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>;
+
+    const result = await new AsyncFunction("figma", fallback.fallbackJs!)({
+      getNodeById: (id: string) => {
+        if (id === "parent") return parent;
+        if (id === "existing-1") return existing;
+        if (id === "transient-1") return transient;
+        return undefined;
+      },
+      createFrame: () => transient,
+      commitUndo,
+      triggerUndo,
+    });
+
+    expect(result[0]).toMatchObject({ type: "create_frame", rolledBack: true });
+    expect(result[0]).not.toHaveProperty("nodeId");
+    expect(result[1]).toMatchObject({ type: "rename", nodeId: "existing-1", rolledBack: true });
+    expect(result[2]).toMatchObject({
+      type: "move",
+      nodeId: "existing-1",
+      before: { parentId: "existing-parent" },
+      rolledBack: true,
+    });
+    expect(JSON.stringify(result)).not.toContain("transient-1");
   });
 
   it("keeps a planned grouping wrapper absolute in plugin and fallback execution paths", async () => {

@@ -573,6 +573,50 @@ describe("connected plugin batch execution", () => {
     expect(figma.triggerUndo).toHaveBeenCalledTimes(1);
   });
 
+  it("preserves preexisting IDs and removes transient IDs from connected rollback results", async () => {
+    const parent = { id: "parent", type: "PAGE", appendChild: vi.fn() };
+    const existingParent = { id: "existing-parent" };
+    const existing: Record<string, unknown> = {
+      id: "existing-1", type: "RECTANGLE", name: "Before", parent: existingParent,
+    };
+    const transient: Record<string, unknown> = {
+      id: "transient-1", type: "FRAME", name: "", fills: [], x: 0, y: 0,
+      resize: vi.fn(),
+      appendChild: vi.fn((child: Record<string, unknown>) => { child.parent = transient; }),
+    };
+    const figma = baseFigma(async (id) => {
+      if (id === "parent") return parent;
+      if (id === "existing-1") return existing;
+      if (id === "transient-1") return transient;
+      return null;
+    });
+    figma.createFrame = vi.fn(() => transient);
+
+    const result = await runPlugin(figma, [
+      { type: "create_frame", parentId: "parent", name: "Transient", as: "transient" },
+      { type: "rename", nodeId: "existing-1", name: "Renamed" },
+      { type: "move", nodeId: "existing-1", targetParentId: "$transient" },
+      { type: "rename", nodeId: "missing", name: "Fails" },
+    ]);
+
+    expect(result.results[0]).toMatchObject({ type: "create_frame", rolledBack: true });
+    expect(result.results[0]).not.toHaveProperty("nodeId");
+    expect(result.results[0]).not.toHaveProperty("newNodeId");
+    expect(result.results[1]).toMatchObject({
+      type: "rename",
+      nodeId: "existing-1",
+      before: { name: "Before" },
+      rolledBack: true,
+    });
+    expect(result.results[2]).toMatchObject({
+      type: "move",
+      nodeId: "existing-1",
+      before: { parentId: "existing-parent" },
+      rolledBack: true,
+    });
+    expect(JSON.stringify(result)).not.toContain("transient-1");
+  });
+
   it("isolates a failed second batch from a successful first batch", async () => {
     let committedName = "Before";
     let currentName = "Before";

@@ -2113,8 +2113,8 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
       if (result.status === "applied") {
         result.rolledBack = true;
         delete result.after;
-        delete result.newNodeId;
-        delete result.nodeId;
+        if (result.newNodeId && transientNodeIds.has(result.newNodeId)) delete result.newNodeId;
+        if (result.nodeId && transientNodeIds.has(result.nodeId)) delete result.nodeId;
       }
       results[index] = redactTransientIds(result, transientNodeIds) as ActionResult;
     }
