@@ -185,6 +185,29 @@ async function resolveStyle(
   return matches[0];
 }
 
+function gradientTransform(action: Record<string, unknown>): Transform {
+  if (action.gradientTransform) return action.gradientTransform as Transform;
+  const angle = ((action.angle as number | undefined) ?? 0) * Math.PI / 180;
+  return [
+    [Math.cos(angle), Math.sin(angle), 0],
+    [-Math.sin(angle), Math.cos(angle), 0],
+  ];
+}
+
+function gradientPaints(action: Record<string, unknown>): GradientPaint[] {
+  const inputs = Array.isArray(action.gradients)
+    ? action.gradients as Array<Record<string, unknown>>
+    : [action];
+  return inputs.map((input) => ({
+    type: `GRADIENT_${(input.gradientType as string | undefined) ?? "LINEAR"}` as GradientPaint["type"],
+    gradientStops: input.stops as ColorStop[],
+    gradientTransform: gradientTransform(input),
+    ...(input.visible !== undefined ? { visible: input.visible as boolean } : {}),
+    ...(input.opacity !== undefined ? { opacity: input.opacity as number } : {}),
+    ...(input.blendMode !== undefined ? { blendMode: input.blendMode as BlendMode } : {}),
+  }));
+}
+
 function parseVariableValue(type: VariableResolvedDataType, value: unknown): VariableValue {
   if (type === "COLOR") {
     if (typeof value === "object" && value !== null && ["r", "g", "b"].every((key) => typeof (value as Record<string, unknown>)[key] === "number")) {
@@ -825,13 +848,17 @@ async function executeAction(
       const textStyle = action.textStyleId || action.textStyleName
         ? await resolveStyle("TEXT", action.textStyleId, action.textStyleName) as TextStyle
         : null;
-      const family = (action.fontFamily as string) || "Inter";
-      const weight = (action.fontWeight as number) || 400;
-      const style = weightToFontStyle(weight);
-      await ensureFonts([{ family, style }]);
+      const hasFontOverride = action.fontFamily !== undefined || action.fontWeight !== undefined;
+      if (textStyle) await ensureFonts([textStyle.fontName]);
+      const family = (action.fontFamily as string | undefined) ?? textStyle?.fontName.family ?? "Inter";
+      const style = action.fontWeight !== undefined
+        ? weightToFontStyle(action.fontWeight as number)
+        : textStyle?.fontName.style ?? "Regular";
+      if (!textStyle || hasFontOverride) await ensureFonts([{ family, style }]);
       const text = figma.createText();
       markDocumentWrite();
-      text.fontName = { family, style };
+      if (textStyle) await text.setTextStyleIdAsync(textStyle.id);
+      if (!textStyle || hasFontOverride) text.fontName = { family, style };
       text.characters = (action.characters as string) || "";
       if (action.fontSize !== undefined) text.fontSize = action.fontSize as number;
       if (action.lineHeight !== undefined) text.lineHeight = { value: action.lineHeight as number, unit: "PIXELS" };
@@ -840,7 +867,6 @@ async function executeAction(
       if (action.textCase) text.textCase = action.textCase as TextCase;
       if (action.textAlignHorizontal) text.textAlignHorizontal = action.textAlignHorizontal as "LEFT" | "CENTER" | "RIGHT" | "JUSTIFIED";
       text.textAutoResize = (action.textAutoResize as "NONE" | "WIDTH_AND_HEIGHT" | "HEIGHT" | "TRUNCATE") || "HEIGHT";
-      if (textStyle) await text.setTextStyleIdAsync(textStyle.id);
       if (action.textTruncation) text.textTruncation = action.textTruncation as "DISABLED" | "ENDING";
       if (action.maxLines !== undefined) text.maxLines = action.maxLines as number | null;
       if (action.name) text.name = action.name as string;
@@ -1318,22 +1344,9 @@ async function executeAction(
 
     case "set_gradient_fill": {
       const node = await findSceneNode(action.nodeId as string) as GeometryMixin & SceneNode;
+      if (!("fills" in node)) throw new Error(`Node ${action.nodeId} does not support fills`);
       const before = { fills: safeSerialize(node.fills) };
-      const stops = (action.stops as Array<{ position: number; color: { r: number; g: number; b: number; a: number } }>);
-      const angle = ((action.angle as number) || 0) * Math.PI / 180;
-      const gradientType = (action.gradientType as string) || "LINEAR";
-
-      const gradientTransform: Transform = [
-        [Math.cos(angle), Math.sin(angle), 0],
-        [-Math.sin(angle), Math.cos(angle), 0],
-      ];
-
-      const fill: GradientPaint = {
-        type: `GRADIENT_${gradientType}` as "GRADIENT_LINEAR" | "GRADIENT_RADIAL" | "GRADIENT_ANGULAR",
-        gradientStops: stops.map(s => ({ position: s.position, color: s.color })),
-        gradientTransform,
-      };
-      node.fills = [fill];
+      node.fills = gradientPaints(action);
       markDocumentWrite();
       return { before, after: { fills: safeSerialize(node.fills) } };
     }
@@ -1367,6 +1380,7 @@ async function executeAction(
 
     case "create_section": {
       if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design");
+      if ((action.width as number) < 0.01 || (action.height as number) < 0.01) throw new Error("Section dimensions must be at least 0.01");
       const parent = await findNode(action.parentId as string);
       if (parent.type !== "PAGE") throw new Error("Sections must be created on a page");
       const section = figma.createSection();
@@ -1381,6 +1395,7 @@ async function executeAction(
 
     case "resize_section": {
       if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design");
+      if ((action.width as number) < 0.01 || (action.height as number) < 0.01) throw new Error("Section dimensions must be at least 0.01");
       const node = await findNode(action.sectionId as string);
       if (node.type !== "SECTION") throw new Error(`Node ${action.sectionId} is not a section`);
       const before = { width: node.width, height: node.height };
@@ -1477,6 +1492,7 @@ async function executeAction(
       const expectedType = property === "text" ? "TEXT" : property === "effect" ? "EFFECT" : "PAINT";
       const style = await resolveStyle(expectedType, action.styleId, action.styleName);
       const styleId = style.id;
+      if (property === "text") await ensureFonts([(style as TextStyle).fontName]);
       // Figma's dynamic-page document access disallows the sync setters
       // (`node.fillStyleId = x`); the async variants are required.
       if (property === "fill" && "setFillStyleIdAsync" in node) {
@@ -1746,6 +1762,10 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
     await ensureFonts(batch.requiredFonts);
   }
 
+  // Establish a batch-local baseline. Without this boundary triggerUndo()
+  // can roll back writes from an earlier successful bridge message.
+  if (!batch.dryRun && batch.rollbackOnError) figma.commitUndo();
+
   const results: ActionResult[] = [];
   let applied = 0;
   let documentWrites = 0;
@@ -1820,6 +1840,9 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
   if (batch.rollbackOnError && failed > 0 && documentWrites > 0) {
     figma.triggerUndo();
     rollbackApplied = true;
+  } else if (batch.rollbackOnError && documentWrites > 0) {
+    // Close the successful batch as its own undo unit.
+    figma.commitUndo();
   }
 
   return {

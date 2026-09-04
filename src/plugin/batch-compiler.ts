@@ -41,11 +41,9 @@ function referencesInAction(action: Record<string, unknown>): string[] {
     && typeof action.defaultValue === "string" && action.defaultValue.startsWith("$")) {
     references.push(action.defaultValue);
   }
-  if (action.type === "set_component_properties" && action.properties && typeof action.properties === "object") {
-    for (const value of Object.values(action.properties as Record<string, unknown>)) {
-      if (typeof value === "string" && value.startsWith("$")) references.push(value);
-    }
-  }
+  // set_component_properties values are data unless the resolved component
+  // definition says a particular key is INSTANCE_SWAP. That cannot be known
+  // during static preflight, so those references are resolved at execution.
   return references;
 }
 
@@ -139,7 +137,7 @@ export function compileBatch(actions: Action[], options: CompileOptions = {}): C
     }
 
     // Hoist font requirements
-    if (action.type === "create_text") {
+    if (action.type === "create_text" && !action.textStyleId && !action.textStyleName) {
       const family = (action.fontFamily as string) || "Inter";
       const weight = (action.fontWeight as number) || 400;
       const style = WEIGHT_TO_STYLE[Math.round(weight / 100) * 100] || "Regular";

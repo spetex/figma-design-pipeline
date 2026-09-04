@@ -176,14 +176,14 @@ Plans are reviewable: the agent inspects, edits, or filters before sending to `f
 
 `figma_execute` batches up to 500 validated actions into a single round-trip. With the plugin connected, the bridge runs them in-process; without it, you get fallback JS for `use_figma`.
 
-Fallback JavaScript preserves `dryRun`, `stopOnError`, and `rollbackOnError` semantics. Rollback requires the host runtime to expose `figma.triggerUndo`; when `rollbackOnError: true`, the tool returns a structured `fallbackLimitations` entry and the program fails closed before executing any action if that API is unavailable.
+Fallback JavaScript preserves `dryRun`, `stopOnError`, and `rollbackOnError` semantics. Rollback requires the host runtime to expose both `figma.commitUndo` and `figma.triggerUndo`; successful and failed batches use explicit undo boundaries so a failed batch cannot undo an earlier successful one. When `rollbackOnError: true`, the tool returns a structured `fallbackLimitations` entry and fails closed before executing any action if either API is unavailable.
 
 54 action types are available. Highlights:
 
-- **Nodes**: `create_frame`, `create_text`, `create_component`, `create_instance`, `clone_node`, `delete_node`
-- **Layout**: `set_auto_layout`, `set_child_layout_sizing` (FILL / HUG / FIXED), `set_constraints`, `move_node`, `resize_node`
+- **Nodes**: `create_frame`, `create_text`, `create_component_from_node`, `create_instance`, `duplicate_node`, `delete_node`
+- **Layout**: `set_layout_mode`, `set_child_layout_sizing` (FILL / HUG / FIXED), `set_constraints`, `move`, `resize`
 - **Paint/assets**: `set_fills`, `set_strokes`, `set_gradient_fill`, `set_effects`, `set_image_fill`, `create_from_svg`
-- **Type**: `set_text_content`, `set_font`
+- **Type**: `set_text_content`, `set_text_style`, `set_text_properties`
 - **Styles**: `create_paint_style`, `create_text_style`, `create_effect_style`, name-resolved `apply_style`, `update_style`
 - **Variables**: `create_variable_collection`, `create_variable`, name-resolved `bind_variable`, `set_variable_value`
 - **Pages**: `create_page`, `switch_page`
@@ -210,7 +210,9 @@ figma_execute({
 
 Aliases use `as: "name"` and `$name`, and are the recommended stable reference form. `$ref:node-N` remains supported for migration compatibility. Duplicate, malformed, reserved, unknown, self, forward, and cyclic references fail whole-batch preflight before mutation.
 
-Image fills accept exactly one of `imageBase64`, a server-local `path`, or a public HTTP(S) `url`. The server validates formats and enforces a 10 MiB decoded limit before sending bytes to the plugin. URL ingestion times out after 10 seconds, follows at most five redirects, and rejects private, loopback, link-local, and reserved destinations at every hop. SVG creation accepts at most 1 MiB of inert markup and rejects scripts, event handlers, and external resources.
+Image fills accept exactly one of `imageBase64`, a server-local `path`, or a public HTTP(S) `url`. Local paths are disabled until `FIGMA_ASSET_ROOTS` explicitly lists allowed directories (platform-delimiter separated); roots and files are resolved through realpaths, so traversal and symlink escapes are rejected. The server fully validates PNG, JPEG, or GIF structure, checks the Figma API’s 4096×4096 dimension limit, and enforces a 10 MiB decoded limit before transport. WebP is rejected because the installed Plugin API contract does not support it. URL ingestion times out after 10 seconds, follows at most five redirects, and rejects private, loopback, link-local, and reserved destinations at every hop. SVG creation accepts at most 1 MiB of inert markup and rejects scripts, event handlers, and external resources.
+
+`set_gradient_fill` accepts the legacy single-gradient fields or an ordered `gradients` array for layered linear/radial/angular fills. Each gradient may supply either `angle` or an explicit invertible `gradientTransform`. Text styles are applied after loading the resolved style font; on `create_text`, the style is applied first and explicit typography fields override it second. Section width and height must each be at least `0.01`.
 
 Variable and style names are exact matches. Use `collectionName`/`collectionId` and `resolvedType` to disambiguate variables; duplicate matches are errors. Nested instance operations use `childPath`, where every segment must match exactly one direct child.
 

@@ -32,9 +32,59 @@ describe("actionSchema (zod v4)", () => {
     expect(actionSchema.safeParse({ type: "create_text", parentId: "1:1", characters: "Long", maxLines: 2 }).success).toBe(false);
     expect(actionSchema.safeParse({ type: "create_text", parentId: "1:1", characters: "Long", textTruncation: "ENDING", maxLines: 2 }).success).toBe(true);
   });
+
+  it("enforces gradient transforms, API effect fields, and the section 0.01 boundary", () => {
+    const stops = [
+      { position: 0, color: { r: 0, g: 0, b: 0, a: 1 } },
+      { position: 1, color: { r: 1, g: 1, b: 1, a: 1 } },
+    ];
+    expect(actionSchema.safeParse({
+      type: "set_gradient_fill", nodeId: "node", stops, gradientTransform: [[1, 0, 0], [0, 1, 0]],
+    }).success).toBe(true);
+    expect(actionSchema.safeParse({
+      type: "set_gradient_fill", nodeId: "node", stops, gradientTransform: [[0, 0, 0], [0, 0, 0]],
+    }).success).toBe(false);
+    expect(actionSchema.safeParse({
+      type: "set_gradient_fill", nodeId: "node", stops, angle: 10, gradientTransform: [[1, 0, 0], [0, 1, 0]],
+    }).success).toBe(false);
+    expect(actionSchema.safeParse({ type: "set_effects", nodeId: "node", effects: [{ type: "BACKGROUND_BLUR", radius: 4 }] }).success).toBe(true);
+    expect(actionSchema.safeParse({ type: "set_effects", nodeId: "node", effects: [{ type: "BACKGROUND_BLUR", blurType: "PROGRESSIVE", radius: 4 }] }).success).toBe(false);
+    for (const type of ["create_section", "resize_section"] as const) {
+      const base = type === "create_section"
+        ? { type, parentId: "page", name: "Section" }
+        : { type, sectionId: "section" };
+      expect(actionSchema.safeParse({ ...base, width: 0.01, height: 0.01 }).success).toBe(true);
+      expect(actionSchema.safeParse({ ...base, width: 0.009, height: 1 }).success).toBe(false);
+      expect(actionSchema.safeParse({ ...base, width: 1, height: 0 }).success).toBe(false);
+    }
+  });
+
+  it("rejects invalid gradients and section sizes before bridge mutation", async () => {
+    const execute = vi.fn();
+    const bridge = { isConnected: () => true, execute } as unknown as BridgeServer;
+    await expect(handleExecute(bridge, { actions: [{
+      type: "set_gradient_fill", nodeId: "node",
+      stops: [{ position: 0, color: { r: 0, g: 0, b: 0 } }, { position: 1, color: { r: 1, g: 1, b: 1 } }],
+      gradientTransform: [[0, 0, 0], [0, 0, 0]],
+    }] })).rejects.toThrow("gradientTransform");
+    await expect(handleExecute(bridge, { actions: [{
+      type: "create_section", parentId: "page", name: "Too small", width: 0.009, height: 1,
+    }] })).rejects.toThrow("Invalid action 0");
+    await expect(handleExecute(bridge, { actions: [{
+      type: "resize_section", sectionId: "section", width: 1, height: 0.009,
+    }] })).rejects.toThrow("Invalid action 0");
+    expect(execute).not.toHaveBeenCalled();
+  });
 });
 
 describe("symbolic reference preflight", () => {
+  it("does not classify ordinary component-property strings as aliases", () => {
+    const action = actionSchema.parse({
+      type: "set_component_properties", nodeId: "instance", properties: { Price: "$12.00", Empty: "" },
+    });
+    expect(() => compileBatch([action])).not.toThrow();
+  });
+
   it.each([
     ["duplicate", [
       { type: "create_frame", parentId: "1:2", name: "A", as: "same" },
@@ -351,6 +401,7 @@ describe("handleExecute fallback generation", () => {
   });
 
   it("only rolls back fallback batches after document writes, including partial writes", async () => {
+    const commitUndo = vi.fn();
     const triggerUndo = vi.fn();
     const exported = {
       id: "exported",
@@ -369,6 +420,7 @@ describe("handleExecute fallback generation", () => {
     await new AsyncFunction("figma", exportFallback.fallbackJs!)({
       getNodeById: (id: string) => id === "exported" ? exported : undefined,
       base64Encode: () => "AQ==",
+      commitUndo,
       triggerUndo,
     });
     expect(triggerUndo).not.toHaveBeenCalled();
@@ -382,6 +434,7 @@ describe("handleExecute fallback generation", () => {
     });
     await new AsyncFunction("figma", noOpFallback.fallbackJs!)({
       getNodeById: (id: string) => id === "node" ? { id, x: 0, y: 0 } : undefined,
+      commitUndo,
       triggerUndo,
     });
     expect(triggerUndo).not.toHaveBeenCalled();
@@ -398,6 +451,7 @@ describe("handleExecute fallback generation", () => {
     });
     await new AsyncFunction("figma", partialFallback.fallbackJs!)({
       getNodeById: () => partiallyWritable,
+      commitUndo,
       triggerUndo,
     });
     expect(x).toBe(12);
@@ -405,6 +459,7 @@ describe("handleExecute fallback generation", () => {
   });
 
   it("rolls back a partial set_component_properties mutation", async () => {
+    const commitUndo = vi.fn();
     const triggerUndo = vi.fn();
     const applied: Array<Record<string, string | boolean>> = [];
     const node = {
@@ -425,10 +480,11 @@ describe("handleExecute fallback generation", () => {
     });
     const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
       ...args: string[]
-    ) => (figmaApi: { getNodeById: () => typeof node; triggerUndo: typeof triggerUndo }) => Promise<Array<Record<string, unknown>>>;
+    ) => (figmaApi: { getNodeById: () => typeof node; commitUndo: typeof commitUndo; triggerUndo: typeof triggerUndo }) => Promise<Array<Record<string, unknown>>>;
 
     const result = await new AsyncFunction("figma", fallback.fallbackJs!)({
       getNodeById: () => node,
+      commitUndo,
       triggerUndo,
     });
 
@@ -438,6 +494,85 @@ describe("handleExecute fallback generation", () => {
       { type: "rollback", status: "applied" },
     ]));
     expect(triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("isolates a failed fallback batch from a prior successful batch", async () => {
+    let committedName = "Before";
+    const node = { id: "node", name: "Before" };
+    const figma = {
+      getNodeById: (id: string) => id === "node" ? node : undefined,
+      commitUndo: vi.fn(() => { committedName = node.name; }),
+      triggerUndo: vi.fn(() => { node.name = committedName; }),
+    };
+    const first = await handleExecute(null, {
+      actions: [{ type: "rename", nodeId: "node", name: "Successful" }], rollbackOnError: true,
+    });
+    const second = await handleExecute(null, {
+      actions: [
+        { type: "rename", nodeId: "node", name: "Transient" },
+        { type: "rename", nodeId: "missing", name: "Fails" },
+      ], rollbackOnError: true,
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof figma) => Promise<Array<Record<string, unknown>>>;
+
+    await new AsyncFunction("figma", first.fallbackJs!)(figma);
+    await new AsyncFunction("figma", second.fallbackJs!)(figma);
+
+    expect(node.name).toBe("Successful");
+    expect(figma.commitUndo).toHaveBeenCalledTimes(3);
+    expect(figma.triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads resolved text-style fonts and applies explicit create overrides second", async () => {
+    const loaded = new Set<string>();
+    const events: string[] = [];
+    const style = { id: "style", type: "TEXT", name: "Typography/Body", fontName: { family: "Style Family", style: "Regular" } };
+    let currentFont = { family: "Inter", style: "Regular" };
+    const textNode = {
+      id: "text", type: "TEXT", name: "", textAutoResize: "HEIGHT",
+      get fontName() { return currentFont; },
+      set fontName(font: { family: string; style: string }) {
+        if (!loaded.has(`${font.family}|${font.style}`)) throw new Error("font was not loaded");
+        currentFont = font;
+        events.push(`font:${font.family}|${font.style}`);
+      },
+      set characters(value: string) { events.push(`characters:${value}`); },
+      async setTextStyleIdAsync() {
+        if (!loaded.has("Style Family|Regular")) throw new Error("style font was not loaded");
+        currentFont = style.fontName;
+        events.push("style");
+      },
+    };
+    const parent = { id: "parent", appendChild: vi.fn() };
+    const figma = {
+      getNodeById: (id: string) => id === "text" ? textNode : id === "parent" ? parent : undefined,
+      getLocalTextStylesAsync: async () => [style],
+      loadFontAsync: async (font: { family: string; style: string }) => {
+        loaded.add(`${font.family}|${font.style}`);
+        events.push(`load:${font.family}|${font.style}`);
+      },
+      createText: () => textNode,
+    };
+    const apply = await handleExecute(null, {
+      actions: [{ type: "apply_style", nodeId: "text", styleName: "Typography/Body", property: "text" }],
+    });
+    const create = await handleExecute(null, {
+      actions: [{ type: "create_text", parentId: "parent", characters: "Hello", textStyleName: "Typography/Body", fontWeight: 700 }],
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof figma) => Promise<Array<Record<string, unknown>>>;
+
+    await new AsyncFunction("figma", apply.fallbackJs!)(figma);
+    events.length = 0;
+    loaded.clear();
+    await new AsyncFunction("figma", create.fallbackJs!)(figma);
+
+    expect(events).toEqual([
+      "load:Style Family|Regular", "load:Style Family|Bold", "style", "font:Style Family|Bold", "characters:Hello",
+    ]);
   });
 
   it("implements dry-run, continuation, and rollback execution options", async () => {
@@ -453,6 +588,7 @@ describe("handleExecute fallback generation", () => {
     ]);
 
     const node = { id: "node", name: "Before" };
+    const commitUndo = vi.fn();
     const triggerUndo = vi.fn();
     const fallback = await handleExecute(null, {
       actions: [
@@ -464,11 +600,12 @@ describe("handleExecute fallback generation", () => {
     });
     expect(fallback.fallbackLimitations).toEqual([{
       option: "rollbackOnError",
-      condition: "figma.triggerUndo_unavailable",
+      condition: "figma.undo_api_unavailable",
       message: expect.stringContaining("figma.triggerUndo"),
     }]);
     const result = await new AsyncFunction("figma", fallback.fallbackJs!)({
       getNodeById: (id: string) => id === "node" ? node : undefined,
+      commitUndo,
       triggerUndo,
     });
 

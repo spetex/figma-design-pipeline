@@ -239,8 +239,8 @@ Node-producing actions accept \`as\` (for example \`as: "card"\`); later ID fiel
 
 ## Appearance
 - set_fills: { nodeId, fills: [{ type: "SOLID", color: {r,g,b,a} }] }
-- **set_gradient_fill: { nodeId, gradientType: "LINEAR"|"RADIAL"|"ANGULAR", stops: [{position, color}], angle? }**
-- **set_image_fill: { nodeId, exactly one of imageBase64|path|url, scaleMode? }** — server-side validation; PNG/JPEG/WebP/GIF, 10 MiB maximum
+- **set_gradient_fill: { nodeId, legacy gradientType/stops/(angle|gradientTransform), or gradients: [{gradientType, stops, angle?|gradientTransform?}] }** — ordered layered gradients
+- **set_image_fill: { nodeId, exactly one of imageBase64|path|url, scaleMode? }** — PNG/JPEG/GIF, 4096×4096 and 10 MiB maximum; local paths require FIGMA_ASSET_ROOTS
 - **create_from_svg: { parentId, svg, name?, x?, y?, as? }** — inert SVG only, 1 MiB maximum
 - set_strokes: { nodeId, strokes, strokeWeight? }
 - set_effects: { nodeId, effects }

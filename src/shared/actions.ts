@@ -49,8 +49,8 @@ export const createTextActionSchema = z
     parentId: z.string(),
     characters: z.string(),
     name: z.string().optional(),
-    fontFamily: z.string().default("Inter"),
-    fontWeight: z.number().default(400),
+    fontFamily: z.string().min(1).optional(),
+    fontWeight: z.number().min(100).max(900).optional(),
     fontSize: z.number().min(1).optional(),
     lineHeight: z.number().optional(),
     letterSpacing: z.number().optional(),
@@ -294,14 +294,14 @@ const effectColorSchema = z
     g: z.number().min(0).max(1),
     b: z.number().min(0).max(1),
     a: z.number().min(0).max(1).default(1),
-  })
+  }).strict()
   .describe("RGBA color for shadow effects");
 
 const effectOffsetSchema = z
   .object({
     x: z.number().default(0),
     y: z.number().default(0),
-  })
+  }).strict()
   .describe("Offset for shadow effects");
 
 const effectBlendModeSchema = z.enum([
@@ -310,7 +310,9 @@ const effectBlendModeSchema = z.enum([
   "SCREEN",
   "OVERLAY",
   "DARKEN",
+  "LINEAR_BURN",
   "LIGHTEN",
+  "LINEAR_DODGE",
   "COLOR_DODGE",
   "COLOR_BURN",
   "HARD_LIGHT",
@@ -323,32 +325,44 @@ const effectBlendModeSchema = z.enum([
   "LUMINOSITY",
 ]);
 
-const shadowEffectSchema = z
+const shadowEffectBase = {
+  visible: z.boolean().default(true),
+  radius: z.number().min(0).default(0),
+  blendMode: effectBlendModeSchema.default("NORMAL"),
+  color: effectColorSchema.default({ r: 0, g: 0, b: 0, a: 0.25 }),
+  offset: effectOffsetSchema.default({ x: 0, y: 0 }),
+  spread: z.number().optional(),
+};
+
+const dropShadowEffectSchema = z
   .object({
-    type: z.enum(["DROP_SHADOW", "INNER_SHADOW"]),
-    visible: z.boolean().default(true),
-    radius: z.number().min(0).default(0),
-    blendMode: effectBlendModeSchema.default("NORMAL"),
-    color: effectColorSchema.optional(),
-    offset: effectOffsetSchema.optional(),
-    spread: z.number().optional(),
-    showShadowOnly: z.boolean().optional(),
-  })
-  .describe("Shadow effects with optional spread and offset");
+    type: z.literal("DROP_SHADOW"),
+    ...shadowEffectBase,
+    showShadowBehindNode: z.boolean().default(false),
+  }).strict()
+  .describe("Drop shadow effect using the current Figma Plugin API fields");
+
+const innerShadowEffectSchema = z
+  .object({
+    type: z.literal("INNER_SHADOW"),
+    ...shadowEffectBase,
+  }).strict()
+  .describe("Inner shadow effect using the current Figma Plugin API fields");
 
 const blurEffectSchema = z
   .object({
     type: z.enum(["LAYER_BLUR", "BACKGROUND_BLUR"]),
+    blurType: z.literal("NORMAL").default("NORMAL"),
     visible: z.boolean().default(true),
     radius: z.number().min(0).default(0),
-  })
+  }).strict()
   .describe("Blur effects");
 
 export const setEffectsActionSchema = z
   .object({
     type: z.literal("set_effects"),
     nodeId: z.string(),
-    effects: z.array(z.union([shadowEffectSchema, blurEffectSchema])),
+    effects: z.array(z.union([dropShadowEffectSchema, innerShadowEffectSchema, blurEffectSchema])),
   })
   .strict();
 
@@ -426,7 +440,7 @@ export const createEffectStyleActionSchema = z
   .object({
     type: z.literal("create_effect_style"),
     name: z.string().min(1).describe("Style name (use '/' for folders)"),
-    effects: z.array(z.union([shadowEffectSchema, blurEffectSchema])),
+    effects: z.array(z.union([dropShadowEffectSchema, innerShadowEffectSchema, blurEffectSchema])),
     ...aliasField,
   })
   .strict();
@@ -481,21 +495,50 @@ export const switchPageActionSchema = z
 
 // ─── Rich Content Actions ───────────────────────────────────────────
 
+const transformSchema = z.tuple([
+  z.tuple([z.number(), z.number(), z.number()]),
+  z.tuple([z.number(), z.number(), z.number()]),
+]).superRefine((transform, ctx) => {
+  const determinant = transform[0][0] * transform[1][1] - transform[0][1] * transform[1][0];
+  if (Math.abs(determinant) < Number.EPSILON) {
+    ctx.addIssue({ code: "custom", message: "gradientTransform must be invertible" });
+  }
+});
+
+const gradientStopsSchema = z.array(z.object({
+  position: z.number().min(0).max(1),
+  color: z.object({
+    r: z.number().min(0).max(1),
+    g: z.number().min(0).max(1),
+    b: z.number().min(0).max(1),
+    a: z.number().min(0).max(1).default(1),
+  }).strict(),
+}).strict()).min(2);
+
+const gradientSchema = z.object({
+  gradientType: z.enum(["LINEAR", "RADIAL", "ANGULAR"]).default("LINEAR"),
+  stops: gradientStopsSchema,
+  angle: z.number().optional().describe("Angle in degrees; ignored when gradientTransform is supplied"),
+  gradientTransform: transformSchema.optional(),
+  visible: z.boolean().optional(),
+  opacity: z.number().min(0).max(1).optional(),
+  blendMode: effectBlendModeSchema.optional(),
+}).strict().superRefine((gradient, ctx) => {
+  if (gradient.angle !== undefined && gradient.gradientTransform !== undefined) {
+    ctx.addIssue({ code: "custom", message: "gradient accepts angle or gradientTransform, not both" });
+  }
+});
+
 export const setGradientFillActionSchema = z
   .object({
     type: z.literal("set_gradient_fill"),
     nodeId: z.string(),
-    gradientType: z.enum(["LINEAR", "RADIAL", "ANGULAR"]).default("LINEAR"),
-    stops: z.array(z.object({
-      position: z.number().min(0).max(1),
-      color: z.object({
-        r: z.number().min(0).max(1),
-        g: z.number().min(0).max(1),
-        b: z.number().min(0).max(1),
-        a: z.number().min(0).max(1).default(1),
-      }),
-    })).min(2),
+    gradientType: z.enum(["LINEAR", "RADIAL", "ANGULAR"]).optional(),
+    stops: gradientStopsSchema.optional(),
     angle: z.number().optional().describe("Angle in degrees for linear gradients (0 = top to bottom)"),
+    gradientTransform: transformSchema.optional(),
+    gradients: z.array(gradientSchema).min(1).optional()
+      .describe("Ordered gradient fills; use for layered linear/radial scrims"),
   })
   .strict();
 
@@ -641,7 +684,7 @@ export const updateStyleActionSchema = z
       color: z.object({ r: z.number().min(0).max(1), g: z.number().min(0).max(1), b: z.number().min(0).max(1), a: z.number().min(0).max(1).optional() }),
       opacity: z.number().min(0).max(1).optional(),
     })).optional(),
-    effects: z.array(z.union([shadowEffectSchema, blurEffectSchema])).optional(),
+    effects: z.array(z.union([dropShadowEffectSchema, innerShadowEffectSchema, blurEffectSchema])).optional(),
     fontFamily: z.string().min(1).optional(),
     fontWeight: z.number().min(100).max(900).optional(),
     fontSize: z.number().min(1).optional(),
@@ -660,13 +703,13 @@ export const createFromSvgActionSchema = z
 export const createSectionActionSchema = z
   .object({
     type: z.literal("create_section"), parentId: z.string(), name: z.string().min(1),
-    x: z.number().default(0), y: z.number().default(0), width: z.number().positive().default(100),
-    height: z.number().positive().default(100), ...aliasField,
+    x: z.number().default(0), y: z.number().default(0), width: z.number().min(0.01).default(100),
+    height: z.number().min(0.01).default(100), ...aliasField,
   })
   .strict();
 
 export const resizeSectionActionSchema = z
-  .object({ type: z.literal("resize_section"), sectionId: z.string(), width: z.number().positive(), height: z.number().positive() })
+  .object({ type: z.literal("resize_section"), sectionId: z.string(), width: z.number().min(0.01), height: z.number().min(0.01) })
   .strict();
 
 export const moveToSectionActionSchema = z
@@ -760,6 +803,15 @@ export const actionSchema = z.discriminatedUnion("type", [
     }
   };
   if (action.type === "set_image_fill") exactlyOne(["imageBase64", "path", "url"], "set_image_fill");
+  if (action.type === "set_gradient_fill") {
+    exactlyOne(["stops", "gradients"], "set_gradient_fill");
+    if (action.gradients !== undefined && (action.gradientType !== undefined || action.angle !== undefined || action.gradientTransform !== undefined)) {
+      ctx.addIssue({ code: "custom", message: "set_gradient_fill gradients cannot be combined with legacy single-gradient fields" });
+    }
+    if (action.angle !== undefined && action.gradientTransform !== undefined) {
+      ctx.addIssue({ code: "custom", message: "set_gradient_fill accepts angle or gradientTransform, not both" });
+    }
+  }
   if (action.type === "bind_variable" || action.type === "set_variable_value") {
     exactlyOne(["variableId", "variableName"], action.type);
     atMostOne(["collectionId", "collectionName"], action.type);

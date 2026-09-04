@@ -23,7 +23,7 @@ export interface ExecuteResult {
 
 export interface FallbackLimitation {
   option: "rollbackOnError";
-  condition: "figma.triggerUndo_unavailable";
+  condition: "figma.undo_api_unavailable";
   message: string;
 }
 
@@ -86,8 +86,8 @@ export async function handleExecute(
     ...(batch.rollbackOnError ? {
       fallbackLimitations: [{
         option: "rollbackOnError" as const,
-        condition: "figma.triggerUndo_unavailable" as const,
-        message: "Fallback rollback uses figma.triggerUndo. The generated program aborts instead of silently ignoring rollbackOnError when that API is unavailable.",
+        condition: "figma.undo_api_unavailable" as const,
+        message: "Fallback rollback uses figma.commitUndo and figma.triggerUndo. The generated program aborts instead of risking a cross-batch undo when either API is unavailable.",
       }],
     } : {}),
   };
@@ -101,16 +101,16 @@ function generateFallbackJs(
 ): string {
   const lines: string[] = [];
   const fontsNeeded = new Set<string>();
+  const j = JSON.stringify;
 
   for (const action of actions) {
-    if (action.type === "create_text" || action.type === "create_text_style") {
+    if (action.type === "create_text_style" || (action.type === "create_text" && !action.textStyleId && !action.textStyleName)) {
       const weight = action.fontWeight ?? 400;
       const style = weightToStyle(weight);
-      fontsNeeded.add(`await loadFontOnce({ family: "${action.fontFamily}", style: "${style}" });`);
+      fontsNeeded.add(`await loadFontOnce({ family: ${j(action.fontFamily ?? "Inter")}, style: ${j(style)} });`);
     }
   }
 
-  const j = JSON.stringify;
   lines.push(`const executionOptions = ${j(options)};`);
   lines.push("if (executionOptions.dryRun) {");
   lines.push("  return [");
@@ -122,8 +122,8 @@ function generateFallbackJs(
   lines.push("  ];");
   lines.push("}");
   lines.push("");
-  lines.push("if (executionOptions.rollbackOnError && typeof figma.triggerUndo !== \"function\") {");
-  lines.push("  throw new Error(\"Fallback execution environment does not support rollback (figma.triggerUndo).\");");
+  lines.push("if (executionOptions.rollbackOnError && (typeof figma.commitUndo !== \"function\" || typeof figma.triggerUndo !== \"function\")) {");
+  lines.push("  throw new Error(\"Fallback execution environment does not support rollback isolation (figma.commitUndo and figma.triggerUndo are required).\");");
   lines.push("}");
   lines.push("");
   lines.push("const loadedFonts = new Set();");
@@ -213,8 +213,12 @@ function generateFallbackJs(
   lines.push("const findInstanceChild = async (id, path) => { let current = await requireAttachedInstance(id); for (const segment of path) { if (!Array.isArray(current.children)) throw new Error(`Child path cannot descend through ${current.type}`); const matches = current.children.filter(child => child.name === segment); if (!matches.length) throw new Error(`Child path segment not found: ${segment}`); if (matches.length > 1) throw new Error(`Child path segment is ambiguous: ${segment}`); current = matches[0]; } return current; };");
   lines.push("const localStyles = async (type) => type === 'PAINT' ? figma.getLocalPaintStylesAsync() : type === 'TEXT' ? figma.getLocalTextStylesAsync() : figma.getLocalEffectStylesAsync();");
   lines.push("const resolveStyle = async (type, id, name) => { if (id) { const style = await figma.getStyleByIdAsync(resolveRefId(id)); if (!style) throw new Error(`Style not found: ${id}`); if (style.type !== type) throw new Error(`Style ${id} is ${style.type}, not ${type}`); return style; } const matches = (await localStyles(type)).filter(style => style.name === name); if (!matches.length) throw new Error(`Style not found: ${name}`); if (matches.length > 1) throw new Error(`Style name is ambiguous: ${name}`); return matches[0]; };");
+  lines.push("const gradientTransform = (gradient) => { if (gradient.gradientTransform) return gradient.gradientTransform; const angle = (gradient.angle || 0) * Math.PI / 180; return [[Math.cos(angle), Math.sin(angle), 0], [-Math.sin(angle), Math.cos(angle), 0]]; };");
+  lines.push("const gradientPaints = (action) => (action.gradients || [action]).map((gradient) => ({ type: `GRADIENT_${gradient.gradientType || 'LINEAR'}`, gradientStops: gradient.stops, gradientTransform: gradientTransform(gradient), ...(gradient.visible !== undefined ? { visible: gradient.visible } : {}), ...(gradient.opacity !== undefined ? { opacity: gradient.opacity } : {}), ...(gradient.blendMode !== undefined ? { blendMode: gradient.blendMode } : {}) }));");
   lines.push("const resolveVariable = async (action) => { let variable; if (action.variableId) variable = figma.variables.getVariableByIdAsync ? await figma.variables.getVariableByIdAsync(resolveRefId(action.variableId)) : figma.variables.getVariableById(resolveRefId(action.variableId)); else { let candidates = (await figma.variables.getLocalVariablesAsync(action.resolvedType)).filter(item => item.name === action.variableName); if (action.collectionId || action.collectionName) { const collections = await figma.variables.getLocalVariableCollectionsAsync(); const matches = action.collectionId ? collections.filter(item => item.id === resolveRefId(action.collectionId)) : collections.filter(item => item.name === action.collectionName); if (!matches.length) throw new Error(`Variable collection not found: ${action.collectionId || action.collectionName}`); if (matches.length > 1) throw new Error(`Variable collection name is ambiguous: ${action.collectionName}`); candidates = candidates.filter(item => item.variableCollectionId === matches[0].id); } if (!candidates.length) throw new Error(`Variable not found: ${action.variableName}`); if (candidates.length > 1) throw new Error(`Variable name is ambiguous: ${action.variableName}`); variable = candidates[0]; } if (!variable) throw new Error(`Variable not found: ${action.variableId}`); if (action.resolvedType && variable.resolvedType !== action.resolvedType) throw new Error(`Variable ${variable.name} is ${variable.resolvedType}, not ${action.resolvedType}`); return variable; };");
   lines.push("const validateVariableCollection = async (action, variable) => { if (!action.collectionId && !action.collectionName) return; let matches; if (action.collectionId) { const id = resolveRefId(action.collectionId); const collection = figma.variables.getVariableCollectionByIdAsync ? await figma.variables.getVariableCollectionByIdAsync(id) : figma.variables.getVariableCollectionById(id); matches = collection ? [collection] : []; } else matches = (await figma.variables.getLocalVariableCollectionsAsync()).filter(item => item.name === action.collectionName); if (!matches.length) throw new Error(`Variable collection not found: ${action.collectionId || action.collectionName}`); if (matches.length > 1) throw new Error(`Variable collection name is ambiguous: ${action.collectionName}`); if (variable.variableCollectionId !== matches[0].id) throw new Error(`Variable ${variable.name} is not in collection ${matches[0].name}`); };");
+  lines.push("");
+  lines.push("if (executionOptions.rollbackOnError) figma.commitUndo();");
   lines.push("");
 
   for (let i = 0; i < actions.length; i++) {
@@ -252,9 +256,10 @@ function generateFallbackJs(
         lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const f = figma.createFrame(); f.fills = []; markDocumentWrite(); f.name = ${j(a.name)}; f.resize(${a.width}, ${a.height}); parent.appendChild(f); f.x = ${a.x}; f.y = ${a.y}; ${cr("create_frame", "f.id")} }`);
         break;
       case "create_text": {
-        const fam = a.fontFamily || "Inter";
-        const sty = weightToStyle(a.fontWeight || 400);
-        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const textStyle = ${a.textStyleId || a.textStyleName ? `await resolveStyle("TEXT", ${j(a.textStyleId)}, ${j(a.textStyleName)})` : "null"}; await loadFontOnce({ family: "${fam}", style: "${sty}" }); const t = figma.createText(); markDocumentWrite(); t.fontName = { family: "${fam}", style: "${sty}" }; t.characters = ${j(a.characters)}; ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} t.textAutoResize = "${a.textAutoResize || "HEIGHT"}"; ${a.textTruncation ? `t.textTruncation = "${a.textTruncation}";` : ""} ${a.maxLines !== undefined ? `t.maxLines = ${j(a.maxLines)};` : ""} ${a.name ? `t.name = ${j(a.name)};` : ""} parent.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} if (textStyle) await t.setTextStyleIdAsync(textStyle.id); ${cr("create_text", "t.id")} }`);
+        const hasFontOverride = a.fontFamily !== undefined || a.fontWeight !== undefined;
+        const fallbackFamily = a.fontFamily ?? "Inter";
+        const fallbackStyle = a.fontWeight !== undefined ? weightToStyle(a.fontWeight) : "Regular";
+        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const textStyle = ${a.textStyleId || a.textStyleName ? `await resolveStyle("TEXT", ${j(a.textStyleId)}, ${j(a.textStyleName)})` : "null"}; if (textStyle) await loadFontOnce(textStyle.fontName); const family = ${a.fontFamily !== undefined ? j(a.fontFamily) : "textStyle ? textStyle.fontName.family : " + j(fallbackFamily)}; const fontStyle = ${a.fontWeight !== undefined ? j(weightToStyle(a.fontWeight)) : "textStyle ? textStyle.fontName.style : " + j(fallbackStyle)}; if (!textStyle || ${hasFontOverride}) await loadFontOnce({ family, style: fontStyle }); const t = figma.createText(); markDocumentWrite(); if (textStyle) await t.setTextStyleIdAsync(textStyle.id); if (!textStyle || ${hasFontOverride}) t.fontName = { family, style: fontStyle }; t.characters = ${j(a.characters)}; ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} t.textAutoResize = "${a.textAutoResize || "HEIGHT"}"; ${a.textTruncation ? `t.textTruncation = "${a.textTruncation}";` : ""} ${a.maxLines !== undefined ? `t.maxLines = ${j(a.maxLines)};` : ""} ${a.name ? `t.name = ${j(a.name)};` : ""} parent.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} ${cr("create_text", "t.id")} }`);
         break;
       }
       case "delete_node":
@@ -300,7 +305,7 @@ function generateFallbackJs(
         lines.push(`{ ${g(nid)}.fills = sanitizePaints(${j(a.fills)}); markDocumentWrite(); ${r("set_fills")} }`);
         break;
       case "set_gradient_fill":
-        lines.push(`{ const n = ${g(nid)}; const angle = ${(a.angle ?? 0)} * Math.PI / 180; n.fills = [{ type: "GRADIENT_${a.gradientType}", gradientStops: ${j(a.stops)}, gradientTransform: [[Math.cos(angle), Math.sin(angle), 0], [-Math.sin(angle), Math.cos(angle), 0]] }]; markDocumentWrite(); ${r("set_gradient_fill")} }`);
+        lines.push(`{ const n = requireFills(${j(nid)}); n.fills = gradientPaints(${j(a)}); markDocumentWrite(); ${r("set_gradient_fill")} }`);
         break;
       case "set_image_fill":
         lines.push(`{ const n = requireFills(${j(nid)}); const img = figma.createImage(figma.base64Decode(${j(a.imageBase64)})); n.fills = [{ type: "IMAGE", imageHash: img.hash, scaleMode: "${a.scaleMode || "FILL"}" }]; markDocumentWrite(); ${r("set_image_fill")} }`);
@@ -309,10 +314,10 @@ function generateFallbackJs(
         lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const n = figma.createNodeFromSvg(${j(a.svg)}); markDocumentWrite(); ${a.name ? `n.name = ${j(a.name)};` : ""} parent.appendChild(n); n.x = ${a.x}; n.y = ${a.y}; ${cr("create_from_svg", "n.id")} }`);
         break;
       case "create_section":
-        lines.push(`{ if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design"); const parent = requireNode(${j(a.parentId)}); if (parent.type !== "PAGE") throw new Error("Sections must be created on a page"); const s = figma.createSection(); markDocumentWrite(); s.name = ${j(a.name)}; s.resize(${a.width}, ${a.height}); parent.appendChild(s); s.x = ${a.x}; s.y = ${a.y}; ${cr("create_section", "s.id")} }`);
+        lines.push(`{ if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design"); if (${a.width} < 0.01 || ${a.height} < 0.01) throw new Error("Section dimensions must be at least 0.01"); const parent = requireNode(${j(a.parentId)}); if (parent.type !== "PAGE") throw new Error("Sections must be created on a page"); const s = figma.createSection(); markDocumentWrite(); s.name = ${j(a.name)}; s.resize(${a.width}, ${a.height}); parent.appendChild(s); s.x = ${a.x}; s.y = ${a.y}; ${cr("create_section", "s.id")} }`);
         break;
       case "resize_section":
-        lines.push(`{ if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design"); const s = requireNode(${j(a.sectionId)}); if (s.type !== "SECTION") throw new Error("Node is not a section"); s.resize(${a.width}, ${a.height}); markDocumentWrite(); results.push({ type: "resize_section", nodeId: s.id }); }`);
+        lines.push(`{ if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design"); if (${a.width} < 0.01 || ${a.height} < 0.01) throw new Error("Section dimensions must be at least 0.01"); const s = requireNode(${j(a.sectionId)}); if (s.type !== "SECTION") throw new Error("Node is not a section"); s.resize(${a.width}, ${a.height}); markDocumentWrite(); results.push({ type: "resize_section", nodeId: s.id }); }`);
         break;
       case "move_to_section":
         lines.push(`{ if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design"); const n = requireSceneNode(${j(nid)}); const s = requireNode(${j(a.sectionId)}); if (s.type !== "SECTION") throw new Error("Node is not a section"); if (["SECTION", "PAGE", "DOCUMENT"].includes(n.type)) throw new Error(n.type + " nodes cannot be moved into sections"); ${a.insertIndex !== undefined ? `if (${a.insertIndex} > s.children.length) throw new Error("insertIndex exceeds section child count");` : ""} let ancestor = s; while (ancestor && ancestor.parent) { if (ancestor.id === n.id) throw new Error("Cannot move a node into its own descendant"); ancestor = ancestor.parent; } ${a.insertIndex !== undefined ? `s.insertChild(${a.insertIndex}, n);` : "s.appendChild(n);"} markDocumentWrite(); ${r("move_to_section")} }`);
@@ -382,7 +387,7 @@ function generateFallbackJs(
         lines.push(`{ const s = figma.createEffectStyle(); markDocumentWrite(); s.name = ${j(a.name)}; s.effects = ${j(a.effects)}; ${cr("create_effect_style", "s.id")} }`);
         break;
       case "apply_style":
-        lines.push(`{ const n = ${g(nid)}; const style = await resolveStyle(${j(a.property === "text" ? "TEXT" : a.property === "effect" ? "EFFECT" : "PAINT")}, ${j(a.styleId)}, ${j(a.styleName)}); const styleId = style.id; ${a.property === "fill" ? "await n.setFillStyleIdAsync(styleId);" : a.property === "stroke" ? "await n.setStrokeStyleIdAsync(styleId);" : a.property === "text" ? "await n.setTextStyleIdAsync(styleId);" : "await n.setEffectStyleIdAsync(styleId);"} markDocumentWrite(); ${r("apply_style")} }`);
+        lines.push(`{ const n = ${g(nid)}; const style = await resolveStyle(${j(a.property === "text" ? "TEXT" : a.property === "effect" ? "EFFECT" : "PAINT")}, ${j(a.styleId)}, ${j(a.styleName)}); const styleId = style.id; ${a.property === "text" ? "await loadFontOnce(style.fontName);" : ""} ${a.property === "fill" ? "await n.setFillStyleIdAsync(styleId);" : a.property === "stroke" ? "await n.setStrokeStyleIdAsync(styleId);" : a.property === "text" ? "await n.setTextStyleIdAsync(styleId);" : "await n.setEffectStyleIdAsync(styleId);"} markDocumentWrite(); ${r("apply_style")} }`);
         break;
       case "update_style": {
         const textUpdates = a.fontFamily !== undefined || a.fontWeight !== undefined || a.fontSize !== undefined || a.lineHeight !== undefined || a.letterSpacing !== undefined;
@@ -427,6 +432,8 @@ function generateFallbackJs(
   lines.push("if (executionOptions.rollbackOnError && failed && documentWrites > 0) {");
   lines.push("  figma.triggerUndo();");
   lines.push("  results.push({ type: \"rollback\", status: \"applied\" });");
+  lines.push("} else if (executionOptions.rollbackOnError && documentWrites > 0) {");
+  lines.push("  figma.commitUndo();");
   lines.push("}");
   lines.push("return results;");
   return lines.join("\n");

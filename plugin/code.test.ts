@@ -12,6 +12,7 @@ type PluginFigma = {
   ui: { onmessage?: (message: { type: string; data?: unknown }) => Promise<void>; postMessage: ReturnType<typeof vi.fn> };
   on: ReturnType<typeof vi.fn>;
   getNodeByIdAsync: (id: string) => Promise<unknown>;
+  commitUndo: ReturnType<typeof vi.fn>;
   triggerUndo: ReturnType<typeof vi.fn>;
   loadAllPagesAsync: ReturnType<typeof vi.fn>;
   loadFontAsync?: (font: { family: string; style: string }) => Promise<void>;
@@ -64,6 +65,7 @@ function baseFigma(getNodeByIdAsync: PluginFigma["getNodeByIdAsync"]): PluginFig
     ui: { postMessage: vi.fn() },
     on: vi.fn(),
     getNodeByIdAsync,
+    commitUndo: vi.fn(),
     triggerUndo: vi.fn(),
     loadAllPagesAsync: vi.fn().mockResolvedValue(undefined),
   };
@@ -571,6 +573,88 @@ describe("connected plugin batch execution", () => {
     expect(figma.triggerUndo).toHaveBeenCalledTimes(1);
   });
 
+  it("isolates a failed second batch from a successful first batch", async () => {
+    let committedName = "Before";
+    let currentName = "Before";
+    const node = {
+      id: "node", type: "RECTANGLE", parent: { id: "parent" },
+      get name() { return currentName; },
+      set name(value: string) { currentName = value; },
+    };
+    const figma = baseFigma(async (id) => id === "node" ? node : null);
+    figma.commitUndo.mockImplementation(() => { committedName = currentName; });
+    figma.triggerUndo.mockImplementation(() => { currentName = committedName; });
+
+    vi.resetModules();
+    vi.stubGlobal("figma", figma);
+    vi.stubGlobal("__html__", "");
+    await import("./code.js");
+    await figma.ui.onmessage!({ type: "bridge_message", data: { type: "batch", ...batch([
+      { type: "rename", nodeId: "node", name: "Successful" },
+    ]) } });
+    await figma.ui.onmessage!({ type: "bridge_message", data: { type: "batch", ...batch([
+      { type: "rename", nodeId: "node", name: "Transient" },
+      { type: "rename", nodeId: "missing", name: "Fails" },
+    ]) } });
+
+    expect(currentName).toBe("Successful");
+    expect(figma.commitUndo).toHaveBeenCalledTimes(3);
+    expect(figma.triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads a name-resolved text style font before applying it", async () => {
+    const loaded = new Set<string>();
+    const setTextStyleIdAsync = vi.fn(async () => {
+      if (!loaded.has("Style Family|Regular")) throw new Error("style font was not loaded");
+    });
+    const figma = baseFigma(async () => ({ id: "text", type: "TEXT", parent: { id: "parent" }, setTextStyleIdAsync }));
+    figma.loadFontAsync = async (font) => { loaded.add(`${font.family}|${font.style}`); };
+    (figma as unknown as { getLocalTextStylesAsync: () => Promise<unknown[]> }).getLocalTextStylesAsync = async () => [{
+      id: "style", type: "TEXT", name: "Typography/Body", fontName: { family: "Style Family", style: "Regular" },
+    }];
+
+    const result = await runPlugin(figma, [{ type: "apply_style", nodeId: "text", styleName: "Typography/Body", property: "text" }]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(setTextStyleIdAsync).toHaveBeenCalledWith("style");
+  });
+
+  it("applies a text style before explicit create_text typography overrides", async () => {
+    const events: string[] = [];
+    const loaded = new Set<string>();
+    let currentFont = { family: "Inter", style: "Regular" };
+    const text = {
+      id: "created", type: "TEXT", parent: { id: "parent" }, name: "", textAutoResize: "HEIGHT",
+      get fontName() { return currentFont; },
+      set fontName(font: { family: string; style: string }) {
+        if (!loaded.has(`${font.family}|${font.style}`)) throw new Error("override font was not loaded");
+        currentFont = font;
+        events.push(`font:${font.family}|${font.style}`);
+      },
+      set characters(value: string) { events.push(`characters:${value}`); },
+      async setTextStyleIdAsync() {
+        if (!loaded.has("Style Family|Regular")) throw new Error("style font was not loaded");
+        currentFont = { family: "Style Family", style: "Regular" };
+        events.push("style");
+      },
+    };
+    const figma = baseFigma(async () => ({ id: "parent", appendChild: vi.fn() }));
+    figma.loadFontAsync = async (font) => { loaded.add(`${font.family}|${font.style}`); events.push(`load:${font.family}|${font.style}`); };
+    figma.createText = vi.fn(() => text);
+    (figma as unknown as { getLocalTextStylesAsync: () => Promise<unknown[]> }).getLocalTextStylesAsync = async () => [{
+      id: "style", type: "TEXT", name: "Typography/Body", fontName: { family: "Style Family", style: "Regular" },
+    }];
+
+    const result = await runPlugin(figma, [{
+      type: "create_text", parentId: "parent", characters: "Hello", textStyleName: "Typography/Body", fontWeight: 700,
+    }]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(events).toEqual([
+      "load:Style Family|Regular", "load:Style Family|Bold", "style", "font:Style Family|Bold", "characters:Hello",
+    ]);
+  });
+
   it.each([
     {
       label: "a non-container frame parent",
@@ -907,6 +991,7 @@ function createBehavioralFigma() {
     createImage: (...args: unknown[]) => { recordCall("figma", "createImage", ...args); return { hash: "image" }; },
     base64Decode: (...args: unknown[]) => { recordCall("figma", "base64Decode", ...args); return new Uint8Array([1]); },
     base64Encode: (...args: unknown[]) => { recordCall("figma", "base64Encode", ...args); return "AQ=="; },
+    commitUndo: vi.fn(),
     triggerUndo: vi.fn(),
     getStyleByIdAsync: async (id: string) => styles.get(id) ?? null,
     getLocalPaintStylesAsync: async () => [...styles.values()].filter((style) => style.type === "PAINT"),
@@ -1161,6 +1246,100 @@ describe("stable named references", () => {
 });
 
 describe("deterministic write resolvers", () => {
+  it("preserves dollar-prefixed text properties while resolving INSTANCE_SWAP values", async () => {
+    const actions = [
+      { type: "duplicate_node", nodeId: "component", targetParentId: "parent", as: "icon" },
+      { type: "set_component_properties", nodeId: "instance", properties: { Label: "$price", Icon: "$icon" } },
+    ];
+    for (const mode of ["fallback", "connected"] as const) {
+      const environment = createBehavioralFigma();
+      environment.nodes.get("component")!.componentPropertyDefinitions = {
+        "Label#1": { type: "TEXT", defaultValue: "" },
+        "Icon#3": { type: "INSTANCE_SWAP", defaultValue: "component" },
+      };
+      environment.trace.length = 0;
+      if (mode === "fallback") {
+        const generated = await handleExecute(null, { actions });
+        const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+          ...args: string[]
+        ) => (figmaApi: typeof environment.figma) => Promise<unknown>;
+        await new AsyncFunction("figma", generated.fallbackJs!)(environment.figma);
+      } else {
+        const result = await runPlugin(environment.figma as unknown as PluginFigma, actions);
+        expect(result.summary).toMatchObject({ applied: 2, failed: 0 });
+      }
+      expect(environment.trace).toContain('call:instance.setProperties:[{"Label#1":"$price"}]');
+      expect(environment.trace).toContain('call:instance.setProperties:[{"Icon#3":"clone"}]');
+    }
+  });
+
+  it("applies layered linear and radial gradients with explicit transforms in both paths", async () => {
+    const action = {
+      type: "set_gradient_fill", nodeId: "node",
+      gradients: [
+        {
+          gradientType: "LINEAR", stops: [
+            { position: 0, color: { r: 0, g: 0, b: 0, a: 0.8 } },
+            { position: 1, color: { r: 0, g: 0, b: 0, a: 0 } },
+          ], gradientTransform: [[1, 0, 0], [0, 1, 0]],
+        },
+        {
+          gradientType: "RADIAL", stops: [
+            { position: 0, color: { r: 1, g: 1, b: 1, a: 0.4 } },
+            { position: 1, color: { r: 1, g: 1, b: 1, a: 0 } },
+          ], gradientTransform: [[0.5, 0, 0.25], [0, 0.5, 0.25]], opacity: 0.75,
+        },
+      ],
+    };
+    const fallback = createBehavioralFigma();
+    const generated = await handleExecute(null, { actions: [action] });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<unknown>;
+    await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+    const connected = createBehavioralFigma();
+    const result = await runPlugin(connected.figma as unknown as PluginFigma, [action]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(connected.nodes.get("node")!.fills).toEqual(fallback.nodes.get("node")!.fills);
+    expect(connected.nodes.get("node")!.fills).toMatchObject([
+      { type: "GRADIENT_LINEAR", gradientTransform: [[1, 0, 0], [0, 1, 0]] },
+      { type: "GRADIENT_RADIAL", gradientTransform: [[0.5, 0, 0.25], [0, 0.5, 0.25]], opacity: 0.75 },
+    ]);
+  });
+
+  it("normalizes effects to the installed Figma API contract in both paths", async () => {
+    const action = {
+      type: "set_effects", nodeId: "node", effects: [
+        { type: "DROP_SHADOW", radius: 8 },
+        { type: "BACKGROUND_BLUR", radius: 12 },
+      ],
+    };
+    const parsed = actionSchema.parse(action);
+    expect(parsed.effects).toEqual([
+      {
+        type: "DROP_SHADOW", radius: 8, visible: true, blendMode: "NORMAL",
+        color: { r: 0, g: 0, b: 0, a: 0.25 }, offset: { x: 0, y: 0 },
+        showShadowBehindNode: false,
+      },
+      { type: "BACKGROUND_BLUR", blurType: "NORMAL", radius: 12, visible: true },
+    ]);
+    expect(actionSchema.safeParse({ ...action, effects: [{ type: "DROP_SHADOW", radius: 8, showShadowOnly: true }] }).success).toBe(false);
+
+    const fallback = createBehavioralFigma();
+    const generated = await handleExecute(null, { actions: [action] });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<unknown>;
+    await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+    const connected = createBehavioralFigma();
+    const result = await runPlugin(connected.figma as unknown as PluginFigma, [action]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(connected.nodes.get("node")!.effects).toEqual(fallback.nodes.get("node")!.effects);
+    expect(connected.nodes.get("node")!.effects).toEqual(parsed.effects);
+  });
+
   it("rejects ambiguous childPath segments without changing either child", async () => {
     const environment = createBehavioralFigma();
     const first = environment.nodes.get("instance-label")!;

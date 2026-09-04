@@ -1,11 +1,12 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { actionSchema, type Action } from "../shared/actions.js";
-import { MAX_IMAGE_BYTES, preprocessActions, validateSvg } from "./assets.js";
+import { IMAGE_FIXTURES } from "./__fixtures__/images.js";
+import { MAX_IMAGE_BYTES, inspectImage, preprocessActions, validateSvg } from "./assets.js";
 
-const PNG = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const PNG = Buffer.from(IMAGE_FIXTURES.png, "base64");
 const tempDirectories: string[] = [];
 
 afterEach(async () => {
@@ -28,28 +29,56 @@ describe("asset preprocessing", () => {
     const path = join(directory, "pixel.png");
     await writeFile(path, PNG);
 
-    const [processed] = await preprocessActions([imageAction({ path })]);
+    const [processed] = await preprocessActions([imageAction({ path })], { assetRoots: [directory] });
 
     expect(processed).toMatchObject({ type: "set_image_fill", imageBase64: PNG.toString("base64") });
     expect(processed).not.toHaveProperty("path");
     expect(processed).not.toHaveProperty("url");
   });
 
-  it.each([
-    ["PNG", PNG],
-    ["JPEG", Buffer.from([0xff, 0xd8, 0xff])],
-    ["GIF", Buffer.from("GIF89a", "ascii")],
-    ["WebP", Buffer.from("RIFF0000WEBP", "ascii")],
-  ])("accepts bounded %s image bytes", async (_label, bytes) => {
+  it.each(Object.entries(IMAGE_FIXTURES))("accepts complete 1x1 %s image bytes", async (_label, encoded) => {
+    const bytes = Buffer.from(encoded, "base64");
     const [processed] = await preprocessActions([imageAction({ imageBase64: bytes.toString("base64") })]);
     expect(processed).toMatchObject({ imageBase64: bytes.toString("base64") });
+    expect(inspectImage(bytes)).toMatchObject({ width: 1, height: 1 });
   });
 
-  it("rejects invalid, oversized, unreadable, and private-network image sources", async () => {
-    await expect(preprocessActions([imageAction({ imageBase64: "AQID" })])).rejects.toThrow("not PNG, JPEG, WebP, or GIF");
+  it.each(Object.entries(IMAGE_FIXTURES))("rejects truncated %s image content", async (_label, encoded) => {
+    const bytes = Buffer.from(encoded, "base64");
+    await expect(preprocessActions([imageAction({ imageBase64: bytes.subarray(0, -1).toString("base64") })]))
+      .rejects.toThrow();
+  });
+
+  it("rejects corrupt, truncated, oversized-byte, oversized-dimension, WebP, and private-network sources", async () => {
+    const corrupt = Buffer.from(PNG);
+    corrupt[corrupt.length - 5] ^= 0xff;
+    const oversizedDimensions = Buffer.from(PNG);
+    oversizedDimensions.writeUInt32BE(4097, 16);
+    await expect(preprocessActions([imageAction({ imageBase64: corrupt.toString("base64") })])).rejects.toThrow("checksum");
+    await expect(preprocessActions([imageAction({ imageBase64: PNG.subarray(0, -1).toString("base64") })])).rejects.toThrow("PNG");
+    await expect(preprocessActions([imageAction({ imageBase64: oversizedDimensions.toString("base64") })])).rejects.toThrow("4096x4096");
+    await expect(preprocessActions([imageAction({ imageBase64: Buffer.from("RIFF0000WEBP", "ascii").toString("base64") })])).rejects.toThrow("WebP is not supported");
+    await expect(preprocessActions([imageAction({ imageBase64: "AQID" })])).rejects.toThrow("supported PNG, JPEG, or GIF");
     await expect(preprocessActions([imageAction({ imageBase64: Buffer.alloc(MAX_IMAGE_BYTES + 1, 1).toString("base64") })])).rejects.toThrow("10 MiB");
-    await expect(preprocessActions([imageAction({ path: "/definitely/missing/image.png" })])).rejects.toThrow("Action 0");
     await expect(preprocessActions([imageAction({ url: "http://127.0.0.1/image.png" })])).rejects.toThrow("private");
+  });
+
+  it("requires configured roots and rejects traversal and symlink escapes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "figma-assets-root-"));
+    const outside = await mkdtemp(join(tmpdir(), "figma-assets-outside-"));
+    tempDirectories.push(root, outside);
+    await writeFile(join(root, "pixel.png"), PNG);
+    await writeFile(join(outside, "outside.png"), PNG);
+    await symlink(join(outside, "outside.png"), join(root, "escape.png"));
+
+    await expect(preprocessActions([imageAction({ path: join(root, "pixel.png") })], { assetRoots: [] }))
+      .rejects.toThrow("FIGMA_ASSET_ROOTS");
+    await expect(preprocessActions([imageAction({ path: "../" + outside.split("/").at(-1) + "/outside.png" })], { assetRoots: [root] }))
+      .rejects.toThrow("escapes");
+    await expect(preprocessActions([imageAction({ path: join(root, "escape.png") })], { assetRoots: [root] }))
+      .rejects.toThrow("escapes");
+    await expect(preprocessActions([imageAction({ path: "pixel.png" })], { assetRoots: [root] }))
+      .resolves.toEqual([expect.objectContaining({ imageBase64: IMAGE_FIXTURES.png })]);
   });
 
   it("accepts inert SVG and rejects active or externally referenced SVG before transport", () => {

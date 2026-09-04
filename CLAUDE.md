@@ -84,6 +84,7 @@ Passed via MCP client config:
 - `FIGMA_ACCESS_TOKEN` (optional) — Figma personal access token for REST API analysis tools
 - `FIGMA_FILE_KEY` — Default file key
 - `FIGMA_PLUGIN_PORT` — WebSocket bridge port (default: 4010, scans 4010-4014)
+- `FIGMA_ASSET_ROOTS` — Required allowlist for server-local image paths, separated by the platform path delimiter (`:` on Unix, `;` on Windows)
 - `COMPONENT_REGISTRY_DIR` — Component registry dir (default: `$CWD/registry`)
 
 ## Release

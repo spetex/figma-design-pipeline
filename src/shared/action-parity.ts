@@ -48,7 +48,7 @@ export const ACTION_OPERATIONS = {
   set_min_max_size: operation("nodeId", "minWidth", "maxWidth", "minHeight", "maxHeight"),
   create_page: operation("name", "as"),
   switch_page: operation("pageId"),
-  set_gradient_fill: operation("nodeId", "gradientType", "stops", "angle"),
+  set_gradient_fill: operation("nodeId", "gradientType", "stops", "angle", "gradientTransform", "gradients"),
   set_image_fill: operation("nodeId", "imageBase64", "path", "url", "scaleMode"),
   set_text_properties: operation("nodeId", "textAlignHorizontal", "textAlignVertical", "paragraphSpacing", "textCase", "textDecoration", "textAutoResize"),
   apply_style: operation("nodeId", "styleId", "styleName", "property"),

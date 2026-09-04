@@ -115,13 +115,17 @@ The plugin runs inside Figma's sandboxed environment and can only access the cur
 
 ### Asset ingestion
 
-`set_image_fill` reads local paths in the MCP server process, so only pass paths
-that the server account is already authorized to read. HTTP(S) ingestion pins
+`set_image_fill` rejects local paths unless `FIGMA_ASSET_ROOTS` explicitly
+allowlists one or more directories (using the platform path delimiter). Both
+roots and candidate files are resolved with `realpath`; traversal and symlink
+escapes are rejected before reading. HTTP(S) ingestion pins
 each connection to DNS answers checked immediately beforehand and rejects
 loopback, private, link-local, multicast, and reserved addresses on the initial
 request and every redirect. Requests have a 10-second deadline and five-
-redirect maximum. Decoded PNG, JPEG, WebP, and GIF payloads are capped at
-10 MiB before plugin transport.
+redirect maximum. Decoded PNG, JPEG, and GIF payloads are structurally
+validated, capped at 10 MiB and 4096×4096 pixels, and checked against declared
+HTTP content types before plugin transport. WebP is rejected because the
+installed Figma Plugin API contract only accepts PNG, JPEG, and GIF.
 
 `create_from_svg` accepts at most 1 MiB of UTF-8 markup and rejects document
 types/entities, scripts, event handlers, foreign content, CSS imports, and
