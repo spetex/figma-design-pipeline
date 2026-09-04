@@ -4,6 +4,8 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-04
+
 ### Added
 - `figma_get_tree`, `figma_find_nodes`, and `figma_get_components` now support bounded, token-free plugin inspection with exact file-key identity, node/current-page/selection roots, exact or regex name and type filtering, component-set discovery, correlated concurrent reads, and guarded chunked responses. `source: auto` prefers the matching plugin while preserving REST fallback; plugin reads never write or alter inspection caches.
 - Expanded `figma_execute` from 43 to 54 actions for design-system construction: component-property references, exact-path nested instance text/visibility/swap overrides, variable value updates, style updates/copies, safe SVG creation, sections, and bounded ON_CLICK prototype reactions.

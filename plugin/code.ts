@@ -2166,7 +2166,7 @@ figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
       type: "send_to_bridge",
       data: {
         type: "handshake",
-        pluginVersion: "2.1.0",
+        pluginVersion: "0.9.0",
         fileKey: figma.fileKey,
         pageId: figma.currentPage.id,
         pageName: figma.currentPage.name,
