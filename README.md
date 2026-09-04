@@ -8,7 +8,7 @@
 
 AI design assistant for Figma. Analyze websites, create design systems, design pages and dashboards, sync tokens, and generate production code — all from your terminal.
 
-Works with **Claude Code**, **Codex CLI**, and **Gemini CLI**. Uses the official Figma MCP for full read/write Figma access, plus a high-performance plugin for 30-60x faster writes.
+Works with **Claude Code**, **Codex CLI**, and **Gemini CLI**. Uses the official Figma MCP for full read/write Figma access, plus a high-performance plugin for local inspection and 30-60x faster writes.
 
 ## What you can do
 
@@ -43,12 +43,12 @@ AI Agent (Claude Code / Codex / Gemini)
     │
     ├─ This MCP Server ─────→ Design intelligence (analysis, planning, codegen)
     │       ↕ WebSocket (ports 4010-4014)
-    │   Figma plugin ─────→ Batch executor (43 action types, 30-60x faster)
+    │   Figma plugin ─────→ Local inspection + batch executor (43 action types)
     │
     └─ Browser tools ───────→ Website capture & analysis
 ```
 
-The official Figma MCP handles Figma reads and file creation via OAuth — no personal access token needed. This MCP server adds design intelligence (inspection, auditing, planning, token sync, code generation) plus the plugin bridge for batched writes.
+The official Figma MCP handles general Figma access and file creation via OAuth. This MCP server adds design intelligence (inspection, auditing, planning, token sync, code generation); its plugin bridge can inspect the exact open file without a personal access token and execute fast batched writes.
 
 ## What's new
 

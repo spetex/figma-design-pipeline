@@ -170,6 +170,7 @@ export interface EnrichedNode {
   classification: NodeClassification;
   depth: number;
   childCount: number;
+  visible?: boolean;
   bounds?: FigmaAbsoluteBoundingBox;
   absoluteTransform?: FigmaTransform;
   tokens: DesignToken[];
@@ -303,14 +304,31 @@ const figmaUrlField = z
     "Extracts file key and node ID automatically. Once set, persists for the session."
   );
 
+const inspectionSourceField = z
+  .enum(["auto", "plugin", "rest"])
+  .default("auto")
+  .describe("Read source: auto prefers an exactly matching connected plugin and otherwise uses REST");
+
+const inspectionRootField = z
+  .enum(["node", "current-page", "selection"])
+  .default("node")
+  .describe("Plugin read root. current-page and selection are available only through the plugin path");
+
+const inspectionTimeoutField = z.number().int().min(100).max(120000).default(30000)
+  .describe("Plugin read timeout in milliseconds");
+
 // ─── Tool Input Schemas (Zod) ────────────────────────────────────────
 
 export const getTreeInputSchema = z.object({
   figmaUrl: figmaUrlField,
   nodeId: z.string().optional().describe("Figma node ID (e.g., '1817:2817'). Auto-extracted from figmaUrl if provided."),
-  depth: z.number().int().min(1).max(20).default(10).describe("Maximum REST traversal depth relative to the requested root (root is depth 0)"),
+  source: inspectionSourceField,
+  root: inspectionRootField,
+  depth: z.number().int().min(0).max(20).default(10).describe("Maximum traversal depth relative to the requested root (root is depth 0)"),
+  limit: z.number().int().min(1).max(1000).default(500).describe("Maximum real nodes returned by plugin inspection"),
+  timeoutMs: inspectionTimeoutField,
   childOffset: z.number().int().min(0).default(0).describe("Direct-child offset from a prior response's directChildren.nextOffset continuation"),
-  includeStyles: z.boolean().default(true).describe("Include style/token information"),
+  includeStyles: z.boolean().default(true).describe("Include style/token information on REST reads; plugin reads return the safe structural inspection subset"),
   refresh: z.boolean().default(false).describe("Bypass the inspection snapshot and make a new Figma REST request. This does not guarantee Figma REST has observed a just-made plugin edit."),
   maxAgeMs: z.number().int().min(0).optional().describe("Maximum acceptable inspection snapshot age in milliseconds. Set to 0 to bypass the snapshot, like refresh: true."),
 });
@@ -411,6 +429,9 @@ export const exportImagesInputSchema = z.object({
 export const findNodesInputSchema = z.object({
   figmaUrl: figmaUrlField,
   nodeId: z.string().optional().describe("Root node ID to search within. Auto-extracted from figmaUrl if provided."),
+  source: inspectionSourceField,
+  root: inspectionRootField,
+  name: z.string().optional().describe("Exact, case-sensitive node name"),
   namePattern: z.string().optional().describe("Regex pattern to match node names (case-insensitive)"),
   type: z.string().optional().describe("Figma node type filter (e.g., 'FRAME', 'INSTANCE', 'TEXT', 'COMPONENT')"),
   classification: z
@@ -429,13 +450,20 @@ export const findNodesInputSchema = z.object({
   minHeight: z.number().optional().describe("Minimum node height in pixels"),
   maxHeight: z.number().optional().describe("Maximum node height in pixels"),
   limit: z.number().int().min(1).max(200).default(50).describe("Maximum matches to return; the response reports matchLimit and sets truncated only when an additional match exists"),
-  depth: z.number().int().min(1).max(20).default(10).describe("Maximum REST traversal depth relative to the searched root (root is depth 0); echoed as traversalDepth"),
+  depth: z.number().int().min(0).max(20).default(10).describe("Maximum traversal depth relative to the searched root (root is depth 0); echoed as traversalDepth"),
+  timeoutMs: inspectionTimeoutField,
   refresh: z.boolean().default(false).describe("Bypass the inspection snapshot and make a new Figma REST request. This does not guarantee Figma REST has observed a just-made plugin edit."),
   maxAgeMs: z.number().int().min(0).optional().describe("Maximum acceptable inspection snapshot age in milliseconds. Set to 0 to bypass the snapshot, like refresh: true."),
 });
 
 export const getComponentsInputSchema = z.object({
   figmaUrl: figmaUrlField,
+  nodeId: z.string().optional().describe("Root node ID to search below. Auto-extracted from figmaUrl if provided."),
+  source: inspectionSourceField,
+  root: inspectionRootField,
+  depth: z.number().int().min(0).max(20).default(20).describe("Maximum plugin traversal depth relative to the root"),
+  limit: z.number().int().min(1).max(1000).default(200).describe("Maximum component and component-set nodes returned"),
+  timeoutMs: inspectionTimeoutField,
 });
 
 export const getStylesInputSchema = z.object({

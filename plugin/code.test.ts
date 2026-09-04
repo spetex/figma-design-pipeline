@@ -5,6 +5,7 @@ import { actionSchema } from "../src/shared/actions.js";
 import { handleExecute } from "../src/tools/plugin/execute.js";
 
 type PluginFigma = {
+  fileKey?: string;
   currentPage: { id: string; name: string; selection: unknown[] };
   root: { name: string };
   showUI: ReturnType<typeof vi.fn>;
@@ -56,6 +57,7 @@ async function runPlugin(
 
 function baseFigma(getNodeByIdAsync: PluginFigma["getNodeByIdAsync"]): PluginFigma {
   return {
+    fileKey: "file-a",
     currentPage: { id: "page", name: "Page", selection: [] },
     root: { name: "Document" },
     showUI: vi.fn(),
@@ -65,6 +67,33 @@ function baseFigma(getNodeByIdAsync: PluginFigma["getNodeByIdAsync"]): PluginFig
     triggerUndo: vi.fn(),
     loadAllPagesAsync: vi.fn().mockResolvedValue(undefined),
   };
+}
+
+async function runPluginRead(
+  figma: PluginFigma,
+  request: Record<string, unknown>
+) {
+  vi.resetModules();
+  vi.stubGlobal("figma", figma);
+  vi.stubGlobal("__html__", "");
+  await import("./code.js");
+  await figma.ui.onmessage!({
+    type: "bridge_message",
+    data: {
+      type: "read_request",
+      requestId: "read-1",
+      operation: "tree",
+      fileKey: "file-a",
+      root: "node",
+      nodeId: "root",
+      depth: 2,
+      limit: 50,
+      ...request,
+    },
+  });
+  return figma.ui.postMessage.mock.calls.find(
+    ([message]) => message.type === "send_to_bridge" && message.data.type === "read_response"
+  )?.[0].data;
 }
 
 afterEach(() => {
@@ -136,6 +165,135 @@ describe("plugin startup", () => {
     expect(figma.showUI).toHaveBeenCalledTimes(1);
     expect(figma.ui.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "ui_status" }));
     expect(figma.on).not.toHaveBeenCalledWith("documentchange", expect.any(Function));
+  });
+});
+
+describe("connected plugin read inspection", () => {
+  function inspectionFigma() {
+    const text = {
+      id: "text",
+      name: "Button label",
+      type: "TEXT",
+      visible: true,
+      characters: Symbol("mixed"),
+      absoluteBoundingBox: { x: 12, y: 8, width: 80, height: 20 },
+      parent: null,
+    };
+    const component = {
+      id: "component",
+      name: "Button/Primary",
+      type: "COMPONENT",
+      visible: false,
+      key: "component-key",
+      description: "Primary action",
+      children: [text],
+      parent: null,
+    };
+    const componentSet = {
+      id: "set",
+      name: "Button",
+      type: "COMPONENT_SET",
+      visible: true,
+      key: "set-key",
+      description: "Button variants",
+      children: [component],
+      parent: null,
+    };
+    const frame = {
+      id: "frame",
+      name: "Card",
+      type: "FRAME",
+      visible: true,
+      absoluteBoundingBox: { x: 0, y: 0, width: 320, height: 200 },
+      children: [],
+      parent: null,
+    };
+    const root = {
+      id: "root",
+      name: "Page root",
+      type: "FRAME",
+      visible: true,
+      absoluteBoundingBox: { x: 0, y: 0, width: 1200, height: 800 },
+      children: [componentSet, frame],
+      parent: null,
+    };
+    componentSet.parent = root as never;
+    component.parent = componentSet as never;
+    text.parent = component as never;
+    frame.parent = root as never;
+    const nodes = new Map([root, componentSet, component, text, frame].map((node) => [node.id, node]));
+    const figma = baseFigma(async (id) => nodes.get(id) ?? null);
+    figma.currentPage = { id: "page", name: "Components", selection: [frame] };
+    return { figma, root, component, componentSet };
+  }
+
+  it("returns symbol-free bounded trees with visibility, bounds, page, and selection context", async () => {
+    const { figma } = inspectionFigma();
+    const result = await runPluginRead(figma, { depth: 2, limit: 2 });
+
+    expect(result).toMatchObject({
+      success: true,
+      operation: "tree",
+      fileKey: "file-a",
+      returnedCount: 2,
+      totalNodeCount: 4,
+      truncated: true,
+      currentPage: { id: "page", name: "Components" },
+      selection: [{ id: "frame", name: "Card", type: "FRAME" }],
+      roots: [{
+        id: "root",
+        visible: true,
+        bounds: { width: 1200, height: 800 },
+        childCount: 2,
+        children: [{ id: "set", visible: true }],
+      }],
+    });
+    expect(JSON.stringify(result)).not.toContain("Symbol");
+    expect(figma.triggerUndo).not.toHaveBeenCalled();
+  });
+
+  it("filters descendants by exact name, regex name, and node type", async () => {
+    const exact = await runPluginRead(inspectionFigma().figma, {
+      operation: "find",
+      filters: { name: "Card", type: "FRAME" },
+    });
+    const regex = await runPluginRead(inspectionFigma().figma, {
+      operation: "find",
+      filters: { namePattern: "button/(primary|secondary)", type: "COMPONENT" },
+    });
+
+    expect(exact.matches.map((node: { id: string }) => node.id)).toEqual(["frame"]);
+    expect(regex.matches.map((node: { id: string }) => node.id)).toEqual(["component"]);
+  });
+
+  it("discovers component sets and components under the requested root", async () => {
+    const result = await runPluginRead(inspectionFigma().figma, {
+      operation: "components",
+      depth: 3,
+      limit: 10,
+    });
+
+    expect(result.components).toEqual([
+      expect.objectContaining({ id: "set", name: "Button", type: "COMPONENT_SET", key: "set-key" }),
+      expect.objectContaining({
+        id: "component",
+        name: "Button/Primary",
+        type: "COMPONENT",
+        componentSetId: "set",
+      }),
+    ]);
+  });
+
+  it.each([
+    [{ nodeId: "missing" }, "Node not found: missing"],
+    [{ operation: "find", filters: { namePattern: "[" } }, "Invalid namePattern regex"],
+    [{ depth: 21 }, "Read depth must be between 0 and 20"],
+    [{ limit: 1001 }, "Read limit must be between 1 and 1000"],
+    [{ fileKey: "file-b" }, "Plugin file mismatch"],
+  ])("returns a correlated read error for invalid input %#", async (request, message) => {
+    const result = await runPluginRead(inspectionFigma().figma, request);
+    expect(result).toMatchObject({ requestId: "read-1", success: false });
+    expect(result.error).toContain(message);
   });
 });
 

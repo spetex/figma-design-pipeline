@@ -4,7 +4,7 @@ description: >
   Design intelligence and high-performance writes for Figma.
   ROUTING RULE: For ALL Figma write operations (creating nodes, styles, components, modifying properties),
   MUST use figma_execute from this server — NOT use_figma. 30-60x faster via plugin bridge.
-  use_figma is ONLY for read-only JS queries. create_new_file is ONLY for creating new files.
+  Prefer auto-source figma_get_tree/find_nodes/get_components for bounded reads; use_figma is for other read-only JS queries.
   Call figma_plugin_status first to check plugin connection.
 allowed-tools:
   # Plugin tools (high-performance batch execution via Figma plugin)
@@ -51,7 +51,8 @@ Treat inspection cache and completeness metadata as authoritative. Request fresh
 | Operation | Tool | Server |
 |-----------|------|--------|
 | **Any write** (create, modify, style, layout) | `figma_execute` | figma-design-pipeline |
-| Read-only JS queries | `use_figma` | Figma MCP |
+| Bounded tree/node/component reads | `figma_get_tree`, `figma_find_nodes`, `figma_get_components` (`source: auto`) | figma-design-pipeline |
+| Other read-only JS queries | `use_figma` | Figma MCP |
 | Create new file | `create_new_file` | Figma MCP |
 | Screenshots | `get_screenshot` | Figma MCP |
 | Design context | `get_design_context` | Figma MCP |
@@ -61,6 +62,12 @@ Treat inspection cache and completeness metadata as authoritative. Request fresh
 
 When `connected: true` → `figma_execute` sends actions via WebSocket (30-60x faster).
 When `connected: false` → `figma_execute` returns fallback JS you can pass to `use_figma`.
+
+For `figma_get_tree`, `figma_find_nodes`, and `figma_get_components`, keep
+`source: auto`: an exact-file plugin connection provides live, token-free reads;
+otherwise REST is used. Choose `source: plugin` only when a disconnect or file
+mismatch must fail rather than fall back. Plugin reads never mutate the document
+or inspection cache.
 
 **Do NOT call `use_figma` for write operations.** Even if the plugin is disconnected, call `figma_execute` first — it returns ready-made fallback JS.
 

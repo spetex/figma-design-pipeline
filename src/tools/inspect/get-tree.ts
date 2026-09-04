@@ -3,6 +3,9 @@ import type { EnrichedNode, FigmaRawNode } from "../../shared/types.js";
 import type { SnapshotProvenance } from "../../pipeline/snapshot.js";
 import { classifyNode } from "../../analysis/node-classifier.js";
 import { extractNodeTokens } from "../../analysis/token-extractor.js";
+import type { InspectionSource, PluginReadNode, PluginReadRoot } from "../../shared/plugin-read.js";
+import type { InspectionContext } from "./source.js";
+import { requireRest, selectInspectionSource } from "./source.js";
 
 export interface GetTreeParams {
   nodeId: string;
@@ -11,6 +14,15 @@ export interface GetTreeParams {
   childOffset?: number;
   refresh?: boolean;
   maxAgeMs?: number;
+}
+
+export interface GetTreeSourceParams extends Omit<GetTreeParams, "nodeId"> {
+  nodeId?: string;
+  fileKey: string;
+  source?: InspectionSource;
+  root?: PluginReadRoot;
+  limit?: number;
+  timeoutMs?: number;
 }
 
 /**
@@ -28,6 +40,7 @@ export interface CompactNode {
   childCount: number;
   /** Direct source children represented as nodes in this response. */
   returnedChildCount: number;
+  visible?: boolean;
   bounds?: { x: number; y: number; width: number; height: number };
   layoutInfo?: EnrichedNode["layoutInfo"];
   textContent?: string;
@@ -48,7 +61,8 @@ export const DEFAULT_MAX_RESPONSE_BYTES = 80_000;
 export type TreeTruncationReason =
   | "vector_compaction"
   | "response_size_limit"
-  | "scalar_field_limit";
+  | "scalar_field_limit"
+  | "result_limit";
 
 export interface TreeContinuation {
   reason: TreeTruncationReason;
@@ -90,6 +104,9 @@ export interface GetTreeResponsePayload {
   continuations: TreeContinuation[];
   responseBytes: number;
   maxResponseBytes?: number;
+  source: "plugin" | "rest";
+  traversalDepth: number;
+  resultLimit?: number;
   note?: string;
   directChildren?: {
     offset: number;
@@ -105,10 +122,20 @@ export interface SerializedGetTreeResponse {
   text: string;
 }
 
+export interface GetTreeResult extends SnapshotProvenance {
+  nodeId: string;
+  tree: EnrichedNode;
+  fromCache: boolean;
+  source: "plugin" | "rest";
+  traversalDepth: number;
+  resultLimit?: number;
+  sourceOmittedNodeCount?: number;
+}
+
 export async function handleGetTree(
   ctx: ToolContext,
   params: GetTreeParams
-): Promise<{ nodeId: string; tree: EnrichedNode; fromCache: boolean } & SnapshotProvenance> {
+): Promise<GetTreeResult> {
   const { nodeId, depth = 10, includeStyles = true, refresh = false, maxAgeMs } = params;
   const cacheKey = snapshotKey(ctx, { nodeId, depth, includeStyles });
 
@@ -117,7 +144,7 @@ export async function handleGetTree(
     ? ctx.snapshotCache.get(cacheKey, maxAgeMs)
     : null;
   if (cached) {
-    return { nodeId, fromCache: true, ...cached };
+    return { nodeId, fromCache: true, source: "rest", traversalDepth: depth, ...cached };
   }
 
   // Fetch from REST API
@@ -136,7 +163,128 @@ export async function handleGetTree(
   // Cache the result
   const provenance = ctx.snapshotCache.set(cacheKey, enriched);
 
-  return { nodeId, tree: enriched, fromCache: false, ...provenance };
+  return { nodeId, tree: enriched, fromCache: false, source: "rest", traversalDepth: depth, ...provenance };
+}
+
+export async function handleGetTreeFromSource(
+  ctx: InspectionContext,
+  params: GetTreeSourceParams
+): Promise<GetTreeResult> {
+  const source = selectInspectionSource(ctx, params.source ?? "auto", params.fileKey);
+  const depth = params.depth ?? 10;
+  if (source === "rest") {
+    if ((params.root ?? "node") !== "node") {
+      throw new Error(`${params.root} is available only with plugin inspection`);
+    }
+    if (!params.nodeId) throw new Error("nodeId is required for REST tree inspection");
+    const restResult = await handleGetTree(
+      { rest: requireRest(ctx), snapshotCache: ctx.snapshotCache },
+      { ...params, nodeId: params.nodeId }
+    );
+    return { ...restResult, source: "rest", traversalDepth: depth };
+  }
+
+  const limit = params.limit ?? 500;
+  const response = await ctx.bridge.read({
+    operation: "tree",
+    fileKey: params.fileKey,
+    root: params.root ?? "node",
+    ...(params.nodeId ? { nodeId: params.nodeId } : {}),
+    depth,
+    limit,
+  }, params.timeoutMs);
+  const roots = response.roots.map(pluginNodeToEnriched);
+  const root = (params.root ?? "node") === "selection"
+    ? selectionRoot(roots)
+    : roots[0];
+  if (!root) {
+    throw new Error((params.root ?? "node") === "selection"
+      ? "Current selection is empty"
+      : `Node ${params.nodeId ?? "root"} not found in Figma file`);
+  }
+  const syntheticCount = (params.root ?? "node") === "selection" ? 1 : 0;
+  const returnedCount = response.returnedCount + syntheticCount;
+  const totalNodeCount = (response.totalNodeCount ?? response.returnedCount) + syntheticCount;
+  return {
+    nodeId: root.id,
+    tree: root,
+    fromCache: false,
+    snapshotAt: new Date().toISOString(),
+    cacheAgeMs: 0,
+    source: "plugin",
+    traversalDepth: depth,
+    resultLimit: limit,
+    sourceOmittedNodeCount: Math.max(0, totalNodeCount - returnedCount),
+  };
+}
+
+function selectionRoot(children: EnrichedNode[]): EnrichedNode {
+  return {
+    id: "selection",
+    name: "Current selection",
+    type: "SELECTION",
+    classification: "container",
+    depth: 0,
+    childCount: children.length,
+    visible: true,
+    tokens: [],
+    isComponent: false,
+    isInstance: false,
+    children: children.map((child) => rebaseDepth(child, 1)),
+  };
+}
+
+function rebaseDepth(node: EnrichedNode, depth: number): EnrichedNode {
+  return { ...node, depth, children: node.children.map((child) => rebaseDepth(child, depth + 1)) };
+}
+
+function pluginNodeToEnriched(node: PluginReadNode, depth = 0): EnrichedNode {
+  const raw: FigmaRawNode = {
+    id: node.id,
+    name: node.name,
+    type: node.type,
+    visible: node.visible,
+    absoluteBoundingBox: node.bounds,
+    characters: node.textContent,
+    componentId: node.componentId,
+    layoutMode: node.layoutMode,
+    itemSpacing: node.itemSpacing,
+    paddingLeft: node.paddingLeft,
+    paddingRight: node.paddingRight,
+    paddingTop: node.paddingTop,
+    paddingBottom: node.paddingBottom,
+    children: node.children.map(pluginNodeToRaw),
+  };
+  return {
+    id: node.id,
+    name: node.name,
+    type: node.type,
+    classification: node.classification as EnrichedNode["classification"],
+    depth: node.depth,
+    childCount: node.childCount,
+    visible: node.visible,
+    bounds: node.bounds,
+    tokens: [],
+    layoutInfo: extractLayoutInfo(raw),
+    textContent: node.textContent,
+    isComponent: node.type === "COMPONENT" || node.type === "COMPONENT_SET",
+    isInstance: node.type === "INSTANCE",
+    componentId: node.componentId,
+    children: node.children.map((child) => pluginNodeToEnriched(child, depth + 1)),
+  };
+}
+
+function pluginNodeToRaw(node: PluginReadNode): FigmaRawNode {
+  return {
+    id: node.id,
+    name: node.name,
+    type: node.type,
+    visible: node.visible,
+    absoluteBoundingBox: node.bounds,
+    characters: node.textContent,
+    componentId: node.componentId,
+    children: node.children.map(pluginNodeToRaw),
+  };
 }
 
 /** A tree snapshot changes with the file, root, REST depth, and enrichment mode. */
@@ -199,6 +347,7 @@ export function compactTree(node: EnrichedNode, isRequestedRoot = true): Compact
     depth: node.depth,
     childCount: node.childCount,
     returnedChildCount: countReturnedChildren(children),
+    visible: node.visible,
     bounds: node.bounds,
     layoutInfo: node.layoutInfo,
     textContent: node.textContent,
@@ -274,7 +423,7 @@ export function truncateTree(node: CompactNode, maxBytes: number): TruncatedTree
  * that complete serialization, including metadata and continuations.
  */
 export function serializeGetTreeResponse(
-  result: { nodeId: string; tree: EnrichedNode; fromCache: boolean } & SnapshotProvenance,
+  result: GetTreeResult,
   {
     maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES,
     childOffset = 0,
@@ -374,7 +523,7 @@ export function serializeGetTreeResponse(
 }
 
 function serializeCandidate(
-  result: { nodeId: string; fromCache: boolean } & SnapshotProvenance,
+  result: GetTreeResult,
   tree: CompactNode,
   maxResponseBytes: number,
   childOffset: number,
@@ -390,7 +539,8 @@ function serializeCandidate(
     (sum, continuation) => sum + continuation.omittedNodeCount,
     0
   );
-  const omittedNodeCount = precedingOmittedNodeCount + continuationOmissions;
+  const sourceOmittedNodeCount = result.sourceOmittedNodeCount ?? 0;
+  const omittedNodeCount = precedingOmittedNodeCount + continuationOmissions + sourceOmittedNodeCount;
   const returnedNodeCount = countReturnedNodes(tree);
   const nodeCount = countSerializedNodes(tree);
   const responseSizeLimited = precedingOmittedNodeCount > 0 || continuations.some(
@@ -400,6 +550,7 @@ function serializeCandidate(
     ...(precedingOmittedNodeCount > 0 ? ["response_size_limit" as const] : []),
     ...continuations.map(continuation => continuation.reason),
     ...(scalarSummary.truncatedFieldCount > 0 ? ["scalar_field_limit" as const] : []),
+    ...(sourceOmittedNodeCount > 0 ? ["result_limit" as const] : []),
   ]));
   const nextOffset = directContinuation?.childOffset;
   const directChildren = childOffset > 0 || nextOffset !== undefined
@@ -413,6 +564,9 @@ function serializeCandidate(
 
   const withoutBytes = {
     nodeId: result.nodeId,
+    source: result.source,
+    traversalDepth: result.traversalDepth,
+    ...(result.resultLimit !== undefined ? { resultLimit: result.resultLimit } : {}),
     fromCache: result.fromCache,
     snapshotAt: result.snapshotAt,
     cacheAgeMs: result.cacheAgeMs,
@@ -425,9 +579,11 @@ function serializeCandidate(
     omittedScalarBytes: scalarSummary.omittedScalarBytes,
     truncationReasons,
     continuations,
-    ...(responseSizeLimited ? {
-      maxResponseBytes,
-      note: "Tree exceeded 80KB — deeper children omitted. Use figma_get_tree on specific nodeIds to drill down.",
+    ...(responseSizeLimited ? { maxResponseBytes } : {}),
+    ...(responseSizeLimited || sourceOmittedNodeCount > 0 ? {
+      note: sourceOmittedNodeCount > 0
+        ? "Plugin result limit reached — use a focused nodeId or increase limit to continue."
+        : "Tree exceeded 80KB — deeper children omitted. Use figma_get_tree on specific nodeIds to drill down.",
     } : {}),
     ...(directChildren ? { directChildren } : {}),
     tree,
@@ -651,6 +807,7 @@ function enrichNode(
     classification,
     depth,
     childCount: children.length,
+    visible: raw.visible,
     bounds,
     absoluteTransform: raw.absoluteTransform,
     tokens,

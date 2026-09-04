@@ -58,7 +58,7 @@ Two esbuild bundles:
 
 - `src/index.ts` — MCP server entry point, registers 18 tools and workflow resources
 - `src/tools/` — MCP tool implementations:
-  - `inspect/` — read-only (get-tree, audit, extract-tokens, export-images, find-nodes, get-components, get-styles, diff-tokens)
+  - `inspect/` — read-only (get-tree/find-nodes/get-components prefer an exact-file plugin and fall back to REST; remaining analysis uses REST)
   - `organize/` — planning (rename-plan, group-plan, layout-plan, component-plan)
   - `codegen/` — code generation (map-components, generate-page, generate-schema, export-tokens)
   - `plugin/` — plugin bridge tools (execute, status)
@@ -72,7 +72,7 @@ Two esbuild bundles:
 
 ### Key Design Decisions
 
-- **FIGMA_ACCESS_TOKEN is optional**: All major CLIs support the official Figma MCP via OAuth. The token is only needed for this server's REST API analysis tools.
+- **FIGMA_ACCESS_TOKEN is optional**: Connected-plugin tree, node, and component inspection works without it when `figma.fileKey` exactly matches. The token is needed for REST analysis and fallback.
 - **Plugin bridge is optional but recommended**: When connected, `figma_execute` is 30-60x faster. When not, it falls back to generating `use_figma` JS.
 - **Plan tools return action arrays**: Validated against Zod schemas, can be executed via `figma_execute` or `use_figma`.
 - **Tree auto-truncation at 80KB**: `figma_get_tree` progressively prunes deeper children.

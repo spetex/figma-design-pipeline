@@ -28,7 +28,8 @@ The skill picks the right tools. Read on if you want to drive specific tools you
 | You want to… | Tool | Server |
 |---|---|---|
 | Create / modify / style any node | `figma_execute` | this package |
-| Read-only JS queries (Figma plugin API) | `use_figma` | official Figma MCP |
+| Bounded node/tree/component inspection | `figma_get_tree`, `figma_find_nodes`, `figma_get_components` | this package |
+| Other read-only JS queries | `use_figma` | official Figma MCP |
 | Create a new Figma file | `create_new_file` | official Figma MCP |
 | Take a screenshot | `get_screenshot` | official Figma MCP |
 | Inspect / audit / extract tokens | `figma_get_tree`, `figma_audit`, etc. | this package |
@@ -37,9 +38,24 @@ The skill picks the right tools. Read on if you want to drive specific tools you
 
 Always call `figma_plugin_status` first when starting a write-heavy task. It tells you whether the plugin bridge is live (30-60x faster) or whether the agent should plan around fallback JS.
 
-## Inspect (read-only, no plugin needed)
+## Inspect (read-only, plugin-first where supported)
 
-These all hit the Figma REST API. They need `FIGMA_ACCESS_TOKEN` set in your MCP server env (see [INSTALL.md](INSTALL.md)).
+`figma_get_tree`, `figma_find_nodes`, and `figma_get_components` accept
+`source: "auto" | "plugin" | "rest"` (default `auto`). `auto` uses the
+connected plugin only when its exact `figma.fileKey` matches the requested
+file, then falls back to REST. `plugin` fails closed when disconnected or when
+the file differs; `rest` always selects REST. Plugin inspection needs no
+`FIGMA_ACCESS_TOKEN`. Other inspection tools still use REST and need the token
+configured (see [INSTALL.md](INSTALL.md)).
+
+Plugin-backed tools accept `root: "node" | "current-page" | "selection"`.
+Traversal is bounded by `depth` and `limit`; current page and selection context
+are included in find/component responses. `figma_find_nodes` supports both an
+exact, case-sensitive `name` and a case-insensitive regex `namePattern`, plus
+the existing type and structural filters. `figma_get_components` discovers
+both `COMPONENT` and `COMPONENT_SET` nodes under the chosen root. Plugin trees
+return the safe structural subset; choose `source: "rest"` when style/token
+enrichment from `includeStyles` is required.
 
 | Tool | What it does | When to use |
 |---|---|---|
@@ -47,14 +63,14 @@ These all hit the Figma REST API. They need `FIGMA_ACCESS_TOKEN` set in your MCP
 | `figma_audit` | Structural audit: naming, layout, components, tokens, accessibility. | Bounded list of issues before a cleanup pass. |
 | `figma_extract_tokens` | Colors, fonts, spacing, radius, layered shadows, and opacity — with Tailwind mapping. | Token sync, theming, brand audits. |
 | `figma_find_nodes` | Filter nodes by name / type / classification / text / size, with explicit limit and depth metadata. | "Where is the button styled like X?" |
-| `figma_get_components` | List published components. | Before mapping to your code components. |
+| `figma_get_components` | Discover components and component sets under a root; REST without a root retains the published-component listing. | Before mapping to your code components. |
 | `figma_get_styles` | List published color/text/effect styles. | Token drift check. |
 | `figma_diff_tokens` | Compare Figma styles vs your code tokens. | Sync workflow. Accepts style data directly — no REST call. |
 | `figma_export_images` | Render nodes to PNG/JPG/SVG via REST. | Snapshots, before/after, docs. |
 
 ### Inspection freshness and cache provenance
 
-`figma_get_tree` and `figma_find_nodes` cache REST inspection snapshots by
+The REST paths for `figma_get_tree` and `figma_find_nodes` cache inspection snapshots by
 Figma file, root node ID, requested depth, and whether styles are included.
 Every response reports `fromCache`, `snapshotAt` (ISO timestamp), and
 `cacheAgeMs`, so callers can tell whether they received a reused snapshot and
@@ -66,9 +82,10 @@ how old it is.
   milliseconds. `maxAgeMs: 0` is equivalent to `refresh: true`.
 - Without either option, snapshots can be reused for up to 15 minutes.
 
-These inspection tools use the Figma REST API, not the plugin bridge. A refresh
-guarantees a new REST request, but cannot guarantee that Figma REST has already
-observed a just-made plugin or editor mutation. Connected `figma_execute`
+Plugin reads always inspect live plugin state: they neither read nor populate
+the REST snapshot cache, and a read never invalidates it. On the REST path, a
+refresh guarantees a new REST request, but cannot guarantee that Figma REST has
+already observed a just-made plugin or editor mutation. Connected `figma_execute`
 batches that apply changes, and plugin `documentchange` notifications, clear
 the local inspection cache conservatively. If the plugin is disconnected while
 someone else edits the file, request `refresh: true` or `maxAgeMs: 0` when the
@@ -110,7 +127,7 @@ including synthetic `COLLAPSED` and `TRUNCATED` markers. Use
 `totalNodeCount` for the real source-node total before omissions. Size-limited
 responses retain the legacy `note` field alongside the structured metadata.
 
-`figma_find_nodes` echoes the requested relative REST depth as `traversalDepth`
+`figma_find_nodes` echoes the requested relative traversal depth as `traversalDepth`
 (the requested root is depth 0) and its match cap as `matchLimit`. Its
 `truncated` flag is true only after the traversal detects at least one matching
 node beyond the cap, so an exact-limit complete result is not mislabeled.

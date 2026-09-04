@@ -1,6 +1,16 @@
 /// <reference types="@figma/plugin-typings" />
 
 import { assertActionInputCoverage, isForbiddenDeleteNodeType, isKnownActionType } from "../src/shared/action-parity";
+import { classifyNode } from "../src/analysis/node-classifier";
+import {
+  MAX_PLUGIN_READ_DEPTH,
+  MAX_PLUGIN_READ_RESULTS,
+  type PluginComponentNode,
+  type PluginReadFilters,
+  type PluginReadNode,
+  type PluginReadRequest,
+  type PluginReadResponse,
+} from "../src/shared/plugin-read";
 
 // ─── SPFR Design Pipeline Plugin v2 ──────────────────────────────
 // High-performance batch executor with font caching, symbolic refs,
@@ -118,6 +128,292 @@ function captureSnapshot(node: SceneNode): Record<string, unknown> {
     snap.cornerRadius = typeof cr === "symbol" ? "mixed" : cr;
   }
   return snap;
+}
+
+// ─── Read-only inspection ──────────────────────────────────────
+
+function readChildren(node: BaseNode): readonly BaseNode[] {
+  const value = readProperty(node, "children");
+  return Array.isArray(value) ? value as BaseNode[] : [];
+}
+
+function readProperty(node: BaseNode, property: string): unknown {
+  try {
+    return (node as unknown as Record<string, unknown>)[property];
+  } catch {
+    return undefined;
+  }
+}
+
+function safeString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function safeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function safeBounds(node: BaseNode): PluginReadNode["bounds"] {
+  const value = readProperty(node, "absoluteBoundingBox");
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const x = safeNumber(raw.x);
+  const y = safeNumber(raw.y);
+  const width = safeNumber(raw.width);
+  const height = safeNumber(raw.height);
+  return x === undefined || y === undefined || width === undefined || height === undefined
+    ? undefined
+    : { x, y, width, height };
+}
+
+async function componentMetadata(node: BaseNode): Promise<Pick<PluginReadNode,
+  "componentId" | "componentKey" | "description" | "componentSetId">> {
+  let componentId: string | undefined;
+  if (node.type === "INSTANCE") {
+    try {
+      const component = await (node as InstanceNode).getMainComponentAsync();
+      componentId = component?.id;
+    } catch {
+      // A missing or inaccessible library component must not make the node unsafe to inspect.
+    }
+  }
+  const parent = readProperty(node, "parent") as BaseNode | undefined;
+  return {
+    ...(componentId ? { componentId } : {}),
+    ...((node.type === "COMPONENT" || node.type === "COMPONENT_SET")
+      && safeString(readProperty(node, "key"))
+      ? { componentKey: safeString(readProperty(node, "key"))! }
+      : {}),
+    ...((node.type === "COMPONENT" || node.type === "COMPONENT_SET")
+      && safeString(readProperty(node, "description"))
+      ? { description: safeString(readProperty(node, "description"))! }
+      : {}),
+    ...(parent?.type === "COMPONENT_SET" ? { componentSetId: parent.id } : {}),
+  };
+}
+
+async function serializeReadNode(node: BaseNode, children: PluginReadNode[], depth: number): Promise<PluginReadNode> {
+  const bounds = safeBounds(node);
+  const visible = readProperty(node, "visible");
+  const characters = safeString(readProperty(node, "characters"));
+  const layoutMode = safeString(readProperty(node, "layoutMode"));
+  const metadata = await componentMetadata(node);
+  return {
+    id: node.id,
+    name: node.name,
+    type: node.type,
+    classification: classifyNode({
+      id: node.id,
+      name: node.name,
+      type: node.type,
+      absoluteBoundingBox: bounds,
+      characters,
+      children: readChildren(node).map((child) => ({ id: child.id, name: child.name, type: child.type })),
+    }),
+    depth,
+    ...(typeof visible === "boolean" ? { visible } : {}),
+    ...(bounds ? { bounds } : {}),
+    ...(characters !== undefined ? { textContent: characters } : {}),
+    ...metadata,
+    ...(layoutMode === "HORIZONTAL" || layoutMode === "VERTICAL" || layoutMode === "GRID" || layoutMode === "NONE"
+      ? { layoutMode }
+      : {}),
+    ...numberProperty(node, "itemSpacing"),
+    ...numberProperty(node, "paddingLeft"),
+    ...numberProperty(node, "paddingRight"),
+    ...numberProperty(node, "paddingTop"),
+    ...numberProperty(node, "paddingBottom"),
+    childCount: readChildren(node).length,
+    children,
+  };
+}
+
+function numberProperty(node: BaseNode, property: string): Record<string, number> {
+  const value = safeNumber(readProperty(node, property));
+  return value === undefined ? {} : { [property]: value };
+}
+
+function countTree(node: BaseNode, depth: number): number {
+  if (depth <= 0) return 1;
+  return 1 + readChildren(node).reduce((sum, child) => sum + countTree(child, depth - 1), 0);
+}
+
+async function serializeTree(
+  node: BaseNode,
+  depth: number,
+  budget: { remaining: number },
+  currentDepth = 0
+): Promise<PluginReadNode | null> {
+  if (budget.remaining <= 0) return null;
+  budget.remaining--;
+  const children: PluginReadNode[] = [];
+  if (depth > 0) {
+    for (const child of readChildren(node)) {
+      const serialized = await serializeTree(child, depth - 1, budget, currentDepth + 1);
+      if (!serialized) break;
+      children.push(serialized);
+    }
+  }
+  return serializeReadNode(node, children, currentDepth);
+}
+
+async function resolveReadRoots(request: PluginReadRequest): Promise<BaseNode[]> {
+  if (request.root === "current-page") return [figma.currentPage];
+  if (request.root === "selection") return [...figma.currentPage.selection];
+  if (!request.nodeId) throw new Error("nodeId is required when root is 'node'");
+  const node = await figma.getNodeByIdAsync(request.nodeId);
+  if (!node) throw new Error(`Node not found: ${request.nodeId}`);
+  return [node];
+}
+
+function compileReadRegex(pattern: string | undefined, label: string): RegExp | undefined {
+  if (pattern === undefined) return undefined;
+  try {
+    return new RegExp(pattern, "i");
+  } catch {
+    throw new Error(`Invalid ${label} regex: ${pattern}`);
+  }
+}
+
+function nodeMatches(
+  node: PluginReadNode,
+  filters: PluginReadFilters,
+  nameRegex?: RegExp,
+  textRegex?: RegExp
+): boolean {
+  if (filters.name !== undefined && node.name !== filters.name) return false;
+  if (nameRegex && !nameRegex.test(node.name)) return false;
+  if (filters.type && node.type.toUpperCase() !== filters.type.toUpperCase()) return false;
+  if (filters.classification && node.classification !== filters.classification) return false;
+  if (textRegex && (!node.textContent || !textRegex.test(node.textContent))) return false;
+  if (filters.componentId && node.componentId !== filters.componentId) return false;
+  if (filters.hasChildren !== undefined && (node.childCount > 0) !== filters.hasChildren) return false;
+  if (filters.minWidth !== undefined && (!node.bounds || node.bounds.width < filters.minWidth)) return false;
+  if (filters.maxWidth !== undefined && (!node.bounds || node.bounds.width > filters.maxWidth)) return false;
+  if (filters.minHeight !== undefined && (!node.bounds || node.bounds.height < filters.minHeight)) return false;
+  if (filters.maxHeight !== undefined && (!node.bounds || node.bounds.height > filters.maxHeight)) return false;
+  return true;
+}
+
+async function walkReadNodes(
+  roots: readonly BaseNode[],
+  depth: number,
+  visit: (node: BaseNode, depth: number) => Promise<boolean>
+): Promise<boolean> {
+  const walk = async (node: BaseNode, remainingDepth: number, currentDepth: number): Promise<boolean> => {
+    if (!await visit(node, currentDepth)) return false;
+    if (remainingDepth <= 0) return true;
+    for (const child of readChildren(node)) {
+      if (!await walk(child, remainingDepth - 1, currentDepth + 1)) return false;
+    }
+    return true;
+  };
+  for (const root of roots) {
+    if (!await walk(root, depth, 0)) return false;
+  }
+  return true;
+}
+
+function readResponseBase(request: PluginReadRequest): Omit<PluginReadResponse,
+  "success" | "roots" | "matches" | "components" | "totalScanned" | "returnedCount" | "truncated"> {
+  return {
+    type: "read_response",
+    requestId: request.requestId,
+    operation: request.operation,
+    fileKey: figma.fileKey!,
+    traversalDepth: request.depth,
+    resultLimit: request.limit,
+    currentPage: { id: figma.currentPage.id, name: figma.currentPage.name },
+    selection: figma.currentPage.selection.map((node) => ({ id: node.id, name: node.name, type: node.type })),
+  };
+}
+
+async function processReadRequest(request: PluginReadRequest): Promise<PluginReadResponse> {
+  if (!figma.fileKey || request.fileKey !== figma.fileKey) {
+    throw new Error(`Plugin file mismatch: requested ${request.fileKey}, open ${figma.fileKey || "unknown"}`);
+  }
+  if (!Number.isInteger(request.depth) || request.depth < 0 || request.depth > MAX_PLUGIN_READ_DEPTH) {
+    throw new Error(`Read depth must be between 0 and ${MAX_PLUGIN_READ_DEPTH}`);
+  }
+  if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > MAX_PLUGIN_READ_RESULTS) {
+    throw new Error(`Read limit must be between 1 and ${MAX_PLUGIN_READ_RESULTS}`);
+  }
+  if (request.operation !== "tree" && request.operation !== "find" && request.operation !== "components") {
+    throw new Error(`Unsupported read operation: ${String(request.operation)}`);
+  }
+  if (request.root !== "node" && request.root !== "current-page" && request.root !== "selection") {
+    throw new Error(`Unsupported read root: ${String(request.root)}`);
+  }
+
+  const roots = await resolveReadRoots(request);
+  const base = readResponseBase(request);
+  if (request.operation === "tree") {
+    const totalNodeCount = roots.reduce((sum, root) => sum + countTree(root, request.depth), 0);
+    const budget = { remaining: request.limit };
+    const serializedRoots: PluginReadNode[] = [];
+    for (const root of roots) {
+      const serialized = await serializeTree(root, request.depth, budget);
+      if (!serialized) break;
+      serializedRoots.push(serialized);
+    }
+    const returnedCount = request.limit - budget.remaining;
+    return {
+      ...base,
+      success: true,
+      roots: serializedRoots,
+      matches: [],
+      components: [],
+      totalScanned: totalNodeCount,
+      returnedCount,
+      totalNodeCount,
+      truncated: returnedCount < totalNodeCount,
+    };
+  }
+
+  const matches: PluginReadNode[] = [];
+  const components: PluginComponentNode[] = [];
+  let totalScanned = 0;
+  let truncated = false;
+  const filters = request.filters ?? {};
+  const nameRegex = compileReadRegex(filters.namePattern, "namePattern");
+  const textRegex = compileReadRegex(filters.textContent, "textContent");
+  await walkReadNodes(roots, request.depth, async (node, nodeDepth) => {
+    totalScanned++;
+    const serialized = await serializeReadNode(node, [], nodeDepth);
+    if (request.operation === "find" && nodeMatches(serialized, filters, nameRegex, textRegex)) {
+      if (matches.length >= request.limit) {
+        truncated = true;
+        return false;
+      }
+      matches.push(serialized);
+    }
+    if (request.operation === "components" && (node.type === "COMPONENT" || node.type === "COMPONENT_SET")) {
+      if (components.length >= request.limit) {
+        truncated = true;
+        return false;
+      }
+      components.push({
+        id: serialized.id,
+        name: serialized.name,
+        type: serialized.type,
+        ...(serialized.componentKey ? { key: serialized.componentKey } : {}),
+        ...(serialized.description ? { description: serialized.description } : {}),
+        ...(serialized.componentSetId ? { componentSetId: serialized.componentSetId } : {}),
+      } as PluginComponentNode);
+    }
+    return true;
+  });
+
+  return {
+    ...base,
+    success: true,
+    roots: [],
+    matches,
+    components,
+    totalScanned,
+    returnedCount: request.operation === "find" ? matches.length : components.length,
+    truncated,
+  };
 }
 
 // ─── Paint Sanitizer (strip 'a' from color — Figma uses paint-level opacity) ──
@@ -972,6 +1268,7 @@ figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
       data: {
         type: "handshake",
         pluginVersion: "2.1.0",
+        fileKey: figma.fileKey,
         pageId: figma.currentPage.id,
         pageName: figma.currentPage.name,
         documentName: figma.root.name,
@@ -1017,10 +1314,36 @@ figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
           data: { type: "batch_result", batchId: batch.batchId, success: false, error: message, results: [], nodeIdMap: {}, summary: { total: 0, applied: 0, failed: 0, skipped: 0 } },
         });
       }
+    } else if (data.type === "read_request") {
+      const request = data as unknown as PluginReadRequest;
+      if (!request.requestId || !request.operation || !request.fileKey) {
+        console.error("[plugin] Malformed read request, ignoring");
+        return;
+      }
+      try {
+        const result = await processReadRequest(request);
+        figma.ui.postMessage({ type: "send_to_bridge", data: result });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        figma.ui.postMessage({
+          type: "send_to_bridge",
+          data: {
+            ...readResponseBase(request),
+            success: false,
+            roots: [],
+            matches: [],
+            components: [],
+            totalScanned: 0,
+            returnedCount: 0,
+            truncated: false,
+            error: message,
+          } satisfies PluginReadResponse,
+        });
+      }
     } else if (data.type === "ping") {
       figma.ui.postMessage({
         type: "send_to_bridge",
-        data: { type: "pong", pageId: figma.currentPage.id, pageName: figma.currentPage.name },
+        data: { type: "pong", fileKey: figma.fileKey, pageId: figma.currentPage.id, pageName: figma.currentPage.name },
       });
     }
   }
