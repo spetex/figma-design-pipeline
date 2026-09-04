@@ -9,34 +9,42 @@ Confirm you are on **Node 24 LTS or newer** (`node --version`).
 ```bash
 node --version       # must be >= 24.0.0
 npm ci
+npm audit --omit=dev # must report 0 production vulnerabilities
 npm run check        # tsc --noEmit (TS 6)
-npm test             # vitest (4 tests)
+npm test             # vitest; use the reported current test count
 npm run build        # builds server + plugin
-npm pack             # produces spetex-figma-design-pipeline-<version>.tgz
+npm pack --ignore-scripts --dry-run --json > /tmp/figma-design-pipeline-pack.json
+node scripts/verify-package.mjs /tmp/figma-design-pipeline-pack.json
 ```
 
-Verify installer from outside the repo:
+Pack and verify the exact local release candidate before any registry checks:
+
+```bash
+CANDIDATE_DIR="$(mktemp -d)"
+npm pack --ignore-scripts --json --pack-destination "$CANDIDATE_DIR" > "$CANDIDATE_DIR/npm-pack.json"
+node scripts/verify-package.mjs "$CANDIDATE_DIR/npm-pack.json"
+PACKAGE_FILENAME="$(node -e "const fs = require('node:fs'); console.log(JSON.parse(fs.readFileSync(process.argv[1], 'utf8'))[0].filename)" "$CANDIDATE_DIR/npm-pack.json")"
+PACKAGE_TARBALL="$CANDIDATE_DIR/$PACKAGE_FILENAME"
+npm exec --yes --package="$PACKAGE_TARBALL" -- spetex-figma-design-pipeline-install --help
+```
+
+Verify a clean-home install from that same local tarball:
+
+```bash
+TMP_HOME="$(mktemp -d)"
+HOME="$TMP_HOME" npm exec --yes --package="$PACKAGE_TARBALL" -- spetex-figma-design-pipeline-install --client all
+sed -n '1,120p' "$TMP_HOME/.codex/config.toml"
+ls "$TMP_HOME/.figma-design-pipeline/plugin/manifest.json"
+```
+
+Confirm the generated Codex config points to `$TMP_HOME/.figma-design-pipeline/server/index.js` and does not reference `.npm/_npx/...`.
+
+After the local candidate passes, verify the currently published registry package:
 
 ```bash
 cd /tmp
 npx -y -p @spetex/figma-design-pipeline spetex-figma-design-pipeline-install --help
 ```
-
-Verify clean-home install:
-
-```bash
-TMP_HOME="$(mktemp -d)"
-cd /tmp
-HOME="$TMP_HOME" npx -y -p @spetex/figma-design-pipeline spetex-figma-design-pipeline-install --client all
-sed -n '1,120p' "$TMP_HOME/.codex/config.toml"
-```
-
-Confirm the plugin was deployed:
-```bash
-ls ~/.figma-design-pipeline/plugin/manifest.json
-```
-
-Confirm the generated Codex config points to `$TMP_HOME/.figma-design-pipeline/server/index.js` and does not reference `.npm/_npx/...`.
 
 ## 2. Plugin Smoke Test
 

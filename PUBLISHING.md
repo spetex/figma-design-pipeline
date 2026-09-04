@@ -27,11 +27,14 @@ npm audit --omit=dev
 npm run check          # type-check server source and Node-side scripts
 npm test               # vitest
 npm run build          # builds server + plugin
-npm pack --dry-run --json
+npm pack --ignore-scripts --dry-run --json > /tmp/figma-design-pipeline-pack.json
+node scripts/verify-package.mjs /tmp/figma-design-pipeline-pack.json
 git diff --check
 ```
 
-Inspect the dry-run JSON and verify that the plugin distribution is included.
+The verifier requires the server bundle, plugin distribution, installer, client
+skill, executable shims, and release documentation, and rejects unexpected
+package contents, tests, and fixtures.
 
 ## npm Trusted Publisher
 
@@ -73,6 +76,29 @@ This installs stable local assets under `~/.figma-design-pipeline/`, registers t
 
 ## Verification
 
+Before checking the registry, pack and test the exact local release candidate:
+
+```bash
+CANDIDATE_DIR="$(mktemp -d)"
+npm pack --ignore-scripts --json --pack-destination "$CANDIDATE_DIR" > "$CANDIDATE_DIR/npm-pack.json"
+node scripts/verify-package.mjs "$CANDIDATE_DIR/npm-pack.json"
+PACKAGE_FILENAME="$(node -e "const fs = require('node:fs'); console.log(JSON.parse(fs.readFileSync(process.argv[1], 'utf8'))[0].filename)" "$CANDIDATE_DIR/npm-pack.json")"
+PACKAGE_TARBALL="$CANDIDATE_DIR/$PACKAGE_FILENAME"
+npm exec --yes --package="$PACKAGE_TARBALL" -- spetex-figma-design-pipeline-install --help
+```
+
+Run the clean-home install from that same tarball and confirm the generated
+Codex config points to the stable installed server path:
+
+```bash
+TMP_HOME="$(mktemp -d)"
+HOME="$TMP_HOME" npm exec --yes --package="$PACKAGE_TARBALL" -- spetex-figma-design-pipeline-install --client all
+sed -n '1,120p' "$TMP_HOME/.codex/config.toml"
+ls "$TMP_HOME/.figma-design-pipeline/plugin/manifest.json"
+```
+
+Only after the local candidate passes should registry verification run:
+
 ```bash
 cd /tmp
 npx -y -p @spetex/figma-design-pipeline spetex-figma-design-pipeline-install --help
@@ -88,3 +114,6 @@ ls "$TMP_HOME/.figma-design-pipeline/plugin/manifest.json"
 ```
 
 Confirm the generated Codex config points to `$TMP_HOME/.figma-design-pipeline/server/index.js` and not an `.npm/_npx/...` cache path.
+
+The publish workflow follows the same order and publishes the tested candidate
+tarball rather than packing the repository again.

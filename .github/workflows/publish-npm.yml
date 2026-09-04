@@ -31,6 +31,29 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run build
+      - name: Pack and inspect release candidate
+        id: package
+        shell: bash
+        run: |
+          candidate_dir="$RUNNER_TEMP/release-candidate"
+          mkdir -p "$candidate_dir"
+          npm pack --ignore-scripts --json --pack-destination "$candidate_dir" > "$candidate_dir/npm-pack.json"
+          node scripts/verify-package.mjs "$candidate_dir/npm-pack.json"
+          package_filename="$(node -e "const fs = require('node:fs'); console.log(JSON.parse(fs.readFileSync(process.argv[1], 'utf8'))[0].filename)" "$candidate_dir/npm-pack.json")"
+          echo "tarball=$candidate_dir/$package_filename" >> "$GITHUB_OUTPUT"
+      - name: Test packed release candidate
+        shell: bash
+        run: |
+          candidate_home="$(mktemp -d)"
+          npm exec --yes --package="${{ steps.package.outputs.tarball }}" -- spetex-figma-design-pipeline-install --help
+          HOME="$candidate_home" npm exec --yes --package="${{ steps.package.outputs.tarball }}" -- spetex-figma-design-pipeline-install --client all
+          test -f "$candidate_home/.figma-design-pipeline/server/index.js"
+          test -f "$candidate_home/.figma-design-pipeline/plugin/manifest.json"
+          grep -F "$candidate_home/.figma-design-pipeline/server/index.js" "$candidate_home/.codex/config.toml"
+          if grep -F ".npm/_npx/" "$candidate_home/.codex/config.toml"; then
+            echo "Codex configuration must not reference npm's temporary npx cache" >&2
+            exit 1
+          fi
       - name: Check whether this version is already published
         id: npm_version
         shell: bash
@@ -44,4 +67,4 @@ jobs:
           fi
       - name: Publish package
         if: steps.npm_version.outputs.published != 'true'
-        run: npm publish --provenance --access public
+        run: npm publish "${{ steps.package.outputs.tarball }}" --provenance --access public
