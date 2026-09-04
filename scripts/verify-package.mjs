@@ -91,11 +91,32 @@ function parseTarNumber(header, offset, length, description) {
   if ((field[0] & 0x80) !== 0) {
     fail(`${description} uses an unsupported base-256 tar number`);
   }
-  const text = field.toString("ascii").replace(/\0.*$/s, "").trim();
-  if (!/^[0-7]+$/.test(text)) {
+
+  let index = 0;
+  while (index < field.length && field[index] === 0x20) index += 1;
+
+  let value = 0n;
+  let digitCount = 0;
+  while (index < field.length && field[index] >= 0x30 && field[index] <= 0x37) {
+    value = value * 8n + BigInt(field[index] - 0x30);
+    digitCount += 1;
+    index += 1;
+  }
+
+  if (digitCount === 0) {
+    if (field.every((byte) => byte === 0 || byte === 0x20)) return 0;
     fail(`${description} is not a valid octal tar number`);
   }
-  return requireInteger(Number.parseInt(text, 8), description);
+  if (
+    index === field.length ||
+    field.subarray(index).some((byte) => byte !== 0 && byte !== 0x20)
+  ) {
+    fail(`${description} is not a valid octal tar number`);
+  }
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    fail(`${description} exceeds the safe integer range`);
+  }
+  return requireInteger(Number(value), description);
 }
 
 function parseTarString(header, offset, length, description) {
@@ -189,16 +210,25 @@ function parseArchive(tarball) {
     }
 
     const mode = requireMode(parseTarNumber(header, 100, 8, `Mode for ${path}`), `Mode for ${path}`);
+    parseTarNumber(header, 108, 8, `UID for ${path}`);
+    parseTarNumber(header, 116, 8, `GID for ${path}`);
     const size = parseTarNumber(header, 124, 12, `Size for ${path}`);
+    parseTarNumber(header, 136, 12, `Modification time for ${path}`);
+    parseTarNumber(header, 329, 8, `Device major number for ${path}`);
+    parseTarNumber(header, 337, 8, `Device minor number for ${path}`);
     const dataOffset = offset + TAR_BLOCK_SIZE;
     const dataEnd = dataOffset + size;
-    if (dataEnd > archive.length) {
+    const nextOffset = dataOffset + Math.ceil(size / TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE;
+    if (dataEnd > archive.length || nextOffset > archive.length) {
       fail(`Tar entry ${path} extends beyond the archive`);
+    }
+    if (archive.subarray(dataEnd, nextOffset).some((byte) => byte !== 0)) {
+      fail(`Tar entry ${path} has non-zero data padding`);
     }
     const data = Buffer.from(archive.subarray(dataOffset, dataEnd));
     entries.push({ path, size, mode });
     contents.set(path, data);
-    offset = dataOffset + Math.ceil(size / TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE;
+    offset = nextOffset;
   }
 
   if (endBlocks < 2) {

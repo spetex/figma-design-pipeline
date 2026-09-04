@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { afterAll, describe, expect, it } from "vitest";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -210,6 +210,94 @@ describe("release package verifier", () => {
 
     expectFailure(fixture, /has forbidden type/);
   });
+
+  it("rejects octal-field garbage after a NUL when checksums and digests agree", () => {
+    const fixture = createFixture();
+    rewriteArchive(fixture, (archive) => {
+      const header = archive.subarray(0, 512);
+      writeString(header, 100, 8, "000644\0X");
+      refreshHeaderChecksum(header);
+    });
+
+    expectFailure(fixture, /Mode for CHANGELOG\.md is not a valid octal tar number/);
+  });
+
+  it("rejects non-zero per-entry data padding when digests agree", () => {
+    const entries = makeValidEntries();
+    const fixture = createFixture(entries);
+    rewriteArchive(fixture, (archive) => {
+      archive[512 + entries[0].contents.length] = 0x58;
+    });
+
+    expectFailure(fixture, /CHANGELOG\.md has non-zero data padding/);
+  });
+
+  it.each([
+    ["mode", 100],
+    ["UID", 108],
+    ["GID", 116],
+    ["size", 124],
+    ["modification time", 136],
+    ["checksum", 148],
+    ["device major number", 329],
+    ["device minor number", 337],
+  ])("rejects unsupported base-256 %s fields", (description, fieldOffset) => {
+    const fixture = createFixture();
+    rewriteArchive(fixture, (archive) => {
+      const header = archive.subarray(0, 512);
+      header[fieldOffset] = 0x80;
+      if (fieldOffset !== 148) refreshHeaderChecksum(header);
+    });
+
+    expectFailure(fixture, new RegExp(`${description}.*unsupported base-256`, "i"));
+  });
+
+  it("accepts legal leading/trailing padding and maximum-width octal values", () => {
+    const fixture = createFixture();
+    rewriteArchive(fixture, (archive) => {
+      const header = archive.subarray(0, 512);
+      writeNumericField(header, 100, 8, 0o644, { leading: 2, terminator: "\0 " });
+      writeNumericField(header, 108, 8, 0o7777777, { terminator: "\0" });
+      writeNumericField(header, 116, 8, 0, { leading: 5, terminator: " \0" });
+      writeNumericField(header, 124, 12, Buffer.from("fixture:CHANGELOG.md\n").length, {
+        leading: 4,
+        terminator: "\0 ",
+      });
+      writeNumericField(header, 136, 12, 0o77777777777, { terminator: "\0" });
+      writeNumericField(header, 329, 8, 0o7777777, { terminator: "\0" });
+      writeNumericField(header, 337, 8, 0, { leading: 5, terminator: "\0 " });
+      refreshHeaderChecksum(header, "\0 ");
+    });
+
+    const result = runVerifier(fixture.manifestPath);
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  it("accepts additional all-zero archive end padding blocks", () => {
+    const fixture = createFixture();
+    rewriteArchive(fixture, (archive) => Buffer.concat([archive, Buffer.alloc(512)]));
+
+    const result = runVerifier(fixture.manifestPath);
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  it("rejects non-zero trailing bytes after the archive end marker", () => {
+    const fixture = createFixture();
+    rewriteArchive(fixture, (archive) => {
+      const trailing = Buffer.alloc(512);
+      trailing[511] = 1;
+      return Buffer.concat([archive, trailing]);
+    });
+
+    expectFailure(fixture, /contains data after its end marker/);
+  });
+
+  it("rejects structurally invalid zero-byte archive trailing data", () => {
+    const fixture = createFixture();
+    rewriteArchive(fixture, (archive) => Buffer.concat([archive, Buffer.alloc(1)]));
+
+    expectFailure(fixture, /truncated or incorrectly padded/);
+  });
 });
 
 function makeValidEntries(packageOverrides: Record<string, string> = {}): TarEntry[] {
@@ -267,6 +355,17 @@ function writeManifest(fixture: Fixture) {
   writeFileSync(fixture.manifestPath, JSON.stringify([fixture.metadata]));
 }
 
+function rewriteArchive(fixture: Fixture, mutate: (archive: Buffer) => Buffer | void) {
+  const archive = gunzipSync(readFileSync(fixture.tarballPath));
+  const replacement = mutate(archive) ?? archive;
+  const tarball = gzipSync(replacement);
+  writeFileSync(fixture.tarballPath, tarball);
+  fixture.metadata.size = tarball.length;
+  fixture.metadata.shasum = createHash("sha1").update(tarball).digest("hex");
+  fixture.metadata.integrity = `sha512-${createHash("sha512").update(tarball).digest("base64")}`;
+  writeManifest(fixture);
+}
+
 function runVerifier(manifestPath: string, ...args: string[]) {
   return spawnSync(process.execPath, [verifierPath, manifestPath, ...args], {
     cwd: repoRoot,
@@ -285,18 +384,17 @@ function buildTar(entries: TarEntry[]) {
   for (const entry of entries) {
     const header = Buffer.alloc(512);
     writeString(header, 0, 100, entry.path);
-    writeOctal(header, 100, 8, entry.mode);
-    writeOctal(header, 108, 8, 0);
-    writeOctal(header, 116, 8, 0);
-    writeOctal(header, 124, 12, entry.contents.length);
-    writeOctal(header, 136, 12, 0);
+    writeNpmOctal(header, 100, 8, entry.mode);
+    writeNpmOctal(header, 124, 12, entry.contents.length);
+    writeNpmOctal(header, 136, 12, 0);
     header.fill(0x20, 148, 156);
     writeString(header, 156, 1, entry.type ?? "0");
     if (entry.linkName) writeString(header, 157, 100, entry.linkName);
     writeString(header, 257, 6, "ustar");
     writeString(header, 263, 2, "00");
-    const checksum = header.reduce((sum, byte) => sum + byte, 0);
-    writeString(header, 148, 8, `${checksum.toString(8).padStart(6, "0")}\0 `);
+    writeNpmOctal(header, 329, 8, 0);
+    writeNpmOctal(header, 337, 8, 0);
+    refreshHeaderChecksum(header);
     chunks.push(header, entry.contents);
     const padding = (512 - (entry.contents.length % 512)) % 512;
     if (padding) chunks.push(Buffer.alloc(padding));
@@ -311,6 +409,25 @@ function writeString(buffer: Buffer, offset: number, length: number, value: stri
   encoded.copy(buffer, offset);
 }
 
-function writeOctal(buffer: Buffer, offset: number, length: number, value: number) {
-  writeString(buffer, offset, length, `${value.toString(8).padStart(length - 1, "0")}\0`);
+function writeNpmOctal(buffer: Buffer, offset: number, length: number, value: number) {
+  writeNumericField(buffer, offset, length, value, { terminator: " \0" });
+}
+
+function writeNumericField(
+  buffer: Buffer,
+  offset: number,
+  length: number,
+  value: number,
+  { leading = 0, terminator }: { leading?: number; terminator: string },
+) {
+  const digits = value.toString(8);
+  const zeroes = length - leading - digits.length - terminator.length;
+  if (zeroes < 0) throw new Error(`Test tar number does not fit in ${length} bytes: ${value}`);
+  writeString(buffer, offset, length, `${" ".repeat(leading)}${"0".repeat(zeroes)}${digits}${terminator}`);
+}
+
+function refreshHeaderChecksum(header: Buffer, terminator = " \0") {
+  header.fill(0x20, 148, 156);
+  const checksum = header.reduce((sum, byte) => sum + byte, 0);
+  writeNumericField(header, 148, 8, checksum, { terminator });
 }
