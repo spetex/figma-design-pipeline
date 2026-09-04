@@ -3,7 +3,13 @@ import type { EnrichedNode, FigmaRawNode } from "../../shared/types.js";
 import type { SnapshotProvenance } from "../../pipeline/snapshot.js";
 import { classifyNode } from "../../analysis/node-classifier.js";
 import { extractNodeTokens } from "../../analysis/token-extractor.js";
-import type { InspectionSource, PluginReadNode, PluginReadRoot } from "../../shared/plugin-read.js";
+import type {
+  InspectionSource,
+  PluginReadNode,
+  PluginReadRoot,
+  PluginSelectionMetadata,
+  PluginTruncatedFields,
+} from "../../shared/plugin-read.js";
 import type { InspectionContext } from "./source.js";
 import { requireRest, selectInspectionSource } from "./source.js";
 
@@ -23,6 +29,7 @@ export interface GetTreeSourceParams extends Omit<GetTreeParams, "nodeId"> {
   root?: PluginReadRoot;
   limit?: number;
   timeoutMs?: number;
+  selectionMetadataOffset?: number;
 }
 
 /**
@@ -49,10 +56,7 @@ export interface CompactNode {
   componentId?: string;
   omittedNodeCount?: number;
   continuationNodeId?: string;
-  truncatedFields?: Partial<Record<"name" | "textContent", {
-    originalBytes: number;
-    returnedBytes: number;
-  }>>;
+  truncatedFields?: PluginTruncatedFields;
   children: CompactNode[];
 }
 
@@ -110,7 +114,7 @@ export interface GetTreeResponsePayload {
   traversalDepth: number;
   resultLimit?: number;
   selectionCount?: number;
-  omittedSelection?: Array<{ id: string; name: string; type: string }>;
+  selectionMetadata?: PluginSelectionMetadata;
   note?: string;
   directChildren?: {
     offset: number;
@@ -136,7 +140,7 @@ export interface GetTreeResult extends SnapshotProvenance {
   sourceOmittedNodeCount?: number;
   sourceNodeCountExact?: boolean;
   selectionCount?: number;
-  omittedSelection?: Array<{ id: string; name: string; type: string }>;
+  selectionMetadata?: PluginSelectionMetadata;
 }
 
 export async function handleGetTree(
@@ -179,6 +183,9 @@ export async function handleGetTreeFromSource(
 ): Promise<GetTreeResult> {
   const source = selectInspectionSource(ctx, params.source ?? "auto", params.fileKey);
   const depth = params.depth ?? 10;
+  if ((params.selectionMetadataOffset ?? 0) !== 0 && params.root !== "selection") {
+    throw new Error("selectionMetadataOffset is supported only for selection reads");
+  }
   if (source === "rest") {
     if ((params.root ?? "node") !== "node") {
       throw new Error(`${params.root} is available only with plugin inspection`);
@@ -200,22 +207,23 @@ export async function handleGetTreeFromSource(
     depth,
     limit,
     scanLimit: limit,
+    selectionMetadataOffset: params.selectionMetadataOffset ?? 0,
   }, params.timeoutMs);
   const roots = response.roots.map(pluginNodeToEnriched);
   const root = (params.root ?? "node") === "selection"
-    ? selectionRoot(roots, response.selectionCount)
+    ? selectionRoot(roots, response.selectionCount ?? 0)
     : roots[0];
   if (!root) {
     throw new Error((params.root ?? "node") === "selection"
       ? "Current selection is empty"
       : `Node ${params.nodeId ?? "root"} not found in Figma file`);
   }
-  const returnedSelectionIds = new Set(response.roots.map((candidate) => candidate.id));
-  const omittedSelection = (params.root ?? "node") === "selection"
-    ? response.selection.filter((candidate) => !returnedSelectionIds.has(candidate.id))
-    : undefined;
   const knownOmittedCount = response.totalNodeCount === undefined
-    ? Math.max(response.truncated ? 1 : 0, omittedSelection?.length ?? 0)
+    ? Math.max(
+        response.truncated ? 1 : 0,
+        response.selectionMetadata?.omitted ?? 0,
+        (response.selectionCount ?? 0) - response.roots.length
+      )
     : Math.max(0, response.totalNodeCount - response.returnedCount);
   return {
     nodeId: root.id,
@@ -230,7 +238,7 @@ export async function handleGetTreeFromSource(
     sourceNodeCountExact: response.totalNodeCount !== undefined,
     ...((params.root ?? "node") === "selection" ? {
       selectionCount: response.selectionCount,
-      omittedSelection,
+      selectionMetadata: response.selectionMetadata,
     } : {}),
   };
 }
@@ -277,6 +285,7 @@ function pluginNodeToEnriched(node: PluginReadNode, depth = 0): EnrichedNode {
     name: node.name,
     type: node.type,
     classification: node.classification as EnrichedNode["classification"],
+    truncatedFields: node.truncatedFields,
     depth: node.depth,
     childCount: node.childCount,
     visible: node.visible,
@@ -361,6 +370,7 @@ export function compactTree(node: EnrichedNode, isRequestedRoot = true): Compact
     name: node.name,
     type: node.type,
     classification: node.classification,
+    truncatedFields: node.truncatedFields,
     depth: node.depth,
     childCount: node.childCount,
     returnedChildCount: countReturnedChildren(children),
@@ -585,9 +595,7 @@ function serializeCandidate(
     traversalDepth: result.traversalDepth,
     ...(result.resultLimit !== undefined ? { resultLimit: result.resultLimit } : {}),
     ...(result.selectionCount !== undefined ? { selectionCount: result.selectionCount } : {}),
-    ...(result.omittedSelection && result.omittedSelection.length > 0
-      ? { omittedSelection: result.omittedSelection }
-      : {}),
+    ...(result.selectionMetadata ? { selectionMetadata: result.selectionMetadata } : {}),
     fromCache: result.fromCache,
     snapshotAt: result.snapshotAt,
     cacheAgeMs: result.cacheAgeMs,
@@ -635,6 +643,7 @@ function pruneOversizedScalarFields(node: CompactNode): CompactNode {
     ? undefined
     : truncateUtf8(node.textContent, MAX_SCALAR_FIELD_BYTES);
   const truncatedFields: CompactNode["truncatedFields"] = {
+    ...node.truncatedFields,
     ...(name.truncated ? {
       name: { originalBytes: name.originalBytes, returnedBytes: name.returnedBytes },
     } : {}),

@@ -228,7 +228,7 @@ describe("connected plugin read inspection", () => {
     return { figma, root, component, componentSet };
   }
 
-  it("returns symbol-free bounded trees with visibility, bounds, page, and selection context", async () => {
+  it("returns symbol-free bounded trees without unrelated selection metadata", async () => {
     const { figma } = inspectionFigma();
     const result = await runPluginRead(figma, { depth: 2, limit: 2 });
 
@@ -241,7 +241,6 @@ describe("connected plugin read inspection", () => {
       truncated: true,
       truncationReasons: ["result_limit"],
       currentPage: { id: "page", name: "Components" },
-      selection: [{ id: "frame", name: "Card", type: "FRAME" }],
       roots: [{
         id: "root",
         visible: true,
@@ -251,6 +250,8 @@ describe("connected plugin read inspection", () => {
       }],
     });
     expect(JSON.stringify(result)).not.toContain("Symbol");
+    expect(result).not.toHaveProperty("selection");
+    expect(result).not.toHaveProperty("selectionCount");
     expect(result).not.toHaveProperty("totalNodeCount");
     expect(figma.triggerUndo).not.toHaveBeenCalled();
   });
@@ -301,6 +302,99 @@ describe("connected plugin read inspection", () => {
     expect(childReads).toBeLessThan(10);
   });
 
+  it("bounds a 50,000-node selection to the requested metadata page", async () => {
+    let nameReads = 0;
+    const selection = Array.from({ length: 50_000 }, (_, index) => {
+      const node = { id: `selected-${index}`, type: "FRAME", children: [] } as Record<string, unknown>;
+      Object.defineProperty(node, "name", {
+        enumerable: true,
+        get: () => {
+          nameReads++;
+          return `Selected ${index}`;
+        },
+      });
+      return node;
+    });
+    const figma = baseFigma(async () => null);
+    figma.currentPage = { id: "page", name: "Large selection", selection };
+
+    const result = await runPluginRead(figma, {
+      root: "selection",
+      nodeId: undefined,
+      depth: 0,
+      limit: 1,
+    });
+
+    expect(result).toMatchObject({
+      returnedCount: 1,
+      selectionCount: 50_000,
+      selection: [{ id: "selected-0", name: "Selected 0", type: "FRAME" }],
+      selectionMetadata: { offset: 0, returned: 1, total: 50_000, omitted: 49_999, nextOffset: 1 },
+      roots: [{ id: "selected-0" }],
+    });
+    expect(nameReads).toBeLessThan(10);
+    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThan(20_000);
+
+    figma.ui.postMessage.mockClear();
+    const continuation = await runPluginRead(figma, {
+      root: "selection",
+      nodeId: undefined,
+      depth: 0,
+      limit: 1,
+      selectionMetadataOffset: 1,
+    });
+    expect(continuation).toMatchObject({
+      selection: [{ id: "selected-1", name: "Selected 1" }],
+      selectionMetadata: { offset: 1, returned: 1, total: 50_000, omitted: 49_999, nextOffset: 2 },
+    });
+  });
+
+  it("bounds every Figma-origin scalar and reports exact truncation metadata", async () => {
+    const huge = "😀".repeat(5_000);
+    const text = {
+      id: "text",
+      name: "Label",
+      type: "TEXT",
+      characters: huge,
+      children: [],
+      parent: null,
+    };
+    const component = {
+      id: huge,
+      name: huge,
+      type: "COMPONENT",
+      key: huge,
+      description: huge,
+      children: [text],
+      parent: null,
+    };
+    text.parent = component as never;
+    const figma = baseFigma(async () => component);
+    figma.currentPage = { id: "page", name: huge, selection: [] };
+
+    const result = await runPluginRead(figma, { depth: 1, limit: 2 });
+    const root = result.roots[0];
+    const label = root.children[0];
+
+    for (const value of [result.currentPage.name, root.id, root.name, root.componentKey, root.description, label.textContent]) {
+      expect(Buffer.byteLength(value, "utf8")).toBeLessThanOrEqual(4_000);
+      expect(value.endsWith("…")).toBe(true);
+    }
+    expect(root.truncatedFields).toMatchObject({
+      id: { originalBytes: 20_000, returnedBytes: 3_999 },
+      name: { originalBytes: 20_000, returnedBytes: 3_999 },
+      componentKey: { originalBytes: 20_000, returnedBytes: 3_999 },
+      description: { originalBytes: 20_000, returnedBytes: 3_999 },
+    });
+    expect(label.truncatedFields.textContent).toEqual({ originalBytes: 20_000, returnedBytes: 3_999 });
+    expect(result).toMatchObject({
+      truncated: true,
+      truncationReasons: ["scalar_field_limit"],
+      truncatedFieldCount: 6,
+      omittedScalarBytes: 6 * (20_000 - 3_999),
+    });
+  });
+
   it("filters descendants by exact name, regex name, and node type", async () => {
     const exact = await runPluginRead(inspectionFigma().figma, {
       operation: "find",
@@ -336,7 +430,7 @@ describe("connected plugin read inspection", () => {
   it.each([
     [{ nodeId: "missing" }, "Node not found: missing"],
     [{ operation: "find", filters: { namePattern: "[" } }, "Invalid namePattern regex"],
-    [{ operation: "find", filters: { namePattern: "(a+)+$" } }, "Unsafe namePattern regex"],
+    [{ operation: "find", filters: { namePattern: "^(?<word>a+)\\k<word>+$" } }, "Unsafe namePattern regex"],
     [{ depth: 21 }, "Read depth must be between 0 and 20"],
     [{ limit: 1001 }, "Read limit must be between 1 and 1000"],
     [{ scanLimit: 10001 }, "Read scan limit must be between 1 and 10000"],

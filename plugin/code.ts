@@ -5,14 +5,18 @@ import { classifyNode } from "../src/analysis/node-classifier";
 import {
   MAX_PLUGIN_READ_DEPTH,
   MAX_PLUGIN_READ_RESULTS,
+  MAX_PLUGIN_READ_SCALAR_BYTES,
   MAX_PLUGIN_READ_VISITS,
+  MAX_PLUGIN_SELECTION_METADATA,
   type PluginComponentNode,
   type PluginReadFilters,
   type PluginReadNode,
   type PluginReadRequest,
   type PluginReadResponse,
+  type PluginReadContextNode,
+  type PluginTruncatedFields,
 } from "../src/shared/plugin-read";
-import { compileInspectionRegex } from "../src/shared/safe-regex";
+import { compileInspectionRegex, type InspectionRegex } from "../src/shared/safe-regex";
 
 // ─── SPFR Design Pipeline Plugin v2 ──────────────────────────────
 // High-performance batch executor with font caching, symbolic refs,
@@ -151,6 +155,82 @@ function safeString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function truncateFigmaString(value: string): {
+  value: string;
+  originalBytes: number;
+  returnedBytes: number;
+  truncated: boolean;
+} {
+  let originalBytes = 0;
+  let returnedContentBytes = 0;
+  let returnedEnd = 0;
+  const contentBudget = MAX_PLUGIN_READ_SCALAR_BYTES - 3; // UTF-8 ellipsis
+  let prefixComplete = true;
+
+  for (let index = 0; index < value.length; index++) {
+    const first = value.charCodeAt(index);
+    let characterBytes: number;
+    let characterEnd = index + 1;
+    if (first <= 0x7f) {
+      characterBytes = 1;
+    } else if (first <= 0x7ff) {
+      characterBytes = 2;
+    } else if (first >= 0xd800 && first <= 0xdbff && index + 1 < value.length) {
+      const second = value.charCodeAt(index + 1);
+      if (second >= 0xdc00 && second <= 0xdfff) {
+        characterBytes = 4;
+        characterEnd = index + 2;
+        index++;
+      } else {
+        characterBytes = 3;
+      }
+    } else {
+      // BMP code points and unpaired surrogates both encode to at most 3 bytes.
+      characterBytes = 3;
+    }
+    originalBytes += characterBytes;
+    if (prefixComplete && returnedContentBytes + characterBytes <= contentBudget) {
+      returnedContentBytes += characterBytes;
+      returnedEnd = characterEnd;
+    } else {
+      prefixComplete = false;
+    }
+  }
+
+  if (originalBytes <= MAX_PLUGIN_READ_SCALAR_BYTES) {
+    return { value, originalBytes, returnedBytes: originalBytes, truncated: false };
+  }
+  return {
+    value: `${value.slice(0, returnedEnd)}…`,
+    originalBytes,
+    returnedBytes: returnedContentBytes + 3,
+    truncated: true,
+  };
+}
+
+function boundedFigmaString(
+  value: string,
+  field: string,
+  truncatedFields: PluginTruncatedFields
+): string {
+  const bounded = truncateFigmaString(value);
+  if (bounded.truncated) {
+    truncatedFields[field] = {
+      originalBytes: bounded.originalBytes,
+      returnedBytes: bounded.returnedBytes,
+    };
+  }
+  return bounded.value;
+}
+
+function boundedOptionalFigmaString(
+  value: unknown,
+  field: string,
+  truncatedFields: PluginTruncatedFields
+): string | undefined {
+  return typeof value === "string" ? boundedFigmaString(value, field, truncatedFields) : undefined;
+}
+
 function safeNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
@@ -180,26 +260,34 @@ async function componentMetadata(node: BaseNode): Promise<Pick<PluginReadNode,
     }
   }
   const parent = readProperty(node, "parent") as BaseNode | undefined;
+  const componentKey = safeString(readProperty(node, "key"));
+  const description = safeString(readProperty(node, "description"));
   return {
     ...(componentId ? { componentId } : {}),
     ...((node.type === "COMPONENT" || node.type === "COMPONENT_SET")
-      && safeString(readProperty(node, "key"))
-      ? { componentKey: safeString(readProperty(node, "key"))! }
+      && componentKey
+      ? { componentKey }
       : {}),
     ...((node.type === "COMPONENT" || node.type === "COMPONENT_SET")
-      && safeString(readProperty(node, "description"))
-      ? { description: safeString(readProperty(node, "description"))! }
+      && description
+      ? { description }
       : {}),
     ...(parent?.type === "COMPONENT_SET" ? { componentSetId: parent.id } : {}),
   };
 }
 
 async function serializeReadNode(node: BaseNode, children: PluginReadNode[], depth: number): Promise<PluginReadNode> {
+  const truncatedFields: PluginTruncatedFields = {};
   const bounds = safeBounds(node);
   const visible = readProperty(node, "visible");
-  const characters = safeString(readProperty(node, "characters"));
+  const rawCharacters = safeString(readProperty(node, "characters"));
   const layoutMode = safeString(readProperty(node, "layoutMode"));
-  const metadata = await componentMetadata(node);
+  const rawMetadata = await componentMetadata(node);
+  const textContent = boundedOptionalFigmaString(rawCharacters, "textContent", truncatedFields);
+  const componentId = boundedOptionalFigmaString(rawMetadata.componentId, "componentId", truncatedFields);
+  const componentKey = boundedOptionalFigmaString(rawMetadata.componentKey, "componentKey", truncatedFields);
+  const description = boundedOptionalFigmaString(rawMetadata.description, "description", truncatedFields);
+  const componentSetId = boundedOptionalFigmaString(rawMetadata.componentSetId, "componentSetId", truncatedFields);
   const sourceChildren = readChildren(node);
   const classificationChildren = sourceChildren.slice(0, 20).map((child) => ({
     id: child.id,
@@ -208,22 +296,25 @@ async function serializeReadNode(node: BaseNode, children: PluginReadNode[], dep
     absoluteBoundingBox: safeBounds(child),
   }));
   return {
-    id: node.id,
-    name: node.name,
-    type: node.type,
+    id: boundedFigmaString(node.id, "id", truncatedFields),
+    name: boundedFigmaString(node.name, "name", truncatedFields),
+    type: boundedFigmaString(safeString(readProperty(node, "type")) ?? "UNKNOWN", "type", truncatedFields),
     classification: classifyNode({
       id: node.id,
       name: node.name,
       type: node.type,
       absoluteBoundingBox: bounds,
-      characters,
+      characters: rawCharacters,
       children: classificationChildren,
     }),
     depth,
     ...(typeof visible === "boolean" ? { visible } : {}),
     ...(bounds ? { bounds } : {}),
-    ...(characters !== undefined ? { textContent: characters } : {}),
-    ...metadata,
+    ...(textContent !== undefined ? { textContent } : {}),
+    ...(componentId !== undefined ? { componentId } : {}),
+    ...(componentKey !== undefined ? { componentKey } : {}),
+    ...(description !== undefined ? { description } : {}),
+    ...(componentSetId !== undefined ? { componentSetId } : {}),
     ...(layoutMode === "HORIZONTAL" || layoutMode === "VERTICAL" || layoutMode === "GRID" || layoutMode === "NONE"
       ? { layoutMode }
       : {}),
@@ -233,6 +324,7 @@ async function serializeReadNode(node: BaseNode, children: PluginReadNode[], dep
     ...numberProperty(node, "paddingTop"),
     ...numberProperty(node, "paddingBottom"),
     childCount: sourceChildren.length,
+    ...(Object.keys(truncatedFields).length > 0 ? { truncatedFields } : {}),
     children,
   };
 }
@@ -265,30 +357,34 @@ async function serializeTree(
   return serializeReadNode(node, children, currentDepth);
 }
 
-async function resolveReadRoots(request: PluginReadRequest): Promise<BaseNode[]> {
+async function resolveReadRoots(request: PluginReadRequest): Promise<readonly BaseNode[]> {
   if (request.root === "current-page") return [figma.currentPage];
-  if (request.root === "selection") return [...figma.currentPage.selection];
+  if (request.root === "selection") return figma.currentPage.selection;
   if (!request.nodeId) throw new Error("nodeId is required when root is 'node'");
   const node = await figma.getNodeByIdAsync(request.nodeId);
   if (!node) throw new Error(`Node not found: ${request.nodeId}`);
   return [node];
 }
 
-function compileReadRegex(pattern: string | undefined, label: string): RegExp | undefined {
+function compileReadRegex(pattern: string | undefined, label: string): InspectionRegex | undefined {
   return compileInspectionRegex(pattern, label);
 }
 
 function nodeMatches(
+  source: BaseNode,
   node: PluginReadNode,
   filters: PluginReadFilters,
-  nameRegex?: RegExp,
-  textRegex?: RegExp
+  nameRegex?: InspectionRegex,
+  textRegex?: InspectionRegex
 ): boolean {
-  if (filters.name !== undefined && node.name !== filters.name) return false;
-  if (nameRegex && !nameRegex.test(node.name)) return false;
-  if (filters.type && node.type.toUpperCase() !== filters.type.toUpperCase()) return false;
+  const sourceName = safeString(readProperty(source, "name")) ?? "";
+  const sourceText = safeString(readProperty(source, "characters"));
+  const sourceType = safeString(readProperty(source, "type")) ?? "";
+  if (filters.name !== undefined && sourceName !== filters.name) return false;
+  if (nameRegex && !nameRegex.test(sourceName)) return false;
+  if (filters.type && sourceType.toUpperCase() !== filters.type.toUpperCase()) return false;
   if (filters.classification && node.classification !== filters.classification) return false;
-  if (textRegex && (!node.textContent || !textRegex.test(node.textContent))) return false;
+  if (textRegex && (!sourceText || !textRegex.test(sourceText))) return false;
   if (filters.componentId && node.componentId !== filters.componentId) return false;
   if (filters.hasChildren !== undefined && (node.childCount > 0) !== filters.hasChildren) return false;
   if (filters.minWidth !== undefined && (!node.bounds || node.bounds.width < filters.minWidth)) return false;
@@ -323,8 +419,21 @@ async function walkReadNodes(
   return true;
 }
 
-function readResponseBase(request: PluginReadRequest): Omit<PluginReadResponse,
-  "success" | "roots" | "matches" | "components" | "totalScanned" | "returnedCount" | "truncated" | "truncationReasons" | "scanLimitReached"> {
+function serializeContextNode(node: BaseNode): PluginReadContextNode {
+  const truncatedFields: PluginTruncatedFields = {};
+  return {
+    id: boundedFigmaString(safeString(readProperty(node, "id")) ?? "unknown", "id", truncatedFields),
+    name: boundedFigmaString(safeString(readProperty(node, "name")) ?? "Unknown", "name", truncatedFields),
+    type: boundedFigmaString(safeString(readProperty(node, "type")) ?? "UNKNOWN", "type", truncatedFields),
+    ...(Object.keys(truncatedFields).length > 0 ? { truncatedFields } : {}),
+  };
+}
+
+function readResponseBase(request: PluginReadRequest) {
+  const currentPage = serializeContextNode(figma.currentPage);
+  const selectionContext = request.root === "selection"
+    ? serializeSelectionMetadata(request)
+    : undefined;
   return {
     type: "read_response",
     requestId: request.requestId,
@@ -333,9 +442,67 @@ function readResponseBase(request: PluginReadRequest): Omit<PluginReadResponse,
     traversalDepth: request.depth,
     resultLimit: request.limit,
     scanLimit: request.scanLimit,
-    currentPage: { id: figma.currentPage.id, name: figma.currentPage.name },
-    selection: figma.currentPage.selection.map((node) => ({ id: node.id, name: node.name, type: node.type })),
-    selectionCount: figma.currentPage.selection.length,
+    currentPage,
+    ...(selectionContext ?? {}),
+  } as const;
+}
+
+function serializeSelectionMetadata(request: PluginReadRequest): Pick<PluginReadResponse,
+  "selection" | "selectionCount" | "selectionMetadata"> {
+  const source = figma.currentPage.selection;
+  const requestedOffset = request.selectionMetadataOffset ?? 0;
+  const offset = Number.isInteger(requestedOffset) && requestedOffset >= 0 && requestedOffset <= source.length
+    ? requestedOffset
+    : 0;
+  const requestedLimit = Number.isInteger(request.limit) && request.limit > 0 ? request.limit : 1;
+  const end = Math.min(source.length, offset + Math.min(requestedLimit, MAX_PLUGIN_SELECTION_METADATA));
+  const selection: PluginReadContextNode[] = [];
+  for (let index = offset; index < end; index++) {
+    selection.push(serializeContextNode(source[index]!));
+  }
+  return {
+    selection,
+    selectionCount: source.length,
+    selectionMetadata: {
+      offset,
+      returned: selection.length,
+      total: source.length,
+      omitted: source.length - selection.length,
+      ...(end < source.length ? { nextOffset: end } : {}),
+    },
+  };
+}
+
+function finalizeReadResponse(
+  response: Omit<PluginReadResponse, "truncatedFieldCount" | "omittedScalarBytes">
+): PluginReadResponse {
+  let truncatedFieldCount = 0;
+  let omittedScalarBytes = 0;
+  const add = (fields: PluginTruncatedFields | undefined): void => {
+    for (const field of Object.values(fields ?? {})) {
+      truncatedFieldCount++;
+      omittedScalarBytes += field.originalBytes - field.returnedBytes;
+    }
+  };
+  const visitNode = (node: PluginReadNode): void => {
+    add(node.truncatedFields);
+    node.children.forEach(visitNode);
+  };
+  add(response.currentPage.truncatedFields);
+  response.selection?.forEach((node) => add(node.truncatedFields));
+  response.roots.forEach(visitNode);
+  response.matches.forEach(visitNode);
+  response.components.forEach((component) => add(component.truncatedFields));
+  const scalarLimited = truncatedFieldCount > 0;
+  return {
+    ...response,
+    truncated: response.truncated || scalarLimited,
+    truncationReasons: Array.from(new Set([
+      ...response.truncationReasons,
+      ...(scalarLimited ? ["scalar_field_limit" as const] : []),
+    ])),
+    truncatedFieldCount,
+    omittedScalarBytes,
   };
 }
 
@@ -358,6 +525,15 @@ async function processReadRequest(request: PluginReadRequest): Promise<PluginRea
   if (request.root !== "node" && request.root !== "current-page" && request.root !== "selection") {
     throw new Error(`Unsupported read root: ${String(request.root)}`);
   }
+  if (!Number.isInteger(request.selectionMetadataOffset ?? 0) || (request.selectionMetadataOffset ?? 0) < 0) {
+    throw new Error("Selection metadata offset must be a non-negative integer");
+  }
+  if (request.root !== "selection" && (request.selectionMetadataOffset ?? 0) !== 0) {
+    throw new Error("Selection metadata offset is supported only for selection reads");
+  }
+  if (request.root === "selection" && (request.selectionMetadataOffset ?? 0) > figma.currentPage.selection.length) {
+    throw new Error(`Selection metadata offset exceeds the ${figma.currentPage.selection.length}-node selection`);
+  }
 
   const roots = await resolveReadRoots(request);
   const base = readResponseBase(request);
@@ -370,7 +546,7 @@ async function processReadRequest(request: PluginReadRequest): Promise<PluginRea
       serializedRoots.push(serialized);
     }
     const returnedCount = request.limit - budget.remaining;
-    return {
+    return finalizeReadResponse({
       ...base,
       success: true,
       roots: serializedRoots,
@@ -382,7 +558,7 @@ async function processReadRequest(request: PluginReadRequest): Promise<PluginRea
       truncated: budget.truncated,
       truncationReasons: budget.truncated ? ["result_limit"] : [],
       scanLimitReached: false,
-    };
+    });
   }
 
   const matches: PluginReadNode[] = [];
@@ -394,7 +570,7 @@ async function processReadRequest(request: PluginReadRequest): Promise<PluginRea
   const textRegex = compileReadRegex(filters.textContent, "textContent");
   await walkReadNodes(roots, request.depth, scanBudget, async (node, nodeDepth) => {
     const serialized = await serializeReadNode(node, [], nodeDepth);
-    if (request.operation === "find" && nodeMatches(serialized, filters, nameRegex, textRegex)) {
+    if (request.operation === "find" && nodeMatches(node, serialized, filters, nameRegex, textRegex)) {
       if (matches.length >= request.limit) {
         resultLimitReached = true;
         return false;
@@ -406,6 +582,18 @@ async function processReadRequest(request: PluginReadRequest): Promise<PluginRea
         resultLimitReached = true;
         return false;
       }
+      const truncatedFields: PluginTruncatedFields = {};
+      for (const [sourceField, targetField] of [
+        ["id", "id"],
+        ["name", "name"],
+        ["type", "type"],
+        ["componentKey", "key"],
+        ["description", "description"],
+        ["componentSetId", "componentSetId"],
+      ] as const) {
+        const truncation = serialized.truncatedFields?.[sourceField];
+        if (truncation) truncatedFields[targetField] = truncation;
+      }
       components.push({
         id: serialized.id,
         name: serialized.name,
@@ -413,12 +601,13 @@ async function processReadRequest(request: PluginReadRequest): Promise<PluginRea
         ...(serialized.componentKey ? { key: serialized.componentKey } : {}),
         ...(serialized.description ? { description: serialized.description } : {}),
         ...(serialized.componentSetId ? { componentSetId: serialized.componentSetId } : {}),
+        ...(Object.keys(truncatedFields).length > 0 ? { truncatedFields } : {}),
       } as PluginComponentNode);
     }
     return true;
   });
 
-  return {
+  return finalizeReadResponse({
     ...base,
     success: true,
     roots: [],
@@ -432,7 +621,7 @@ async function processReadRequest(request: PluginReadRequest): Promise<PluginRea
       ...(scanBudget.limitReached ? ["scan_limit" as const] : []),
     ],
     scanLimitReached: scanBudget.limitReached,
-  };
+  });
 }
 
 // ─── Paint Sanitizer (strip 'a' from color — Figma uses paint-level opacity) ──
@@ -1346,7 +1535,7 @@ figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
         const message = err instanceof Error ? err.message : String(err);
         figma.ui.postMessage({
           type: "send_to_bridge",
-          data: {
+          data: finalizeReadResponse({
             ...readResponseBase(request),
             success: false,
             roots: [],
@@ -1358,7 +1547,7 @@ figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
             truncationReasons: [],
             scanLimitReached: false,
             error: message,
-          } satisfies PluginReadResponse,
+          }),
         });
       }
     } else if (data.type === "ping") {

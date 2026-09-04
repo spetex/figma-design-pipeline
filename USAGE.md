@@ -51,14 +51,16 @@ configured (see [INSTALL.md](INSTALL.md)).
 Plugin-backed tools accept `root: "node" | "current-page" | "selection"`.
 Traversal is bounded by `depth` and `limit`; searches and component discovery
 also stop at `scanLimit` (default 1,000 nodes) even when matches are sparse or
-absent. Responses distinguish `result_limit` from `scan_limit`. Current page
-and selection context are included in find/component responses. Selection-tree
-responses retain the full selection count and metadata, including omitted root
-IDs when the result limit is reached. `figma_find_nodes` supports both an exact,
-case-sensitive `name` and a restricted case-insensitive regex `namePattern`,
-plus the existing type and structural filters. Backreferences, lookarounds,
-oversized patterns, and quantified groups containing alternation or another
-quantifier are rejected to prevent unbounded regex work. Plugin trees return
+absent. Responses distinguish `result_limit` from `scan_limit`. Current-page
+context is included in plugin responses; selection metadata is collected only
+for selection-root reads and is deterministically paged. Follow
+`selectionMetadata.nextOffset` with `selectionMetadataOffset`; `total`,
+`returned`, and `omitted` remain truthful even for a 50,000-node selection.
+`figma_find_nodes` supports both an exact, case-sensitive `name` and a
+case-insensitive RE2 `namePattern`. The pure-JavaScript matcher guarantees
+linear-time work for nested and overlapping repetitions. Backreferences,
+lookarounds, unsupported RE2 constructs, and patterns over 256 characters fail
+closed with a validation error. Plugin trees return
 the safe structural subset; choose `source: "rest"` when style/token enrichment
 from `includeStyles` is required.
 
@@ -119,9 +121,9 @@ after descendant pruning is paginated. In that case, pass
 Every emitted `nextOffset` is strictly greater than the request's `childOffset`;
 a response without `nextOffset` is terminal.
 
-If an individual `name` or `textContent` value would prevent even one direct
-child from fitting, the value is UTF-8-byte bounded while the node ID and node
-record remain present and retrievable. The response includes
+Every Figma-origin scalar in plugin inspection (including IDs, names, text,
+component keys/descriptions, and page/selection context) is capped at 4,000
+UTF-8 bytes. The response includes
 `scalar_field_limit`, `truncatedFieldCount`, `omittedScalarBytes`, and per-node
 `truncatedFields` byte counts. Scalar compaction does not change node counts or
 `omittedNodeCount`.
@@ -133,8 +135,8 @@ including synthetic `COLLAPSED` and `TRUNCATED` markers. Use
 result-limited plugin tree cannot count the remaining tree without defeating
 its work bound, so its node and omission counts are lower bounds with
 `totalNodeCountExact: false` and `omittedNodeCountExact: false`;
-selection responses separately include `selectionCount` and
-`omittedSelection`. Size-limited responses retain the legacy `note` field
+selection responses separately include `selectionCount` and bounded
+`selectionMetadata`. Size-limited responses retain the legacy `note` field
 alongside the structured metadata.
 
 `figma_find_nodes` echoes the requested relative traversal depth as `traversalDepth`

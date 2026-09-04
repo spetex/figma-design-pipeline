@@ -1,5 +1,12 @@
 import type { ToolContext } from "../../shared/context.js";
-import type { InspectionSource, PluginReadRoot } from "../../shared/plugin-read.js";
+import type {
+  InspectionSource,
+  PluginReadContextNode,
+  PluginReadRoot,
+  PluginReadTruncationReason,
+  PluginSelectionMetadata,
+  PluginTruncatedFields,
+} from "../../shared/plugin-read.js";
 import type { InspectionContext } from "./source.js";
 import { requireRest, selectInspectionSource } from "./source.js";
 import { handleGetTree } from "./get-tree.js";
@@ -13,6 +20,7 @@ export interface ComponentMeta {
   type?: "COMPONENT" | "COMPONENT_SET";
   componentSetId?: string;
   containingFrame?: { name: string; nodeId: string };
+  truncatedFields?: PluginTruncatedFields;
 }
 
 export interface GetComponentsResult {
@@ -28,9 +36,13 @@ export interface GetComponentsResult {
   nextOffset?: number;
   scanLimit?: number;
   scanLimitReached?: boolean;
-  truncationReasons?: Array<"result_limit" | "scan_limit">;
-  currentPage?: { id: string; name: string };
-  selection?: Array<{ id: string; name: string; type: string }>;
+  truncationReasons?: PluginReadTruncationReason[];
+  truncatedFieldCount?: number;
+  omittedScalarBytes?: number;
+  currentPage?: PluginReadContextNode;
+  selection?: PluginReadContextNode[];
+  selectionCount?: number;
+  selectionMetadata?: PluginSelectionMetadata;
 }
 
 export interface GetComponentsSourceParams {
@@ -43,6 +55,7 @@ export interface GetComponentsSourceParams {
   timeoutMs?: number;
   offset?: number;
   scanLimit?: number;
+  selectionMetadataOffset?: number;
 }
 
 /**
@@ -93,6 +106,9 @@ export async function handleGetComponentsFromSource(
   const limit = params.limit ?? 200;
   const offset = params.offset ?? 0;
   const scanLimit = params.scanLimit ?? 1_000;
+  if ((params.selectionMetadataOffset ?? 0) !== 0 && requestedRoot !== "selection") {
+    throw new Error("selectionMetadataOffset is supported only for selection reads");
+  }
   if (source === "rest") {
     const rest = requireRest(ctx);
     if (requestedRoot !== "node") {
@@ -164,6 +180,7 @@ export async function handleGetComponentsFromSource(
     depth,
     limit,
     scanLimit,
+    selectionMetadataOffset: params.selectionMetadataOffset ?? 0,
   }, params.timeoutMs);
   return {
     components: response.components.map((component) => ({
@@ -173,9 +190,12 @@ export async function handleGetComponentsFromSource(
       nodeId: component.id,
       type: component.type,
       componentSetId: component.componentSetId,
+      truncatedFields: component.truncatedFields,
     })),
     totalCount: response.components.length,
-    totalCountExact: !response.truncated,
+    totalCountExact: !response.truncationReasons.some(
+      (reason) => reason === "result_limit" || reason === "scan_limit"
+    ),
     source: "plugin",
     truncated: response.truncated,
     traversalDepth: response.traversalDepth,
@@ -185,8 +205,12 @@ export async function handleGetComponentsFromSource(
     scanLimit: response.scanLimit,
     scanLimitReached: response.scanLimitReached,
     truncationReasons: response.truncationReasons,
+    truncatedFieldCount: response.truncatedFieldCount,
+    omittedScalarBytes: response.omittedScalarBytes,
     currentPage: response.currentPage,
     selection: response.selection,
+    selectionCount: response.selectionCount,
+    selectionMetadata: response.selectionMetadata,
   };
 }
 

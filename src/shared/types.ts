@@ -168,6 +168,8 @@ export interface EnrichedNode {
   name: string;
   type: string;
   classification: NodeClassification;
+  /** Figma-origin string fields already bounded by plugin inspection. */
+  truncatedFields?: Record<string, { originalBytes: number; returnedBytes: number }>;
   depth: number;
   childCount: number;
   visible?: boolean;
@@ -328,6 +330,7 @@ export const getTreeInputSchema = z.object({
   limit: z.number().int().min(1).max(1000).default(500).describe("Maximum real nodes returned by plugin inspection"),
   timeoutMs: inspectionTimeoutField,
   childOffset: z.number().int().min(0).default(0).describe("Direct-child offset from a prior response's directChildren.nextOffset continuation"),
+  selectionMetadataOffset: z.number().int().min(0).default(0).describe("Selection metadata offset; follow selectionMetadata.nextOffset when present (plugin selection reads only)"),
   includeStyles: z.boolean().default(true).describe("Include style/token information on REST reads; plugin reads return the safe structural inspection subset"),
   refresh: z.boolean().default(false).describe("Bypass the inspection snapshot and make a new Figma REST request. This does not guarantee Figma REST has observed a just-made plugin edit."),
   maxAgeMs: z.number().int().min(0).optional().describe("Maximum acceptable inspection snapshot age in milliseconds. Set to 0 to bypass the snapshot, like refresh: true."),
@@ -432,7 +435,7 @@ export const findNodesInputSchema = z.object({
   source: inspectionSourceField,
   root: inspectionRootField,
   name: z.string().optional().describe("Exact, case-sensitive node name"),
-  namePattern: z.string().optional().describe("Restricted backtracking-safe regex pattern to match node names (case-insensitive; no lookaround or backreferences)"),
+  namePattern: z.string().optional().describe("Linear-time RE2 regex pattern to match node names (case-insensitive; no lookaround or backreferences)"),
   type: z.string().optional().describe("Figma node type filter (e.g., 'FRAME', 'INSTANCE', 'TEXT', 'COMPONENT')"),
   classification: z
     .enum([
@@ -442,7 +445,7 @@ export const findNodesInputSchema = z.object({
     ])
     .optional()
     .describe("Filter by node classification"),
-  textContent: z.string().optional().describe("Restricted backtracking-safe regex pattern to match text content (case-insensitive; no lookaround or backreferences)"),
+  textContent: z.string().optional().describe("Linear-time RE2 regex pattern to match text content (case-insensitive; no lookaround or backreferences)"),
   componentId: z.string().optional().describe("Filter instances by component ID"),
   hasChildren: z.boolean().optional().describe("Filter nodes with/without children"),
   minWidth: z.number().optional().describe("Minimum node width in pixels"),
@@ -451,6 +454,7 @@ export const findNodesInputSchema = z.object({
   maxHeight: z.number().optional().describe("Maximum node height in pixels"),
   limit: z.number().int().min(1).max(200).default(50).describe("Maximum matches to return; plugin responses distinguish result-limit and scan-limit truncation"),
   scanLimit: z.number().int().min(1).max(10000).default(1000).describe("Maximum plugin nodes visited, including sparse or no-match searches"),
+  selectionMetadataOffset: z.number().int().min(0).default(0).describe("Selection metadata offset; follow selectionMetadata.nextOffset when present (plugin selection reads only)"),
   depth: z.number().int().min(0).max(20).default(10).describe("Maximum traversal depth relative to the searched root (root is depth 0); echoed as traversalDepth"),
   timeoutMs: inspectionTimeoutField,
   refresh: z.boolean().default(false).describe("Bypass the inspection snapshot and make a new Figma REST request. This does not guarantee Figma REST has observed a just-made plugin edit."),
@@ -468,6 +472,7 @@ export const getComponentsInputSchema = z.object({
   limit: z.number().int().min(1).max(1000).default(200).describe("Maximum component and component-set nodes returned"),
   scanLimit: z.number().int().min(1).max(10000).default(1000).describe("Maximum plugin nodes visited, including sparse or no-match searches"),
   offset: z.number().int().min(0).default(0).describe("Whole-file REST component offset; follow nextOffset when present"),
+  selectionMetadataOffset: z.number().int().min(0).default(0).describe("Selection metadata offset; follow selectionMetadata.nextOffset when present (plugin selection reads only)"),
   timeoutMs: inspectionTimeoutField,
 });
 

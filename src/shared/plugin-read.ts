@@ -1,11 +1,35 @@
 export const MAX_PLUGIN_READ_DEPTH = 20;
 export const MAX_PLUGIN_READ_RESULTS = 1_000;
 export const MAX_PLUGIN_READ_VISITS = 10_000;
+export const MAX_PLUGIN_READ_SCALAR_BYTES = 4_000;
+export const MAX_PLUGIN_SELECTION_METADATA = 100;
 
 export type InspectionSource = "auto" | "plugin" | "rest";
 export type PluginReadRoot = "node" | "current-page" | "selection";
 export type PluginReadOperation = "tree" | "find" | "components";
-export type PluginReadTruncationReason = "result_limit" | "scan_limit";
+export type PluginReadTruncationReason = "result_limit" | "scan_limit" | "scalar_field_limit";
+
+export interface PluginScalarTruncation {
+  originalBytes: number;
+  returnedBytes: number;
+}
+
+export type PluginTruncatedFields = Record<string, PluginScalarTruncation>;
+
+export interface PluginReadContextNode {
+  id: string;
+  name: string;
+  type: string;
+  truncatedFields?: PluginTruncatedFields;
+}
+
+export interface PluginSelectionMetadata {
+  offset: number;
+  returned: number;
+  total: number;
+  omitted: number;
+  nextOffset?: number;
+}
 
 export interface PluginReadFilters {
   name?: string;
@@ -31,6 +55,7 @@ export interface PluginReadRequest {
   depth: number;
   limit: number;
   scanLimit: number;
+  selectionMetadataOffset?: number;
   filters?: PluginReadFilters;
 }
 
@@ -55,6 +80,7 @@ export interface PluginReadNode {
   paddingTop?: number;
   paddingBottom?: number;
   childCount: number;
+  truncatedFields?: PluginTruncatedFields;
   children: PluginReadNode[];
 }
 
@@ -65,6 +91,7 @@ export interface PluginComponentNode {
   key?: string;
   description?: string;
   componentSetId?: string;
+  truncatedFields?: PluginTruncatedFields;
 }
 
 export interface PluginReadResponse {
@@ -85,8 +112,11 @@ export interface PluginReadResponse {
   resultLimit: number;
   scanLimit: number;
   scanLimitReached: boolean;
-  currentPage: { id: string; name: string };
-  selection: Array<{ id: string; name: string; type: string }>;
-  selectionCount: number;
+  truncatedFieldCount: number;
+  omittedScalarBytes: number;
+  currentPage: PluginReadContextNode;
+  selection?: PluginReadContextNode[];
+  selectionCount?: number;
+  selectionMetadata?: PluginSelectionMetadata;
   error?: string;
 }

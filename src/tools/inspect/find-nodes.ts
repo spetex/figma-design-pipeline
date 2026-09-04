@@ -2,7 +2,15 @@ import type { ToolContext } from "../../shared/context.js";
 import type { EnrichedNode, NodeClassification } from "../../shared/types.js";
 import { handleGetTree } from "./get-tree.js";
 import type { SnapshotProvenance } from "../../pipeline/snapshot.js";
-import type { InspectionSource, PluginReadNode, PluginReadRoot } from "../../shared/plugin-read.js";
+import type {
+  InspectionSource,
+  PluginReadContextNode,
+  PluginReadNode,
+  PluginReadRoot,
+  PluginReadTruncationReason,
+  PluginSelectionMetadata,
+  PluginTruncatedFields,
+} from "../../shared/plugin-read.js";
 import type { InspectionContext } from "./source.js";
 import { requireRest, selectInspectionSource } from "./source.js";
 import { compileInspectionRegex } from "../../shared/safe-regex.js";
@@ -33,6 +41,7 @@ export interface FindNodesSourceParams extends Omit<FindNodesParams, "nodeId"> {
   root?: PluginReadRoot;
   timeoutMs?: number;
   scanLimit?: number;
+  selectionMetadataOffset?: number;
 }
 
 export interface FoundNode {
@@ -46,6 +55,7 @@ export interface FoundNode {
   bounds?: { x: number; y: number; width: number; height: number };
   textContent?: string;
   componentId?: string;
+  truncatedFields?: PluginTruncatedFields;
   isComponent: boolean;
   isInstance: boolean;
 }
@@ -58,11 +68,15 @@ export interface FindNodesResult extends SnapshotProvenance {
   matchLimit: number;
   scanLimit?: number;
   scanLimitReached?: boolean;
-  truncationReasons?: Array<"result_limit" | "scan_limit">;
+  truncationReasons?: PluginReadTruncationReason[];
+  truncatedFieldCount?: number;
+  omittedScalarBytes?: number;
   fromCache: boolean;
   source: "plugin" | "rest";
-  currentPage?: { id: string; name: string };
-  selection?: Array<{ id: string; name: string; type: string }>;
+  currentPage?: PluginReadContextNode;
+  selection?: PluginReadContextNode[];
+  selectionCount?: number;
+  selectionMetadata?: PluginSelectionMetadata;
 }
 
 /**
@@ -153,6 +167,9 @@ export async function handleFindNodesFromSource(
   const depth = params.depth ?? 10;
   const limit = params.limit ?? 50;
   const scanLimit = params.scanLimit ?? 1_000;
+  if ((params.selectionMetadataOffset ?? 0) !== 0 && params.root !== "selection") {
+    throw new Error("selectionMetadataOffset is supported only for selection reads");
+  }
   compileInspectionRegex(params.namePattern, "namePattern");
   compileInspectionRegex(params.textContent, "textContent");
   if (source === "rest") {
@@ -174,6 +191,7 @@ export async function handleFindNodesFromSource(
     depth,
     limit,
     scanLimit,
+    selectionMetadataOffset: params.selectionMetadataOffset ?? 0,
     filters: {
       name: params.name,
       namePattern: params.namePattern,
@@ -197,12 +215,16 @@ export async function handleFindNodesFromSource(
     scanLimit: response.scanLimit,
     scanLimitReached: response.scanLimitReached,
     truncationReasons: response.truncationReasons,
+    truncatedFieldCount: response.truncatedFieldCount,
+    omittedScalarBytes: response.omittedScalarBytes,
     fromCache: false,
     source: "plugin",
     snapshotAt: new Date().toISOString(),
     cacheAgeMs: 0,
     currentPage: response.currentPage,
     selection: response.selection,
+    selectionCount: response.selectionCount,
+    selectionMetadata: response.selectionMetadata,
   };
 }
 
@@ -218,6 +240,7 @@ function pluginFoundNode(node: PluginReadNode): FoundNode {
     bounds: node.bounds,
     textContent: node.textContent,
     componentId: node.componentId,
+    truncatedFields: node.truncatedFields,
     isComponent: node.type === "COMPONENT" || node.type === "COMPONENT_SET",
     isInstance: node.type === "INSTANCE",
   };

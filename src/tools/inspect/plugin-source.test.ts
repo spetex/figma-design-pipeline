@@ -45,7 +45,9 @@ function pluginResponse(overrides: Partial<PluginReadResponse> = {}): PluginRead
     resultLimit: 50,
     scanLimit: 1000,
     scanLimitReached: false,
-    currentPage: { id: "page", name: "Page" },
+    truncatedFieldCount: 0,
+    omittedScalarBytes: 0,
+    currentPage: { id: "page", name: "Page", type: "PAGE" },
     selection: [{ id: "child", name: "Primary", type: "COMPONENT" }],
     selectionCount: 1,
     ...overrides,
@@ -162,6 +164,41 @@ describe("plugin inspection source routing", () => {
     });
   });
 
+  it("preserves plugin scalar truncation metadata in the serialized tree", async () => {
+    const truncation = { originalBytes: 20_000, returnedBytes: 3_999 };
+    const root = {
+      ...pluginResponse().roots[0]!,
+      name: `${"😀".repeat(999)}…`,
+      truncatedFields: { name: truncation },
+    };
+    const { ctx } = context({ response: pluginResponse({
+      roots: [root],
+      returnedCount: 2,
+      totalNodeCount: 2,
+      truncated: true,
+      truncationReasons: ["scalar_field_limit"],
+      truncatedFieldCount: 1,
+      omittedScalarBytes: 16_001,
+    }) });
+
+    const result = await handleGetTreeFromSource(ctx, {
+      fileKey: "file-a",
+      nodeId: "root",
+      source: "plugin",
+      depth: 2,
+      limit: 50,
+    });
+    const payload = serializeGetTreeResponse(result).payload;
+
+    expect(payload).toMatchObject({
+      truncated: true,
+      truncationReasons: ["scalar_field_limit"],
+      truncatedFieldCount: 1,
+      omittedScalarBytes: 16_001,
+      tree: { truncatedFields: { name: truncation } },
+    });
+  });
+
   it.each([
     { label: "disconnected plugin", connected: false, openFile: "file-a" },
     { label: "different open file", connected: true, openFile: "file-b" },
@@ -261,7 +298,7 @@ describe("plugin inspection source routing", () => {
       fileKey: "file-a",
       nodeId: "root",
       source: "plugin",
-      namePattern: "(a+)+$",
+      namePattern: "^(a+)\\1$",
     })).rejects.toThrow("Unsafe namePattern regex");
     expect(pluginContext.read).not.toHaveBeenCalled();
 
@@ -270,7 +307,7 @@ describe("plugin inspection source routing", () => {
       fileKey: "file-a",
       nodeId: "root",
       source: "rest",
-      namePattern: "(a|aa)+$",
+      namePattern: "(?=unsafe)",
     })).rejects.toThrow("Unsafe namePattern regex");
     expect(restContext.getFileNodes).not.toHaveBeenCalled();
   });
@@ -334,7 +371,7 @@ describe("plugin inspection source routing", () => {
     expect(read).not.toHaveBeenCalled();
   });
 
-  it("retains full selection metadata when a result-limited tree omits selected roots", async () => {
+  it("retains truthful bounded selection metadata when result-limited roots are omitted", async () => {
     const selected = [
       { id: "child", name: "Primary", type: "COMPONENT" },
       { id: "second", name: "Secondary", type: "COMPONENT" },
@@ -350,6 +387,7 @@ describe("plugin inspection source routing", () => {
       resultLimit: 1,
       selection: selected,
       selectionCount: 3,
+      selectionMetadata: { offset: 0, returned: 1, total: 3, omitted: 2, nextOffset: 1 },
     }) });
 
     const result = await handleGetTreeFromSource(ctx, {
@@ -366,7 +404,7 @@ describe("plugin inspection source routing", () => {
       totalNodeCountExact: false,
       omittedNodeCountExact: false,
       omittedNodeCount: 2,
-      omittedSelection: [selected[1], selected[2]],
+      selectionMetadata: { offset: 0, returned: 1, total: 3, omitted: 2, nextOffset: 1 },
       tree: { id: "selection", childCount: 3, returnedChildCount: 1 },
     });
   });

@@ -165,7 +165,7 @@ Use this path when the goal is understanding a design, not modifying it.
 - Any vector compaction, size pruning, or oversized scalar compaction is explicit through truncated and truncationReasons. Scalar compaction reports truncatedFieldCount, omittedScalarBytes, and per-node truncatedFields.
 - Follow directChildren.nextOffset using childOffset for another wide-root page; every emitted nextOffset is strictly greater than the current offset.
 - childCount is the source total; returnedChildCount is the number of real direct children present. Follow continuation nodeIds with focused figma_get_tree calls.
-- figma_find_nodes supports exact name, a backtracking-safe subset of case-insensitive namePattern regex, and type filters (plus its existing filters). It echoes traversalDepth, matchLimit, and plugin scan-limit metadata.
+- figma_find_nodes supports exact name, linear-time case-insensitive RE2 namePattern regex, and type filters (plus its existing filters). It echoes traversalDepth, matchLimit, and plugin scan-limit metadata.
 - Omit both root and nodeId from figma_get_components for its legacy whole-file REST listing, then follow nextOffset with offset. Explicit current-page/selection roots remain plugin-only and never become whole-file fallbacks.
 - figma_extract_tokens is the detailed style view. Do not request it unless token detail is actually needed.
 - For very large files, keep drilling into specific nodeIds instead of repeating root fetches.
@@ -391,7 +391,7 @@ server.tool(
 
 server.tool(
   "figma_find_nodes",
-  "Search bounded descendants through source auto|plugin|rest by exact name, restricted backtracking-safe case-insensitive regex, type, classification, text content, component ID, children, or size. auto prefers an exact-file connected plugin and falls back to REST. Plugin reads need no token and support node/current-page/selection roots. traversalDepth, matchLimit, scanLimit, truncationReasons, and scanLimitReached expose the traversal bounds.",
+  "Search bounded descendants through source auto|plugin|rest by exact name, linear-time case-insensitive RE2 regex, type, classification, text content, component ID, children, or size. auto prefers an exact-file connected plugin and falls back to REST. Plugin reads need no token and support node/current-page/selection roots. traversalDepth, matchLimit, scanLimit, truncationReasons, and scanLimitReached expose the traversal bounds.",
   findNodesInputSchema.shape,
   async (params) => {
     const fileKey = resolveInspectionFile(params);
