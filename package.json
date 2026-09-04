@@ -66,6 +66,7 @@
     "check:src": "tsc --noEmit -p tsconfig.json",
     "check:scripts": "tsc -p tsconfig.scripts.json",
     "test": "vitest run --passWithNoTests",
+    "test:package-verifier": "vitest run scripts/verify-package.test.ts",
     "install:clients": "node scripts/install.mjs",
     "prepack": "npm run build",
     "test:watch": "vitest"

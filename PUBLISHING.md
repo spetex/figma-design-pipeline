@@ -27,14 +27,17 @@ npm audit --omit=dev
 npm run check          # type-check server source and Node-side scripts
 npm test               # vitest
 npm run build          # builds server + plugin
-npm pack --ignore-scripts --dry-run --json > /tmp/figma-design-pipeline-pack.json
-node scripts/verify-package.mjs /tmp/figma-design-pipeline-pack.json
+CANDIDATE_DIR="$(mktemp -d)"
+npm pack --ignore-scripts --json --pack-destination "$CANDIDATE_DIR" > "$CANDIDATE_DIR/npm-pack.json"
+node scripts/verify-package.mjs "$CANDIDATE_DIR/npm-pack.json"
 git diff --check
 ```
 
-The verifier requires the server bundle, plugin distribution, installer, client
-skill, executable shims, and release documentation, and rejects unexpected
-package contents, tests, and fixtures.
+The verifier opens the generated tarball, validates its package identity and
+npm-reported SHA-1/SHA-512 digests, parses its tar headers, and requires its
+regular-file entries to match both npm's JSON and the release allowlist exactly.
+It rejects missing or linked candidates, unsafe or duplicate paths, links and
+other unexpected archive types.
 
 ## npm Trusted Publisher
 
@@ -82,8 +85,7 @@ Before checking the registry, pack and test the exact local release candidate:
 CANDIDATE_DIR="$(mktemp -d)"
 npm pack --ignore-scripts --json --pack-destination "$CANDIDATE_DIR" > "$CANDIDATE_DIR/npm-pack.json"
 node scripts/verify-package.mjs "$CANDIDATE_DIR/npm-pack.json"
-PACKAGE_FILENAME="$(node -e "const fs = require('node:fs'); console.log(JSON.parse(fs.readFileSync(process.argv[1], 'utf8'))[0].filename)" "$CANDIDATE_DIR/npm-pack.json")"
-PACKAGE_TARBALL="$CANDIDATE_DIR/$PACKAGE_FILENAME"
+PACKAGE_TARBALL="$(node scripts/verify-package.mjs "$CANDIDATE_DIR/npm-pack.json" --print-path)"
 npm exec --yes --package="$PACKAGE_TARBALL" -- spetex-figma-design-pipeline-install --help
 ```
 
@@ -115,5 +117,6 @@ ls "$TMP_HOME/.figma-design-pipeline/plugin/manifest.json"
 
 Confirm the generated Codex config points to `$TMP_HOME/.figma-design-pipeline/server/index.js` and not an `.npm/_npx/...` cache path.
 
-The publish workflow follows the same order and publishes the tested candidate
-tarball rather than packing the repository again.
+The publish workflow makes the verified candidate read-only, tests that exact
+path, then reruns full verification immediately before publishing the same
+tarball. It does not pack a second candidate.

@@ -19,8 +19,9 @@ Use this checklist before making the repository public or cutting a release.
 
 - Run `npm run check`
 - Run `npm test`
-- Run `npm pack`
-- Inspect the tarball contents to confirm only intended files are shipped
+- Run `npm pack --ignore-scripts --json --pack-destination <temporary-directory>`
+- Run `node scripts/verify-package.mjs <temporary-directory>/npm-pack.json` to
+  validate the actual tarball's identity, digests, and allowlisted entries
 
 ## Docs Review
 

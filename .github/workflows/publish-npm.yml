@@ -37,16 +37,23 @@ jobs:
         run: |
           candidate_dir="$RUNNER_TEMP/release-candidate"
           mkdir -p "$candidate_dir"
-          npm pack --ignore-scripts --json --pack-destination "$candidate_dir" > "$candidate_dir/npm-pack.json"
-          node scripts/verify-package.mjs "$candidate_dir/npm-pack.json"
-          package_filename="$(node -e "const fs = require('node:fs'); console.log(JSON.parse(fs.readFileSync(process.argv[1], 'utf8'))[0].filename)" "$candidate_dir/npm-pack.json")"
-          echo "tarball=$candidate_dir/$package_filename" >> "$GITHUB_OUTPUT"
+          package_manifest="$candidate_dir/npm-pack.json"
+          npm pack --ignore-scripts --json --pack-destination "$candidate_dir" > "$package_manifest"
+          package_tarball="$(node scripts/verify-package.mjs "$package_manifest" --print-path)"
+          chmod a-w "$package_tarball"
+          node scripts/verify-package.mjs "$package_manifest"
+          printf 'manifest=%s\ntarball=%s\n' "$package_manifest" "$package_tarball" >> "$GITHUB_OUTPUT"
       - name: Test packed release candidate
         shell: bash
+        env:
+          PACKAGE_MANIFEST: ${{ steps.package.outputs.manifest }}
+          PACKAGE_TARBALL: ${{ steps.package.outputs.tarball }}
         run: |
           candidate_home="$(mktemp -d)"
-          npm exec --yes --package="${{ steps.package.outputs.tarball }}" -- spetex-figma-design-pipeline-install --help
-          HOME="$candidate_home" npm exec --yes --package="${{ steps.package.outputs.tarball }}" -- spetex-figma-design-pipeline-install --client all
+          verified_tarball="$(node scripts/verify-package.mjs "$PACKAGE_MANIFEST" --print-path)"
+          test "$verified_tarball" = "$PACKAGE_TARBALL"
+          npm exec --yes --package="$verified_tarball" -- spetex-figma-design-pipeline-install --help
+          HOME="$candidate_home" npm exec --yes --package="$verified_tarball" -- spetex-figma-design-pipeline-install --client all
           test -f "$candidate_home/.figma-design-pipeline/server/index.js"
           test -f "$candidate_home/.figma-design-pipeline/plugin/manifest.json"
           grep -F "$candidate_home/.figma-design-pipeline/server/index.js" "$candidate_home/.codex/config.toml"
@@ -67,4 +74,11 @@ jobs:
           fi
       - name: Publish package
         if: steps.npm_version.outputs.published != 'true'
-        run: npm publish "${{ steps.package.outputs.tarball }}" --provenance --access public
+        shell: bash
+        env:
+          PACKAGE_MANIFEST: ${{ steps.package.outputs.manifest }}
+          PACKAGE_TARBALL: ${{ steps.package.outputs.tarball }}
+        run: |
+          verified_tarball="$(node scripts/verify-package.mjs "$PACKAGE_MANIFEST" --print-path)"
+          test "$verified_tarball" = "$PACKAGE_TARBALL"
+          npm publish "$verified_tarball" --provenance --access public

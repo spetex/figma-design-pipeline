@@ -13,8 +13,9 @@ npm audit --omit=dev # must report 0 production vulnerabilities
 npm run check        # tsc --noEmit (TS 6)
 npm test             # vitest; use the reported current test count
 npm run build        # builds server + plugin
-npm pack --ignore-scripts --dry-run --json > /tmp/figma-design-pipeline-pack.json
-node scripts/verify-package.mjs /tmp/figma-design-pipeline-pack.json
+CANDIDATE_DIR="$(mktemp -d)"
+npm pack --ignore-scripts --json --pack-destination "$CANDIDATE_DIR" > "$CANDIDATE_DIR/npm-pack.json"
+node scripts/verify-package.mjs "$CANDIDATE_DIR/npm-pack.json"
 ```
 
 Pack and verify the exact local release candidate before any registry checks:
@@ -23,8 +24,7 @@ Pack and verify the exact local release candidate before any registry checks:
 CANDIDATE_DIR="$(mktemp -d)"
 npm pack --ignore-scripts --json --pack-destination "$CANDIDATE_DIR" > "$CANDIDATE_DIR/npm-pack.json"
 node scripts/verify-package.mjs "$CANDIDATE_DIR/npm-pack.json"
-PACKAGE_FILENAME="$(node -e "const fs = require('node:fs'); console.log(JSON.parse(fs.readFileSync(process.argv[1], 'utf8'))[0].filename)" "$CANDIDATE_DIR/npm-pack.json")"
-PACKAGE_TARBALL="$CANDIDATE_DIR/$PACKAGE_FILENAME"
+PACKAGE_TARBALL="$(node scripts/verify-package.mjs "$CANDIDATE_DIR/npm-pack.json" --print-path)"
 npm exec --yes --package="$PACKAGE_TARBALL" -- spetex-figma-design-pipeline-install --help
 ```
 
