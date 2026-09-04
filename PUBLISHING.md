@@ -2,7 +2,9 @@
 
 This maintained fork is published on **npmjs.com** as `@spetex/figma-design-pipeline`.
 
-Releases are made by the GitHub Actions trusted-publisher workflow (`.github/workflows/publish-npm.yml`), triggered by tag push.
+Releases are made by the GitHub Actions trusted-publisher workflow
+(`.github/workflows/publish-npm.yml`), triggered by tag push or manually rerun
+only against the exact release tag described below.
 
 ## What Ships
 
@@ -12,7 +14,7 @@ Releases are made by the GitHub Actions trusted-publisher workflow (`.github/wor
 - `scripts/install.mjs` — client installer + plugin deployer
 - `scripts/build-server.mjs`, `scripts/build-plugin.mjs` — build scripts (for source installs)
 - `bin/` — entry shims
-- `LICENSE`, `README.md`, `PUBLISHING.md`
+- `CHANGELOG.md`, `INSTALL.md`, `LICENSE`, `PUBLISHING.md`, `README.md`, `USAGE.md`
 
 ## Runtime
 
@@ -50,11 +52,21 @@ npm trusted publishing is configured with:
 - Workflow filename: `publish-npm.yml`
 - Environment: none
 - Allowed action: `npm publish`
-- Trigger: tag push `figma-design-pipeline-v*` or manual dispatch
+- Automatic trigger: tag push `figma-design-pipeline-v*`
+- Required identity: `GITHUB_REF_TYPE` must be `tag`, and both `GITHUB_REF_NAME`
+  and `GITHUB_REF` must exactly identify `figma-design-pipeline-v<package.version>`
+- Manual dispatch: retained only to rerun publication against that exact release
+  tag; dispatches against branches, a different tag, or a malformed ref fail
+  immediately after checkout, before dependency installation, packing, or publish
 
 The workflow runs on a GitHub-hosted runner with `id-token: write`, allowing npm
 to exchange GitHub's OIDC identity for a short-lived publish credential. No
 long-lived npm publish token is stored in GitHub.
+
+The package-derived tag check is fail-closed for missing ref metadata, unexpected
+event types, tag suffixes, and other non-exact values. A manual run is therefore
+not a way to publish an untagged branch; it is only a safe retry mechanism for an
+already-created tag matching the checked-out package version.
 
 `prepack` runs `npm run build` (server + plugin) automatically.
 

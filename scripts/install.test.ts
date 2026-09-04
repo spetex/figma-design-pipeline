@@ -12,12 +12,14 @@ const forwardedEnvVars = [
   "FIGMA_ACCESS_TOKEN",
   "FIGMA_FILE_KEY",
   "FIGMA_PLUGIN_PORT",
+  "FIGMA_ASSET_ROOTS",
   "COMPONENT_REGISTRY_DIR",
 ] as const;
 const setEnvironment = {
   FIGMA_ACCESS_TOKEN: "figd_test_token",
   FIGMA_FILE_KEY: "test-file-key",
   FIGMA_PLUGIN_PORT: "4013",
+  FIGMA_ASSET_ROOTS: "/tmp/test-assets:/srv/approved-assets",
   COMPONENT_REGISTRY_DIR: "/tmp/test-component-registry",
 };
 const environmentCases = [
@@ -80,7 +82,32 @@ describe.each(environmentCases)("installer with %s optional environment variable
   });
 });
 
-function install(client: "claude" | "codex" | "gemini", environment: Record<string, string>, overrides: Record<string, string> = {}) {
+it("forwards asset roots to clean-home Codex and Gemini configs without leaking unrelated variables", () => {
+  const home = createTempHome();
+  const emptyBin = join(home, "bin");
+  mkdirSync(emptyBin);
+  install("all", {
+    ...setEnvironment,
+    FIGMA_UNRELATED_SETTING: "must-not-leak",
+  }, {
+    HOME: home,
+    PATH: emptyBin,
+  });
+
+  const codexConfig = readFileSync(join(home, ".codex", "config.toml"), "utf8");
+  expect(codexConfig).toContain(`env_vars = ${JSON.stringify(forwardedEnvVars)}`);
+  expect(codexConfig).not.toContain("FIGMA_UNRELATED_SETTING");
+  expect(codexConfig).not.toContain("must-not-leak");
+
+  const geminiConfig = JSON.parse(readFileSync(join(home, ".gemini", "settings.json"), "utf8"));
+  expect(geminiConfig.mcpServers["figma-design-pipeline"].env).toEqual(
+    Object.fromEntries(forwardedEnvVars.map((name) => [name, `$${name}`])),
+  );
+  expect(JSON.stringify(geminiConfig)).not.toContain("FIGMA_UNRELATED_SETTING");
+  expect(JSON.stringify(geminiConfig)).not.toContain("must-not-leak");
+});
+
+function install(client: "all" | "claude" | "codex" | "gemini", environment: Record<string, string>, overrides: Record<string, string> = {}) {
   const home = overrides.HOME ?? createTempHome();
   const env: NodeJS.ProcessEnv = { ...process.env, ...environment, HOME: home, ...overrides };
   for (const name of forwardedEnvVars) {

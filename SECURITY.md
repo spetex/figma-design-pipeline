@@ -15,7 +15,8 @@ This project requires API tokens to function. Follow these rules to keep them sa
       "command": "node",
       "args": ["/path/to/dist/index.js"],
       "env": {
-        "FIGMA_ACCESS_TOKEN": "figd_your_token_here"
+        "FIGMA_ACCESS_TOKEN": "figd_your_token_here",
+        "FIGMA_ASSET_ROOTS": "/absolute/path/to/approved/assets"
       }
     }
   }

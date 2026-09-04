@@ -28,6 +28,7 @@ const forwardedEnvVars = [
   "FIGMA_ACCESS_TOKEN",
   "FIGMA_FILE_KEY",
   "FIGMA_PLUGIN_PORT",
+  "FIGMA_ASSET_ROOTS",
   "COMPONENT_REGISTRY_DIR",
 ];
 
@@ -149,6 +150,7 @@ console.log("- For 30-60x faster writes: open Figma Desktop > Plugins > Developm
 console.log(`  Import plugin from manifest > ${join(pluginInstallDir, "manifest.json")}`);
 console.log("- Then run the plugin — it connects automatically to the MCP bridge.");
 console.log("- FIGMA_ACCESS_TOKEN is only needed for REST API analysis tools.");
+console.log("- FIGMA_ASSET_ROOTS is required only for server-local image paths.");
 console.log("- The official Figma MCP handles OAuth-based read/write for all major CLIs.");
 
 function printHelp() {
@@ -165,6 +167,7 @@ All major CLIs (Claude Code, Codex, Gemini) support the official Figma MCP
 via OAuth — no personal access token needed for Figma reads and writes.
 
 FIGMA_ACCESS_TOKEN is only needed for this server's REST API analysis tools.
+FIGMA_ASSET_ROOTS is required only when using server-local image paths.
 `);
 }
 

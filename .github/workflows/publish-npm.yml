@@ -19,6 +19,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Verify release tag matches package version
+        run: node scripts/verify-release-tag.mjs package.json
+
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -53,10 +56,17 @@ jobs:
           verified_tarball="$(node scripts/verify-package.mjs "$PACKAGE_MANIFEST" --print-path)"
           test "$verified_tarball" = "$PACKAGE_TARBALL"
           npm exec --yes --package="$verified_tarball" -- spetex-figma-design-pipeline-install --help
-          HOME="$candidate_home" npm exec --yes --package="$verified_tarball" -- spetex-figma-design-pipeline-install --client all
+          FIGMA_ASSET_ROOTS="$candidate_home/assets" FIGMA_UNRELATED_SETTING="must-not-leak" HOME="$candidate_home" \
+            npm exec --yes --package="$verified_tarball" -- spetex-figma-design-pipeline-install --client all
           test -f "$candidate_home/.figma-design-pipeline/server/index.js"
           test -f "$candidate_home/.figma-design-pipeline/plugin/manifest.json"
           grep -F "$candidate_home/.figma-design-pipeline/server/index.js" "$candidate_home/.codex/config.toml"
+          grep -F 'FIGMA_ASSET_ROOTS' "$candidate_home/.codex/config.toml"
+          grep -F '"FIGMA_ASSET_ROOTS": "$FIGMA_ASSET_ROOTS"' "$candidate_home/.gemini/settings.json"
+          if grep -F 'FIGMA_UNRELATED_SETTING' "$candidate_home/.codex/config.toml" "$candidate_home/.gemini/settings.json"; then
+            echo "Generated client configurations must not forward unrelated environment variables" >&2
+            exit 1
+          fi
           if grep -F ".npm/_npx/" "$candidate_home/.codex/config.toml"; then
             echo "Codex configuration must not reference npm's temporary npx cache" >&2
             exit 1

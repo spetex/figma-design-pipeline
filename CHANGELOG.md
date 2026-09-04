@@ -20,6 +20,9 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 - Release verification now inspects and installs a locally packed candidate before registry checks, and the publish workflow publishes that tested tarball.
 
 ### Fixed
+- The installer forwards `FIGMA_ASSET_ROOTS` to Codex and Gemini alongside the
+  other allowlisted variables, and npm publication now requires the exact
+  package-version release tag even for manual workflow retries.
 - Plugin inspection now uses deterministic serialization and visited-node budgets instead of full-tree pre-counts or unbounded sparse searches. Selection metadata is independently bounded and paged with truthful total/omitted counts, every Figma-origin scalar is UTF-8 bounded with explicit truncation metrics, and the UI enforces aggregate byte/chunk limits before transport. Both read paths share the pure-JavaScript linear-time RE2 engine, which safely handles overlapping repetitions and rejects backreferences/lookarounds. REST preserves an explicit `depth: 0`, and whole-file REST component truncation provides advancing `offset` / `nextOffset` pagination without changing explicit current-page roots into whole-file reads.
 - The direct `re2js` dependency has no runtime dependencies and adds no advisory findings; the combined release dependency refresh fixes the production findings in `fast-uri`, `hono`, `ip-address`, and `qs`.
 - Newly created frames now start with transparent fills in both connected-plugin execution and disconnected fallback JavaScript, avoiding unintended white surfaces on structural containers.
