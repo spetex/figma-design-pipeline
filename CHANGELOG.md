@@ -4,6 +4,19 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-04
+
+### Added
+- The plugin dashboard now reports its connected MCP harnesses, bridge and plugin versions, current Figma context, heartbeat, and the last 10 action states with timestamps and durations.
+- Activity rows now identify the exact downstream harness that initiated each batch, using broker-authenticated MCP request metadata.
+
+### Changed
+- Connection details start collapsed behind a compact native disclosure row showing the live status indicator.
+- The visible plugin name is now “Design Pipeline,” and a keyboard-accessible bottom drag handle allows vertical resizing between 360 and 900 pixels.
+
+### Fixed
+- Local development plugin manifests now enable Figma's private plugin API so `figma.fileKey` reaches the bridge handshake and exact-file plugin reads can use node, current-page, and selection roots.
+
 ## [0.9.0] - 2026-09-04
 
 ### Added

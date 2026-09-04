@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,8 +18,17 @@ await build({
   target: "es2017",
   format: "iife",
   outfile: resolve(distDir, "code.js"),
-  minify: false,
+  // Figma rejects any `import(` token in the controller bundle, including
+  // TypeScript import-type examples preserved inside dependency comments.
+  // Whitespace minification strips comments without mangling useful names.
+  minifyWhitespace: true,
+  legalComments: "none",
 });
+
+const controllerCode = readFileSync(resolve(distDir, "code.js"), "utf8");
+if (/\bimport\s*\(/.test(controllerCode)) {
+  throw new Error("Figma plugin bundle contains a forbidden import expression");
+}
 
 // Copy UI and manifest
 cpSync(resolve(pluginDir, "ui.html"), resolve(distDir, "ui.html"));

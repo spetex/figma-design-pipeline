@@ -52,12 +52,11 @@ The official Figma MCP handles general Figma access and file creation via OAuth.
 
 ## What's new
 
-**0.9.0** (2026-09-04)
-- Added bounded, token-free plugin inspection for trees, node searches, and component discovery, with exact file identity and REST fallback.
-- Expanded `figma_execute` to 55 actions for design-system construction, including stable aliases and same-batch inspection after writes.
-- Added exact-name variable and style resolution, nested instance overrides, sections, prototype reactions, and safer SVG and image ingestion.
-- Hardened plugin execution, inspection bounds, rollback reporting, concurrency, image decoding, and connected/disconnected behavior parity.
-- Refreshed dependencies to restore a zero-finding production audit and made releases verify and publish the same allowlisted package tarball.
+**0.10.0** (2026-09-04)
+- Added a larger activity dashboard with the current Figma context, bridge health, timestamps, durations, and the last 10 action states.
+- Added multi-harness connection reporting and exact per-action initiator labels for Codex, Claude Code, Gemini CLI, and other MCP clients.
+- Connection details now start collapsed, and the plugin window can be resized vertically with its bottom drag grip or keyboard arrows.
+- Renamed the visible plugin to **Design Pipeline** and enabled exact-file plugin reads for locally imported development plugins.
 
 See [CHANGELOG.md](CHANGELOG.md) for prior releases.
 

@@ -1,100 +1,455 @@
 <!DOCTYPE html>
 <html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--figma-color-bg, #f8fafc);
+    color: var(--figma-color-text, #182230);
+    font: 12px/1.4 Inter, system-ui, sans-serif;
+  }
+  #app { padding: 16px 16px 24px; }
+  header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 14px; }
+  h1 { margin: 0; font-size: 14px; line-height: 20px; font-weight: 650; letter-spacing: -.01em; }
+  .version { color: var(--figma-color-text-secondary, #667085); font-size: 11px; padding-top: 2px; }
+  .card {
+    background: var(--figma-color-bg-secondary, #fff);
+    border: 1px solid var(--figma-color-border, #e4e7ec);
+    border-radius: 10px;
+    margin-bottom: 12px;
+    padding: 12px;
+  }
+  .card-title {
+    color: var(--figma-color-text-secondary, #667085);
+    font-size: 10px;
+    font-weight: 650;
+    letter-spacing: .07em;
+    margin-bottom: 9px;
+    text-transform: uppercase;
+  }
+  .connection-card { padding: 0; }
+  .connection-summary {
+    align-items: center;
+    cursor: pointer;
+    display: flex;
+    gap: 10px;
+    list-style: none;
+    min-height: 45px;
+    padding: 12px;
+  }
+  .connection-summary::-webkit-details-marker { display: none; }
+  .connection-summary::after {
+    color: var(--figma-color-text-secondary, #667085);
+    content: "›";
+    font-size: 17px;
+    line-height: 1;
+    transition: transform 120ms ease;
+  }
+  .connection-card[open] .connection-summary::after { transform: rotate(90deg); }
+  .connection-summary .card-title { margin: 0; }
+  .connection-row { align-items: center; display: flex; gap: 8px; margin-left: auto; }
+  .connection-details {
+    border-top: 1px solid var(--figma-color-border, #e4e7ec);
+    padding: 11px 12px 12px;
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #98a2b3; flex: none; }
+  .dot.connected { background: #12b76a; box-shadow: 0 0 0 3px rgba(18, 183, 106, .12); }
+  .dot.searching { background: #2e90fa; box-shadow: 0 0 0 3px rgba(46, 144, 250, .12); }
+  .dot.retrying, .dot.disconnected { background: #f04438; box-shadow: 0 0 0 3px rgba(240, 68, 56, .12); }
+  .connection-label { font-size: 13px; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 6px 10px; }
+  .key { color: var(--figma-color-text-secondary, #667085); }
+  .value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .subtle { color: var(--figma-color-text-secondary, #667085); }
+  .context-main { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .document-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .page-name { color: var(--figma-color-text-secondary, #667085); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pill { background: var(--figma-color-bg-tertiary, #f2f4f7); border-radius: 999px; color: var(--figma-color-text-secondary, #475467); flex: none; font-size: 11px; padding: 3px 8px; }
+  .section-head { display: flex; align-items: center; justify-content: space-between; margin: 15px 0 8px; }
+  .section-head .card-title { margin: 0; }
+  #queue-summary { color: var(--figma-color-text-secondary, #667085); font-size: 11px; }
+  #activity-list { display: flex; flex-direction: column; gap: 7px; }
+  .activity {
+    background: var(--figma-color-bg-secondary, #fff);
+    border: 1px solid var(--figma-color-border, #e4e7ec);
+    border-radius: 8px;
+    min-height: 52px;
+    overflow: hidden;
+  }
+  .activity summary, .activity-row {
+    align-items: center;
+    display: grid;
+    gap: 9px;
+    grid-template-columns: 9px minmax(0, 1fr) auto;
+    list-style: none;
+    padding: 9px 10px;
+  }
+  .activity summary { cursor: pointer; }
+  .activity summary::-webkit-details-marker { display: none; }
+  .activity-state { width: 8px; height: 8px; border-radius: 50%; background: #98a2b3; }
+  .activity-state.in_progress { background: #2e90fa; box-shadow: 0 0 0 3px rgba(46, 144, 250, .12); }
+  .activity-state.succeeded { background: #12b76a; }
+  .activity-state.failed { background: #f04438; }
+  .activity-state.skipped, .activity-state.rolled_back { background: #f79009; }
+  .activity-state.planned { background: #7f56d9; }
+  .activity-title { font-weight: 570; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .activity-meta { color: var(--figma-color-text-secondary, #667085); font-size: 10px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .activity-right { text-align: right; }
+  .activity-status { font-size: 10px; font-weight: 600; white-space: nowrap; }
+  .activity-time { color: var(--figma-color-text-secondary, #667085); font-size: 10px; margin-top: 2px; white-space: nowrap; }
+  .error-detail { border-top: 1px solid var(--figma-color-border, #e4e7ec); color: #d92d20; font-size: 11px; padding: 8px 10px 9px 28px; word-break: break-word; }
+  .empty { border: 1px dashed var(--figma-color-border, #d0d5dd); border-radius: 8px; color: var(--figma-color-text-secondary, #667085); padding: 24px 16px; text-align: center; }
+  #hint { color: var(--figma-color-text-secondary, #667085); font-size: 11px; margin-top: 8px; }
+  #resize-handle {
+    align-items: center;
+    bottom: 0;
+    cursor: ns-resize;
+    display: flex;
+    height: 14px;
+    justify-content: center;
+    left: 0;
+    position: fixed;
+    right: 0;
+    touch-action: none;
+  }
+  #resize-handle::after {
+    background: var(--figma-color-border-strong, #98a2b3);
+    border-radius: 999px;
+    content: "";
+    height: 3px;
+    opacity: .7;
+    width: 32px;
+  }
+  #resize-handle:hover::after, #resize-handle:focus-visible::after { background: #2e90fa; opacity: 1; }
+</style>
+</head>
 <body>
-<div id="app" style="font:12px/1.45 system-ui;padding:10px 12px;color:#1f2937;background:#f8fafc">
-  <div id="title" style="font-weight:600;color:#111827;margin-bottom:4px">SPFR Design Pipeline</div>
-  <div id="status" style="color:#475569">Connecting to local bridge...</div>
-  <div id="meta" style="margin-top:4px;color:#64748b"></div>
-  <div id="hint" style="margin-top:8px;color:#475569"></div>
-</div>
+<main id="app">
+  <header>
+    <h1>Design Pipeline</h1>
+    <div id="plugin-version" class="version"></div>
+  </header>
+
+  <details class="card connection-card">
+    <summary class="connection-summary">
+      <span class="card-title">Connection</span>
+      <span class="connection-row">
+        <span id="status-dot" class="dot searching"></span>
+        <span id="status" class="connection-label">Connecting to local bridge…</span>
+      </span>
+    </summary>
+    <div class="connection-details">
+      <div class="grid">
+        <div class="key">Harness</div><div id="harness" class="value">Waiting for MCP client…</div>
+        <div class="key">Bridge</div><div id="bridge" class="value">Scanning ports 4010–4014</div>
+        <div class="key">Connected</div><div id="connected-at" class="value subtle">—</div>
+        <div class="key">Heartbeat</div><div id="heartbeat" class="value subtle">—</div>
+      </div>
+      <div id="hint">Keep this window open while working from your AI harness.</div>
+    </div>
+  </details>
+
+  <section class="card">
+    <div class="card-title">Current Figma context</div>
+    <div class="context-main">
+      <div style="min-width:0">
+        <div id="document-name" class="document-name">Loading document…</div>
+        <div id="page-name" class="page-name"></div>
+      </div>
+      <div id="selection" class="pill">0 selected</div>
+    </div>
+  </section>
+
+  <div class="section-head">
+    <div class="card-title">Recent activity</div>
+    <div id="queue-summary">Idle</div>
+  </div>
+  <section id="activity-list">
+    <div class="empty">Actions sent through the plugin will appear here.</div>
+  </section>
+</main>
+<div id="resize-handle" role="separator" aria-label="Resize plugin height" aria-orientation="horizontal" tabindex="0"></div>
+
 <script>
 const PORTS = [4010, 4011, 4012, 4013, 4014];
 const RECONNECT_MS = 2000;
 const MAX_RECONNECT_MS = 30000;
-const PORT_CYCLE_AFTER = 3; // retry same port N times before cycling
-// Leave ample room for JSON escaping under the bridge's 16 MiB per-message limit.
+const PORT_CYCLE_AFTER = 3;
 const RESULT_CHUNK_SIZE = 1024 * 1024;
 const MAX_RESULT_ENCODED_BYTES = 16 * 1024 * 1024;
 const MAX_RESULT_CHUNKS = 16;
+const MAX_ACTIVITY_ITEMS = 10;
 
 let ws = null;
 let portIdx = 0;
 let delay = RECONNECT_MS;
 let timer = null;
 let samePortRetries = 0;
-let lastUiStatus = { documentName: "", pageName: "", selectionCount: 0, status: "idle" };
+let connectionState = "searching";
+let connectedAt = null;
+let lastHeartbeatAt = null;
+let bridgeInfo = { harness: null, harnesses: [], serverVersion: "", port: null, pendingBatches: 0, pendingReads: 0 };
+let lastUiStatus = { documentName: "", pageName: "", selectionCount: 0, status: "idle", pluginVersion: "" };
+let activities = [];
+const activeStates = new Map();
 
-const el = document.getElementById("status");
-const meta = document.getElementById("meta");
-const hint = document.getElementById("hint");
+const statusEl = document.getElementById("status");
+const statusDot = document.getElementById("status-dot");
+const harnessEl = document.getElementById("harness");
+const bridgeEl = document.getElementById("bridge");
+const connectedAtEl = document.getElementById("connected-at");
+const heartbeatEl = document.getElementById("heartbeat");
+const hintEl = document.getElementById("hint");
+const documentNameEl = document.getElementById("document-name");
+const pageNameEl = document.getElementById("page-name");
+const selectionEl = document.getElementById("selection");
+const pluginVersionEl = document.getElementById("plugin-version");
+const queueSummaryEl = document.getElementById("queue-summary");
+const activityListEl = document.getElementById("activity-list");
+const resizeHandleEl = document.getElementById("resize-handle");
+let resizePointerId = null;
+let resizeStartY = 0;
+let resizeStartHeight = 560;
+
+function requestHeight(height) {
+  parent.postMessage({ pluginMessage: { type: "resize_window", height: height } }, "*");
+}
+
+resizeHandleEl.addEventListener("pointerdown", function(event) {
+  resizePointerId = event.pointerId;
+  resizeStartY = event.clientY;
+  resizeStartHeight = window.innerHeight;
+  resizeHandleEl.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+
+resizeHandleEl.addEventListener("pointermove", function(event) {
+  if (resizePointerId !== event.pointerId) return;
+  requestHeight(resizeStartHeight + event.clientY - resizeStartY);
+});
+
+resizeHandleEl.addEventListener("pointerup", function(event) {
+  if (resizePointerId === event.pointerId) resizePointerId = null;
+});
+
+resizeHandleEl.addEventListener("pointercancel", function(event) {
+  if (resizePointerId === event.pointerId) resizePointerId = null;
+});
+
+resizeHandleEl.addEventListener("keydown", function(event) {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  requestHeight(window.innerHeight + (event.key === "ArrowUp" ? -40 : 40));
+  event.preventDefault();
+});
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function clock(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function duration(value) {
+  if (typeof value !== "number") return "";
+  if (value < 1000) return value + " ms";
+  return (value / 1000).toFixed(value < 10000 ? 1 : 0) + " s";
+}
+
+function humanizeAction(value) {
+  return String(value || "unknown")
+    .split("_")
+    .map(function(part) { return part ? part[0].toUpperCase() + part.slice(1) : ""; })
+    .join(" ");
+}
+
+function harnessLabel(harness) {
+  if (!harness || !harness.name) return "MCP client not identified";
+  const raw = String(harness.name);
+  const lower = raw.toLowerCase();
+  const name = lower.includes("codex") ? "Codex"
+    : lower.includes("claude") ? "Claude Code"
+    : lower.includes("gemini") ? "Gemini CLI"
+    : raw;
+  return name + (harness.version ? " " + harness.version : "");
+}
+
+function connectedHarnessesLabel(info) {
+  const harnesses = Array.isArray(info.harnesses) && info.harnesses.length
+    ? info.harnesses
+    : info.harness ? [info.harness] : [];
+  if (!harnesses.length) return "MCP client not identified";
+  const counts = new Map();
+  harnesses.forEach(function(harness) {
+    const label = harnessLabel(harness);
+    counts.set(label, (counts.get(label) || 0) + 1);
+  });
+  return Array.from(counts.entries()).map(function(entry) {
+    return entry[0] + (entry[1] > 1 ? " ×" + entry[1] : "");
+  }).join(", ");
+}
 
 function renderStatus(state) {
-  const port = PORTS[portIdx];
-  const doc = lastUiStatus.documentName ? "File: " + lastUiStatus.documentName : "";
-  const page = lastUiStatus.pageName ? "Page: " + lastUiStatus.pageName : "";
-  const selection = typeof lastUiStatus.selectionCount === "number"
-    ? "Selection: " + lastUiStatus.selectionCount
-    : "";
-  meta.textContent = [doc, page, selection].filter(Boolean).join(" | ");
+  connectionState = state;
+  const port = bridgeInfo.port || PORTS[portIdx];
+  statusDot.className = "dot " + state;
 
   if (state === "connected") {
-    el.textContent = "Connected to bridge on port " + port;
-    el.style.color = "#15803d";
-    hint.textContent = "Local inspection and fast batched writes are enabled. Keep this plugin window open while working from Claude or Codex.";
-    return;
+    statusEl.textContent = "Connected";
+    hintEl.textContent = "Local inspection and fast batched writes are enabled.";
+  } else if (state === "searching") {
+    statusEl.textContent = "Looking for local bridge…";
+    hintEl.textContent = "Start your AI harness with the figma-design-pipeline MCP server enabled.";
+  } else if (state === "retrying") {
+    statusEl.textContent = "Bridge unavailable — retrying";
+    hintEl.textContent = "The plugin scans nearby ports automatically; fallback writes remain available from the CLI.";
+  } else {
+    statusEl.textContent = "Disconnected";
+    hintEl.textContent = "Keep this window open. The plugin reconnects automatically.";
   }
 
-  if (state === "searching") {
-    el.textContent = "Looking for bridge on port " + port + "...";
-    el.style.color = "#1d4ed8";
-    hint.textContent = "Start Claude or Codex with the figma-design-pipeline MCP enabled, or wait while the plugin scans nearby ports.";
-    return;
-  }
+  harnessEl.textContent = connectedHarnessesLabel(bridgeInfo);
+  harnessEl.title = Array.isArray(bridgeInfo.harnesses) && bridgeInfo.harnesses.length
+    ? bridgeInfo.harnesses.map(function(item) { return item.name; }).join(", ")
+    : bridgeInfo.harness?.name || "";
+  bridgeEl.textContent = state === "connected"
+    ? "localhost:" + port + (bridgeInfo.serverVersion ? " · server " + bridgeInfo.serverVersion : "")
+    : "Scanning ports 4010–4014";
+  connectedAtEl.textContent = connectedAt ? "Since " + clock(connectedAt) : "—";
+  heartbeatEl.textContent = lastHeartbeatAt ? "Last seen " + clock(lastHeartbeatAt) : "—";
+}
 
-  if (state === "retrying") {
-    el.textContent = "Bridge not found. Retrying...";
-    el.style.color = "#b45309";
-    hint.textContent = "Fallback writes still work from the CLI, but opening the bridge enables the fastest path.";
-    return;
-  }
+function renderContext() {
+  documentNameEl.textContent = lastUiStatus.documentName || "Unknown document";
+  documentNameEl.title = lastUiStatus.documentName || "";
+  pageNameEl.textContent = lastUiStatus.pageName ? "Page: " + lastUiStatus.pageName : "Page unavailable";
+  pageNameEl.title = lastUiStatus.pageName || "";
+  const count = Number(lastUiStatus.selectionCount) || 0;
+  selectionEl.textContent = count + " selected";
+  pluginVersionEl.textContent = lastUiStatus.pluginVersion ? "Plugin " + lastUiStatus.pluginVersion : "";
+}
 
-  el.textContent = "Disconnected from local bridge";
-  el.style.color = "#b91c1c";
-  hint.textContent = "Keep this plugin open. It reconnects automatically when Claude or Codex exposes the local bridge.";
+function lifecycleLabel(item) {
+  if (item.lifecycle === "queued") return "Queued";
+  if (item.lifecycle === "in_progress") return "In progress";
+  const labels = { succeeded: "Succeeded", failed: "Failed", skipped: "Skipped", planned: "Planned", rolled_back: "Rolled back" };
+  return labels[item.outcome] || "Done";
+}
+
+function stateClass(item) {
+  return item.lifecycle === "done" ? (item.outcome || "succeeded") : item.lifecycle;
+}
+
+function activityMarkup(item) {
+  const detailParts = [];
+  if (item.summary) detailParts.push(item.summary);
+  if (item.initiator && item.initiator.name) detailParts.push("via " + harnessLabel(item.initiator));
+  if (item.dryRun) detailParts.push("Dry run");
+  detailParts.push("Batch " + String(item.batchId || "").slice(0, 8));
+  const timeParts = [clock(item.at)];
+  const elapsed = duration(item.durationMs);
+  if (elapsed) timeParts.push(elapsed);
+  const row = '<div class="activity-state ' + escapeHtml(stateClass(item)) + '"></div>'
+    + '<div><div class="activity-title">' + escapeHtml(humanizeAction(item.actionType)) + '</div>'
+    + '<div class="activity-meta" title="' + escapeHtml(detailParts.join(" · ")) + '">' + escapeHtml(detailParts.join(" · ")) + '</div></div>'
+    + '<div class="activity-right"><div class="activity-status">' + escapeHtml(lifecycleLabel(item)) + '</div>'
+    + '<div class="activity-time">' + escapeHtml(timeParts.join(" · ")) + '</div></div>';
+  if (item.error) {
+    return '<details class="activity"><summary>' + row + '</summary><div class="error-detail">' + escapeHtml(item.error) + '</div></details>';
+  }
+  return '<div class="activity"><div class="activity-row">' + row + '</div></div>';
+}
+
+function renderActivity() {
+  let queued = 0;
+  let running = 0;
+  activeStates.forEach(function(state) {
+    if (state === "queued") queued++;
+    if (state === "in_progress") running++;
+  });
+  const counts = [];
+  if (running) counts.push(running + " running");
+  if (queued) counts.push(queued + " queued");
+  if (bridgeInfo.pendingReads) counts.push(bridgeInfo.pendingReads + " reading");
+  queueSummaryEl.textContent = counts.length ? counts.join(" · ") : "Idle";
+  activityListEl.innerHTML = activities.length
+    ? activities.map(activityMarkup).join("")
+    : '<div class="empty">Actions sent through the plugin will appear here.</div>';
+}
+
+function upsertActivity(message) {
+  const existingIndex = activities.findIndex(function(item) { return item.id === message.id; });
+  const previous = existingIndex >= 0 ? activities[existingIndex] : {};
+  if (existingIndex >= 0) activities.splice(existingIndex, 1);
+  const lifecycle = message.event === "queued" ? "queued"
+    : message.event === "started" ? "in_progress"
+    : "done";
+  const item = Object.assign({}, previous, message, { lifecycle: lifecycle });
+  activities.unshift(item);
+  activities = activities.slice(0, MAX_ACTIVITY_ITEMS);
+  if (lifecycle === "done") activeStates.delete(message.id);
+  else activeStates.set(message.id, lifecycle);
+  renderActivity();
+}
+
+function applyBridgeInfo(info) {
+  if (!info || typeof info !== "object") return;
+  bridgeInfo = Object.assign({}, bridgeInfo, info);
+  lastHeartbeatAt = new Date().toISOString();
+  renderStatus(connectionState);
+  renderActivity();
 }
 
 function connect() {
   if (ws) try { ws.close(); } catch(e) {}
   const port = PORTS[portIdx];
-  const url = "ws://localhost:" + port + "/plugin";
   renderStatus("searching");
-  ws = new WebSocket(url);
+  ws = new WebSocket("ws://localhost:" + port + "/plugin");
 
   ws.onopen = function() {
     delay = RECONNECT_MS;
     samePortRetries = 0;
+    connectedAt = new Date().toISOString();
+    lastHeartbeatAt = connectedAt;
+    bridgeInfo.port = port;
     renderStatus("connected");
+    ws.send(JSON.stringify({ type: "get_bridge_info" }));
     parent.postMessage({ pluginMessage: { type: "bridge_connected" } }, "*");
   };
 
   ws.onmessage = function(e) {
     try {
-      parent.postMessage({ pluginMessage: { type: "bridge_message", data: JSON.parse(e.data) } }, "*");
+      const data = JSON.parse(e.data);
+      if (data.type === "bridge_info") {
+        applyBridgeInfo(data);
+        return;
+      }
+      if (data.type === "ping" && data.bridgeInfo) applyBridgeInfo(data.bridgeInfo);
+      parent.postMessage({ pluginMessage: { type: "bridge_message", data: data } }, "*");
     } catch(err) {
       console.error("[ui] Bad JSON:", err);
     }
   };
 
   ws.onclose = function() {
+    connectedAt = null;
     renderStatus("retrying");
     ws = null;
     parent.postMessage({ pluginMessage: { type: "bridge_disconnected" } }, "*");
     scheduleReconnect();
   };
 
-  ws.onerror = function() {
-    renderStatus("retrying");
-  };
+  ws.onerror = function() { renderStatus("retrying"); };
 }
 
 function scheduleReconnect() {
@@ -119,10 +474,8 @@ function utf8ByteLength(value) {
     else if (first <= 0x7ff) bytes += 2;
     else if (first >= 0xd800 && first <= 0xdbff && index + 1 < value.length) {
       const second = value.charCodeAt(index + 1);
-      if (second >= 0xdc00 && second <= 0xdfff) {
-        bytes += 4;
-        index++;
-      } else bytes += 3;
+      if (second >= 0xdc00 && second <= 0xdfff) { bytes += 4; index++; }
+      else bytes += 3;
     } else bytes += 3;
   }
   return bytes;
@@ -132,22 +485,15 @@ function sendTransportFailure(data, message) {
   let failure = null;
   if (data.type === "read_response" && typeof data.requestId === "string") {
     failure = {
-      type: "read_response",
-      requestId: data.requestId,
-      operation: data.operation,
-      fileKey: data.fileKey,
-      success: false,
+      type: "read_response", requestId: data.requestId, operation: data.operation,
+      fileKey: data.fileKey, success: false,
       error: "Plugin read response transport rejected: " + message,
     };
   } else if (data.type === "batch_result" && typeof data.batchId === "string") {
     failure = {
-      type: "batch_result",
-      batchId: data.batchId,
-      success: false,
+      type: "batch_result", batchId: data.batchId, success: false,
       error: "Plugin batch result transport rejected: " + message,
-      results: [],
-      nodeIdMap: {},
-      summary: { total: 0, applied: 0, failed: 0, skipped: 0 },
+      results: [], nodeIdMap: {}, summary: { total: 0, applied: 0, failed: 0, skipped: 0 },
     };
   }
   if (failure) ws.send(JSON.stringify(failure));
@@ -156,7 +502,6 @@ function sendTransportFailure(data, message) {
 
 function sendToBridge(data) {
   if (!ws || ws.readyState !== 1) return;
-
   const serialized = JSON.stringify(data);
   const resultId = data.type === "batch_result" ? data.batchId
     : data.type === "read_response" ? data.requestId
@@ -165,7 +510,6 @@ function sendToBridge(data) {
     ws.send(serialized);
     return;
   }
-
   const chunkCount = Math.ceil(serialized.length / RESULT_CHUNK_SIZE);
   const encodedBytes = utf8ByteLength(serialized);
   if (chunkCount > MAX_RESULT_CHUNKS) {
@@ -180,7 +524,6 @@ function sendToBridge(data) {
     ws.send(serialized);
     return;
   }
-
   const chunkType = data.type === "batch_result" ? "batch_result_chunk" : "read_response_chunk";
   for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
     ws.send(JSON.stringify({
@@ -188,16 +531,13 @@ function sendToBridge(data) {
       ...(data.type === "batch_result" ? { batchId: resultId } : { requestId: resultId }),
       chunkIndex: chunkIndex,
       chunkCount: chunkCount,
-      data: serialized.slice(
-        chunkIndex * RESULT_CHUNK_SIZE,
-        (chunkIndex + 1) * RESULT_CHUNK_SIZE
-      ),
+      data: serialized.slice(chunkIndex * RESULT_CHUNK_SIZE, (chunkIndex + 1) * RESULT_CHUNK_SIZE),
     }));
   }
 }
 
 window.onmessage = function(e) {
-  var msg = e.data.pluginMessage;
+  const msg = e.data.pluginMessage;
   if (!msg) return;
   if (msg.type === "ui_status") {
     lastUiStatus = {
@@ -205,19 +545,22 @@ window.onmessage = function(e) {
       pageName: msg.pageName || "",
       selectionCount: msg.selectionCount || 0,
       status: msg.status || "idle",
+      pluginVersion: msg.pluginVersion || "",
     };
-    if (ws && ws.readyState === 1) {
-      renderStatus("connected");
-    } else {
-      renderStatus(lastUiStatus.status === "disconnected" ? "disconnected" : "retrying");
-    }
+    renderContext();
+    if (ws && ws.readyState === 1) renderStatus("connected");
+    else renderStatus(lastUiStatus.status === "disconnected" ? "disconnected" : "retrying");
     return;
   }
-  if (msg.type === "send_to_bridge" && ws && ws.readyState === 1) {
-    sendToBridge(msg.data);
+  if (msg.type === "activity_event") {
+    upsertActivity(msg);
+    return;
   }
+  if (msg.type === "send_to_bridge" && ws && ws.readyState === 1) sendToBridge(msg.data);
 };
 
+renderContext();
+renderActivity();
 connect();
 </script>
 </body>

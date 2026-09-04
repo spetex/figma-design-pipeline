@@ -8,7 +8,7 @@ export function handlePluginStatus(bridge: BridgeServer | null): BridgeStatus {
       port: null,
       fallbackAvailable: true,
       message: "Plugin bridge is unavailable. figma_execute can still return fallback use_figma JavaScript.",
-      recommendedAction: "Start the figma-design-pipeline MCP server and open the SPFR Design Pipeline plugin in Figma Desktop.",
+      recommendedAction: "Start the figma-design-pipeline MCP server and open the Design Pipeline plugin in Figma Desktop.",
       pendingBatches: 0,
       pendingReads: 0,
     };

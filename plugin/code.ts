@@ -21,11 +21,16 @@ import {
 import { compileInspectionRegex, type InspectionRegex } from "../src/shared/safe-regex";
 import { preflightActionReferences } from "../src/plugin/batch-compiler";
 
-// ─── SPFR Design Pipeline Plugin v2 ──────────────────────────────
+// ─── Design Pipeline Plugin v2 ───────────────────────────────────
 // High-performance batch executor with font caching, symbolic refs,
 // before/after snapshots, dry-run, and rollback.
 
-figma.showUI(__html__, { visible: true, width: 200, height: 40 });
+const PLUGIN_VERSION = "0.10.0";
+const PLUGIN_WIDTH = 420;
+const MIN_PLUGIN_HEIGHT = 360;
+const MAX_PLUGIN_HEIGHT = 900;
+
+figma.showUI(__html__, { visible: true, width: PLUGIN_WIDTH, height: 560, themeColors: true });
 
 // ─── Font Cache ─────────────────────────────────────────────────
 
@@ -1997,6 +2002,7 @@ async function executeAction(
 
 interface Batch {
   batchId: string;
+  initiator?: { name: string; version?: string };
   dryRun: boolean;
   stopOnError: boolean;
   rollbackOnError: boolean;
@@ -2013,6 +2019,116 @@ interface BatchResult {
   summary: { total: number; applied: number; failed: number; skipped: number; mutations: number };
   rollbackApplied?: boolean;
   error?: string;
+}
+
+type ActivityOutcome = "succeeded" | "failed" | "skipped" | "planned" | "rolled_back";
+
+interface ActivityTiming {
+  queuedAt: number;
+  startedAt?: number;
+}
+
+const activityTimings = new Map<string, ActivityTiming>();
+
+function activityId(batchId: string, actionIndex: number): string {
+  return `${batchId}:${actionIndex}`;
+}
+
+function boundedActivityText(value: unknown, maxLength = 80): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}…`;
+}
+
+function summarizeActivityAction(action: Record<string, unknown>): string | undefined {
+  for (const key of ["name", "variableName", "collectionName", "styleName", "textStyleName"]) {
+    const value = boundedActivityText(action[key]);
+    if (value) return value;
+  }
+  for (const key of ["nodeId", "instanceId", "componentId", "parentId", "pageId"]) {
+    const value = boundedActivityText(action[key]);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function activityInitiator(batch: Batch): { name: string; version?: string } | undefined {
+  const name = boundedActivityText(batch.initiator?.name, 128);
+  if (!name) return undefined;
+  const version = boundedActivityText(batch.initiator?.version, 64);
+  return { name, ...(version ? { version } : {}) };
+}
+
+function postActivityEvent(data: Record<string, unknown>): void {
+  figma.ui.postMessage({ type: "activity_event", ...data });
+}
+
+function queueBatchActivity(batch: Batch): void {
+  const now = Date.now();
+  for (let actionIndex = 0; actionIndex < batch.actions.length; actionIndex++) {
+    const action = batch.actions[actionIndex]!;
+    const id = activityId(batch.batchId, actionIndex);
+    activityTimings.set(id, { queuedAt: now });
+    postActivityEvent({
+      event: "queued",
+      id,
+      batchId: batch.batchId,
+      actionIndex,
+      actionType: boundedActivityText(action.type) ?? "unknown",
+      summary: summarizeActivityAction(action),
+      initiator: activityInitiator(batch),
+      dryRun: batch.dryRun,
+      at: new Date(now).toISOString(),
+    });
+  }
+}
+
+function startActionActivity(batch: Batch, actionIndex: number): void {
+  const now = Date.now();
+  const id = activityId(batch.batchId, actionIndex);
+  const timing = activityTimings.get(id) ?? { queuedAt: now };
+  timing.startedAt = now;
+  activityTimings.set(id, timing);
+  postActivityEvent({
+    event: "started",
+    id,
+    batchId: batch.batchId,
+    actionIndex,
+    actionType: boundedActivityText(batch.actions[actionIndex]?.type) ?? "unknown",
+    initiator: activityInitiator(batch),
+    at: new Date(now).toISOString(),
+  });
+}
+
+function completeActionActivity(
+  batch: Batch,
+  actionIndex: number,
+  outcome: ActivityOutcome,
+  error?: string,
+): void {
+  const now = Date.now();
+  const id = activityId(batch.batchId, actionIndex);
+  const timing = activityTimings.get(id);
+  activityTimings.delete(id);
+  postActivityEvent({
+    event: "completed",
+    id,
+    batchId: batch.batchId,
+    actionIndex,
+    actionType: boundedActivityText(batch.actions[actionIndex]?.type) ?? "unknown",
+    initiator: activityInitiator(batch),
+    outcome,
+    at: new Date(now).toISOString(),
+    ...(timing?.startedAt !== undefined ? { durationMs: now - timing.startedAt } : {}),
+    ...(error ? { error: boundedActivityText(error, 240) } : {}),
+  });
+}
+
+function failOutstandingBatchActivity(batch: Batch, error: string): void {
+  for (let actionIndex = 0; actionIndex < batch.actions.length; actionIndex++) {
+    if (activityTimings.has(activityId(batch.batchId, actionIndex))) {
+      completeActionActivity(batch, actionIndex, "failed", error);
+    }
+  }
 }
 
 async function processBatch(batch: Batch): Promise<BatchResult> {
@@ -2045,12 +2161,16 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
     if (stopProcessing) {
       results.push({ actionIndex: i, type: actionType, status: "skipped" });
       skipped++;
+      completeActionActivity(batch, i, "skipped");
       continue;
     }
+
+    startActionActivity(batch, i);
 
     if (batch.dryRun) {
       results.push({ actionIndex: i, type: actionType, status: "planned", nodeId: action.nodeId as string });
       applied++;
+      completeActionActivity(batch, i, "planned");
       continue;
     }
 
@@ -2091,11 +2211,13 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
       });
       applied++;
       if (actionWroteDocument) documentWrites++;
+      completeActionActivity(batch, i, "succeeded");
     } catch (err) {
       if (actionWroteDocument) documentWrites++;
       const message = err instanceof Error ? err.message : String(err);
       results.push({ actionIndex: i, type: actionType, status: "failed", error: message });
       failed++;
+      completeActionActivity(batch, i, "failed", message);
       if (batch.stopOnError) stopProcessing = true;
     }
   }
@@ -2115,6 +2237,15 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
         delete result.after;
         if (result.newNodeId && transientNodeIds.has(result.newNodeId)) delete result.newNodeId;
         if (result.nodeId && transientNodeIds.has(result.nodeId)) delete result.nodeId;
+        postActivityEvent({
+          event: "completed",
+          id: activityId(batch.batchId, result.actionIndex),
+          batchId: batch.batchId,
+          actionIndex: result.actionIndex,
+          actionType: result.type,
+          outcome: "rolled_back",
+          at: new Date().toISOString(),
+        });
       }
       results[index] = redactTransientIds(result, transientNodeIds) as ActionResult;
     }
@@ -2143,6 +2274,7 @@ async function respondToBatch(batch: Batch): Promise<void> {
     figma.ui.postMessage({ type: "send_to_bridge", data: { type: "batch_result", ...result } });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    failOutstandingBatchActivity(batch, message);
     figma.ui.postMessage({
       type: "send_to_bridge",
       data: { type: "batch_result", batchId: batch.batchId, success: false, error: message, results: [], nodeIdMap: {}, summary: { total: 0, applied: 0, failed: 0, skipped: 0 } },
@@ -2158,7 +2290,18 @@ function enqueueBatch(batch: Batch): Promise<void> {
   return execution;
 }
 
-figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
+figma.ui.onmessage = async (msg: { type: string; data?: unknown; height?: unknown }) => {
+  if (msg.type === "resize_window") {
+    const requestedHeight = typeof msg.height === "number" ? msg.height : Number.NaN;
+    if (Number.isFinite(requestedHeight)) {
+      figma.ui.resize(
+        PLUGIN_WIDTH,
+        Math.max(MIN_PLUGIN_HEIGHT, Math.min(MAX_PLUGIN_HEIGHT, Math.round(requestedHeight))),
+      );
+    }
+    return;
+  }
+
   if (msg.type === "bridge_connected") {
     // Clear font cache on reconnect (fonts may have changed between sessions)
     loadedFonts.clear();
@@ -2166,7 +2309,7 @@ figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
       type: "send_to_bridge",
       data: {
         type: "handshake",
-        pluginVersion: "0.9.0",
+        pluginVersion: PLUGIN_VERSION,
         fileKey: figma.fileKey,
         pageId: figma.currentPage.id,
         pageName: figma.currentPage.name,
@@ -2176,6 +2319,7 @@ figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
     figma.ui.postMessage({
       type: "ui_status",
       status: "connected",
+      pluginVersion: PLUGIN_VERSION,
       documentName: figma.root.name,
       pageName: figma.currentPage.name,
       selectionCount: figma.currentPage.selection.length,
@@ -2187,6 +2331,7 @@ figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
     figma.ui.postMessage({
       type: "ui_status",
       status: "disconnected",
+      pluginVersion: PLUGIN_VERSION,
       documentName: figma.root.name,
       pageName: figma.currentPage.name,
       selectionCount: figma.currentPage.selection.length,
@@ -2203,6 +2348,7 @@ figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
         console.error("[plugin] Malformed batch payload, ignoring");
         return;
       }
+      queueBatchActivity(batch);
       await enqueueBatch(batch);
     } else if (data.type === "read_request") {
       const request = data as unknown as PluginReadRequest;
@@ -2245,6 +2391,7 @@ function pushUiContext(status: "idle" | "connected" | "disconnected" = "idle") {
   figma.ui.postMessage({
     type: "ui_status",
     status,
+    pluginVersion: PLUGIN_VERSION,
     documentName: figma.root.name,
     pageName: figma.currentPage.name,
     selectionCount: figma.currentPage.selection.length,

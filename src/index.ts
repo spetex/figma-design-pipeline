@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import "dotenv/config";
+import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { FigmaRestClient } from "./shared/figma-rest.js";
 import { SnapshotCache } from "./pipeline/snapshot.js";
 import { FigmaSession, type FileSelection } from "./shared/figma-session.js";
 import { parseFigmaUrl } from "./shared/figma-url.js";
+import { parseHarnessInitiator } from "./shared/harness.js";
 import type { ToolContext } from "./shared/context.js";
 import {
   getTreeInputSchema,
@@ -55,7 +57,7 @@ import { handleGenerateSchema } from "./tools/codegen/generate-schema.js";
 import { handleExportTokens } from "./tools/codegen/export-tokens.js";
 
 // ─── Plugin tools ───────────────────────────────────────────────────
-import { BridgeServer } from "./plugin/bridge.js";
+import { BridgeServer, type BridgeHarnessInfo } from "./plugin/bridge.js";
 import { handleExecute, invalidateSnapshotsAfterExecute } from "./tools/plugin/execute.js";
 import { handlePluginStatus } from "./tools/plugin/status.js";
 
@@ -74,11 +76,19 @@ if (FIGMA_ACCESS_TOKEN) {
 
 const snapshotCache = new SnapshotCache();
 const BRIDGE_PORT = Number(process.env.FIGMA_PLUGIN_PORT || 4010);
+const SERVER_VERSION = "0.10.0";
 const bridge = new BridgeServer({
+  serverVersion: SERVER_VERSION,
   onDocumentChange: () => snapshotCache.invalidateAll(),
 });
 
 const figmaSession = new FigmaSession();
+
+function directHarnessFallback(): BridgeHarnessInfo | undefined {
+  const harness = bridge.getStatus().harness;
+  if (!harness || harness.name === "figma-pipeline-broker") return undefined;
+  return harness;
+}
 
 function getContext(): ToolContext {
   if (!rest) {
@@ -301,7 +311,26 @@ All name resolution is exact and rejects ambiguity. Inspection actions count as 
 
 const server = new McpServer({
   name: "figma-design-pipeline",
-  version: "0.9.0",
+  version: SERVER_VERSION,
+});
+
+server.server.oninitialized = () => {
+  const client = server.server.getClientVersion();
+  bridge.setHarnessInfo(client ? { name: client.name, version: client.version } : undefined);
+};
+
+const brokerClientsChangedSchema = z.object({
+  method: z.literal("notifications/figma_pipeline/clients_changed"),
+  params: z.object({
+    clients: z.array(z.object({
+      name: z.string().min(1).max(128),
+      version: z.string().max(64).optional(),
+    })).max(32),
+  }),
+});
+
+server.server.setNotificationHandler(brokerClientsChangedSchema, (notification) => {
+  bridge.setHarnesses(notification.params.clients);
 });
 
 // ─── MCP Resources ──────────────────────────────────────────────────
@@ -556,9 +585,10 @@ server.tool(
   "figma_execute",
   "PREFERRED TOOL for ALL Figma write operations. Execute a batch of validated actions via plugin bridge — 30-60x faster than use_figma. Do NOT use use_figma for writes; use this tool instead. Supports 55 action types including bounded same-batch inspect read-back, design-system components, nested overrides, name-resolved variables/styles, safe assets, sections, reactions, layout, and text. If plugin not connected, returns equivalent bounded fallback JavaScript for use_figma. Call figma_plugin_status to check connection.",
   executeInputSchema.shape,
-  async (params) => {
+  async (params, extra) => {
     const result = await handleExecute(bridge, {
       actions: params.actions,
+      initiator: parseHarnessInitiator(extra._meta) ?? directHarnessFallback(),
       dryRun: params.dryRun,
       stopOnError: params.stopOnError,
       rollbackOnError: params.rollbackOnError,

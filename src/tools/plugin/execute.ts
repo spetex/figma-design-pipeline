@@ -1,4 +1,4 @@
-import type { BridgeServer, BatchResult } from "../../plugin/bridge.js";
+import type { BridgeHarnessInfo, BridgeServer, BatchResult } from "../../plugin/bridge.js";
 import type { SnapshotCache } from "../../pipeline/snapshot.js";
 import { compileBatch } from "../../plugin/batch-compiler.js";
 import { preprocessActions } from "../../plugin/assets.js";
@@ -9,6 +9,7 @@ import { MAX_PLUGIN_BATCH_INSPECTION_BYTES, MAX_PLUGIN_READ_SCALAR_BYTES } from 
 
 interface ExecuteParams {
   actions: unknown[];
+  initiator?: BridgeHarnessInfo;
   dryRun?: boolean;
   stopOnError?: boolean;
   rollbackOnError?: boolean;
@@ -72,7 +73,10 @@ export async function handleExecute(
 
   // Try plugin bridge first
   if (bridge?.isConnected()) {
-    const result = await bridge.execute(batch, params.timeoutMs);
+    const result = await bridge.execute({
+      ...batch,
+      ...(params.initiator ? { initiator: params.initiator } : {}),
+    }, params.timeoutMs);
     return { pluginConnected: true, result };
   }
 

@@ -9,7 +9,11 @@ type PluginFigma = {
   currentPage: { id: string; name: string; selection: unknown[] };
   root: { name: string };
   showUI: ReturnType<typeof vi.fn>;
-  ui: { onmessage?: (message: { type: string; data?: unknown }) => Promise<void>; postMessage: ReturnType<typeof vi.fn> };
+  ui: {
+    onmessage?: (message: { type: string; data?: unknown; height?: unknown }) => Promise<void>;
+    postMessage: ReturnType<typeof vi.fn>;
+    resize: ReturnType<typeof vi.fn>;
+  };
   on: ReturnType<typeof vi.fn>;
   getNodeByIdAsync: (id: string) => Promise<unknown>;
   commitUndo: ReturnType<typeof vi.fn>;
@@ -44,13 +48,19 @@ function normalizeBridgeTransportFontPreloads(
 async function runPlugin(
   figma: PluginFigma,
   actions: Array<Record<string, unknown>>,
-  { preloadFonts = false }: { preloadFonts?: boolean } = {}
+  {
+    preloadFonts = false,
+    initiator,
+  }: { preloadFonts?: boolean; initiator?: { name: string; version?: string } } = {}
 ) {
   vi.resetModules();
   vi.stubGlobal("figma", figma);
   vi.stubGlobal("__html__", "");
   await import("./code.js");
-  await figma.ui.onmessage!({ type: "bridge_message", data: { type: "batch", ...batch(actions, preloadFonts) } });
+  await figma.ui.onmessage!({
+    type: "bridge_message",
+    data: { type: "batch", ...batch(actions, preloadFonts), ...(initiator ? { initiator } : {}) },
+  });
   return figma.ui.postMessage.mock.calls.find(
     ([message]) => message.type === "send_to_bridge" && message.data.type === "batch_result"
   )?.[0].data;
@@ -62,7 +72,7 @@ function baseFigma(getNodeByIdAsync: PluginFigma["getNodeByIdAsync"]): PluginFig
     currentPage: { id: "page", name: "Page", selection: [] },
     root: { name: "Document" },
     showUI: vi.fn(),
-    ui: { postMessage: vi.fn() },
+    ui: { postMessage: vi.fn(), resize: vi.fn() },
     on: vi.fn(),
     getNodeByIdAsync,
     commitUndo: vi.fn(),
@@ -107,6 +117,40 @@ afterEach(() => {
 });
 
 describe("plugin startup", () => {
+  it("opens the expanded dashboard with Figma theme colors", async () => {
+    const figma = baseFigma(async () => null);
+    vi.resetModules();
+    vi.stubGlobal("figma", figma);
+    vi.stubGlobal("__html__", "");
+    await import("./code.js");
+
+    expect(figma.showUI).toHaveBeenCalledWith("", {
+      visible: true,
+      width: 420,
+      height: 560,
+      themeColors: true,
+    });
+  });
+
+  it("supports bounded vertical window resizing at a fixed width", async () => {
+    const figma = baseFigma(async () => null);
+    vi.resetModules();
+    vi.stubGlobal("figma", figma);
+    vi.stubGlobal("__html__", "");
+    await import("./code.js");
+
+    await figma.ui.onmessage!({ type: "resize_window", height: 720.4 });
+    await figma.ui.onmessage!({ type: "resize_window", height: 100 });
+    await figma.ui.onmessage!({ type: "resize_window", height: 2000 });
+    await figma.ui.onmessage!({ type: "resize_window", height: "bad" });
+
+    expect(figma.ui.resize.mock.calls).toEqual([
+      [420, 720],
+      [420, 360],
+      [420, 900],
+    ]);
+  });
+
   it("loads all pages before registering the debounced document-change listener", async () => {
     vi.useFakeTimers();
     let finishLoading!: () => void;
@@ -168,6 +212,56 @@ describe("plugin startup", () => {
     expect(figma.showUI).toHaveBeenCalledTimes(1);
     expect(figma.ui.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "ui_status" }));
     expect(figma.on).not.toHaveBeenCalledWith("documentchange", expect.any(Function));
+  });
+});
+
+describe("plugin action activity", () => {
+  it("emits queued, in-progress, and successful lifecycle events with safe summaries", async () => {
+    const node = { id: "node", name: "Before", type: "FRAME" };
+    const figma = baseFigma(async (id) => id === "node" ? node : null);
+
+    await runPlugin(
+      figma,
+      [{ type: "rename", nodeId: "node", name: "After" }],
+      { initiator: { name: "codex-mcp-client", version: "0.151.0" } },
+    );
+
+    const events = figma.ui.postMessage.mock.calls
+      .map(([message]) => message)
+      .filter((message) => message.type === "activity_event");
+    expect(events.map((event) => [event.event, event.outcome])).toEqual([
+      ["queued", undefined],
+      ["started", undefined],
+      ["completed", "succeeded"],
+    ]);
+    expect(events[0]).toMatchObject({
+      actionType: "rename",
+      summary: "After",
+      initiator: { name: "codex-mcp-client", version: "0.151.0" },
+      dryRun: false,
+    });
+    expect(events.every((event) => event.initiator?.name === "codex-mcp-client")).toBe(true);
+    expect(events[2].durationMs).toEqual(expect.any(Number));
+    expect(JSON.stringify(events)).not.toContain("before:");
+  });
+
+  it("updates applied actions to rolled back and exposes bounded failures", async () => {
+    const node = { id: "node", name: "Before", type: "FRAME" };
+    const figma = baseFigma(async (id) => id === "node" ? node : null);
+
+    await runPlugin(figma, [
+      { type: "rename", nodeId: "node", name: "Temporary" },
+      { type: "rename", nodeId: "missing", name: "Failure" },
+    ]);
+
+    const completions = figma.ui.postMessage.mock.calls
+      .map(([message]) => message)
+      .filter((message) => message.type === "activity_event" && message.event === "completed");
+    expect(completions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ actionIndex: 0, outcome: "succeeded" }),
+      expect.objectContaining({ actionIndex: 1, outcome: "failed", error: "Node not found: missing" }),
+      expect.objectContaining({ actionIndex: 0, outcome: "rolled_back" }),
+    ]));
   });
 });
 
@@ -1093,7 +1187,7 @@ function createBehavioralFigma() {
     currentPage: page,
     root: { name: "Document" },
     showUI: vi.fn(),
-    ui: { postMessage: vi.fn() },
+    ui: { postMessage: vi.fn(), resize: vi.fn() },
     on: vi.fn(),
     mixed: Symbol("mixed"),
     getNodeById: (id: string) => nodes.get(id),

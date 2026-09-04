@@ -11,7 +11,22 @@ export interface BridgeServerOptions {
   maxPayloadBytes?: number;
   maxChunkedResultBytes?: number;
   maxChunkedResultChunks?: number;
+  serverVersion?: string;
   onDocumentChange?: () => void;
+}
+
+export interface BridgeHarnessInfo {
+  name: string;
+  version?: string;
+}
+
+export interface BridgeUiInfo {
+  harness?: BridgeHarnessInfo;
+  harnesses?: BridgeHarnessInfo[];
+  serverVersion?: string;
+  port: number | null;
+  pendingBatches: number;
+  pendingReads: number;
 }
 
 export interface BridgeStatus {
@@ -29,6 +44,9 @@ export interface BridgeStatus {
   lastPongAt?: string;
   pendingBatches: number;
   pendingReads: number;
+  harness?: BridgeHarnessInfo;
+  harnesses?: BridgeHarnessInfo[];
+  serverVersion?: string;
 }
 
 interface PendingBatch {
@@ -75,6 +93,7 @@ export interface BatchResult {
 export interface Batch {
   type: "batch";
   batchId: string;
+  initiator?: BridgeHarnessInfo;
   dryRun: boolean;
   stopOnError: boolean;
   rollbackOnError: boolean;
@@ -98,6 +117,9 @@ export class BridgeServer {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private lastHandshakeAt: string | null = null;
   private lastPongAt: string | null = null;
+  private harnessInfo: BridgeHarnessInfo | undefined;
+  private harnessesInfo: BridgeHarnessInfo[] = [];
+  private readonly serverVersion?: string;
   private readonly maxPayloadBytes: number;
   private readonly maxChunkedResultBytes: number;
   private readonly maxChunkedResultChunks: number;
@@ -107,6 +129,7 @@ export class BridgeServer {
     maxPayloadBytes = DEFAULT_BRIDGE_MAX_PAYLOAD_BYTES,
     maxChunkedResultBytes = DEFAULT_BRIDGE_MAX_CHUNKED_RESULT_BYTES,
     maxChunkedResultChunks = DEFAULT_BRIDGE_MAX_CHUNKED_RESULT_CHUNKS,
+    serverVersion,
     onDocumentChange,
   }: BridgeServerOptions = {}) {
     if (!Number.isSafeInteger(maxPayloadBytes) || maxPayloadBytes <= 0) {
@@ -121,6 +144,7 @@ export class BridgeServer {
     this.maxPayloadBytes = maxPayloadBytes;
     this.maxChunkedResultBytes = maxChunkedResultBytes;
     this.maxChunkedResultChunks = maxChunkedResultChunks;
+    this.serverVersion = serverVersion;
     this.onDocumentChange = onDocumentChange;
   }
 
@@ -215,6 +239,11 @@ export class BridgeServer {
   }
 
   private handleMessage(data: Record<string, unknown>): void {
+    if (data.type === "get_bridge_info") {
+      this.sendBridgeInfo();
+      return;
+    }
+
     if (data.type === "handshake") {
       this.pluginInfo = {
         pluginVersion: data.pluginVersion as string,
@@ -489,11 +518,49 @@ export class BridgeServer {
         return;
       }
       try {
-        this.plugin.send(JSON.stringify({ type: "ping" }));
+        this.plugin.send(JSON.stringify({ type: "ping", bridgeInfo: this.getUiInfo() }));
       } catch {
         // Ignore send errors; close handler will clear state.
       }
     }, 5000);
+  }
+
+  setHarnessInfo(info: BridgeHarnessInfo | undefined): void {
+    this.harnessInfo = info && info.name
+      ? { name: info.name, ...(info.version ? { version: info.version } : {}) }
+      : undefined;
+    this.sendBridgeInfo();
+  }
+
+  setHarnesses(infos: readonly BridgeHarnessInfo[]): void {
+    this.harnessesInfo = infos
+      .filter((info) => typeof info.name === "string" && info.name.length > 0)
+      .slice(0, 32)
+      .map((info) => ({
+        name: info.name.slice(0, 128),
+        ...(info.version ? { version: info.version.slice(0, 64) } : {}),
+      }));
+    this.sendBridgeInfo();
+  }
+
+  private getUiInfo(): BridgeUiInfo {
+    return {
+      ...(this.harnessInfo ? { harness: this.harnessInfo } : {}),
+      ...(this.harnessesInfo.length ? { harnesses: this.harnessesInfo } : {}),
+      ...(this.serverVersion ? { serverVersion: this.serverVersion } : {}),
+      port: this.boundPort,
+      pendingBatches: this.pending.size + this.queuedBatches,
+      pendingReads: this.pendingReads.size,
+    };
+  }
+
+  private sendBridgeInfo(): void {
+    if (!this.plugin || this.plugin.readyState !== WebSocket.OPEN) return;
+    try {
+      this.plugin.send(JSON.stringify({ type: "bridge_info", ...this.getUiInfo() }));
+    } catch {
+      // The close/error handlers own connection cleanup.
+    }
   }
 
   private stopPingLoop(): void {
@@ -507,7 +574,7 @@ export class BridgeServer {
     const plugin = this.plugin;
     const generation = this.connectionGeneration;
     if (!plugin || plugin.readyState !== WebSocket.OPEN) {
-      throw new Error("Plugin not connected. Open the SPFR Design Pipeline plugin in Figma.");
+      throw new Error("Plugin not connected. Open the Design Pipeline plugin in Figma.");
     }
 
     this.queuedBatches++;
@@ -552,7 +619,7 @@ export class BridgeServer {
     timeoutMs = 30000
   ): Promise<PluginReadResponse> {
     if (!this.plugin || this.plugin.readyState !== WebSocket.OPEN) {
-      throw new Error("Plugin not connected. Open the SPFR Design Pipeline plugin in Figma.");
+      throw new Error("Plugin not connected. Open the Design Pipeline plugin in Figma.");
     }
     if (!this.pluginInfo.fileKey || this.pluginInfo.fileKey !== request.fileKey) {
       throw new Error(
@@ -604,12 +671,15 @@ export class BridgeServer {
       message,
       recommendedAction: connected
         ? "Use auto inspection for local reads and figma_execute for batched writes."
-        : "Open the SPFR Design Pipeline plugin in Figma Desktop to enable local reads and fast batched writes.",
+        : "Open the Design Pipeline plugin in Figma Desktop to enable local reads and fast batched writes.",
       ...this.pluginInfo,
       lastHandshakeAt: this.lastHandshakeAt ?? undefined,
       lastPongAt: this.lastPongAt ?? undefined,
       pendingBatches: this.pending.size + this.queuedBatches,
       pendingReads: this.pendingReads.size,
+      ...(this.harnessInfo ? { harness: this.harnessInfo } : {}),
+      ...(this.harnessesInfo.length ? { harnesses: this.harnessesInfo } : {}),
+      ...(this.serverVersion ? { serverVersion: this.serverVersion } : {}),
     };
   }
 

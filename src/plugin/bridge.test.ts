@@ -96,6 +96,45 @@ function batchResult(batch: Record<string, unknown>, success: boolean) {
 describe("BridgeServer plugin reads", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("reports the connected MCP harness and bridge metadata to the plugin UI", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const bridge = new BridgeServer({ serverVersion: "0.10.0" });
+    bridge.setHarnessInfo({ name: "codex-mcp-client", version: "1.2.3" });
+    const port = await getAvailablePort();
+    const client = await connectPlugin(bridge, port);
+    try {
+      const response = new Promise<Record<string, unknown>>((resolve) => {
+        client.once("message", (raw) => resolve(JSON.parse(raw.toString())));
+      });
+      client.send(JSON.stringify({ type: "get_bridge_info" }));
+
+      await expect(response).resolves.toMatchObject({
+        type: "bridge_info",
+        harness: { name: "codex-mcp-client", version: "1.2.3" },
+        serverVersion: "0.10.0",
+        port,
+        pendingBatches: 0,
+        pendingReads: 0,
+      });
+      expect(bridge.getStatus()).toMatchObject({
+        harness: { name: "codex-mcp-client", version: "1.2.3" },
+        serverVersion: "0.10.0",
+      });
+
+      bridge.setHarnesses([
+        { name: "codex-mcp-client", version: "1.2.3" },
+        { name: "claude-code", version: "2.0.0" },
+      ]);
+      expect(bridge.getStatus().harnesses).toEqual([
+        { name: "codex-mcp-client", version: "1.2.3" },
+        { name: "claude-code", version: "2.0.0" },
+      ]);
+    } finally {
+      client.terminate();
+      await bridge.stop();
+    }
+  });
+
   it("correlates concurrent out-of-order responses independently from batches", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const bridge = new BridgeServer();
@@ -293,6 +332,7 @@ describe("BridgeServer WebSocket limits", () => {
         client.once("message", (raw) => resolve(JSON.parse(raw.toString())));
       });
       const execution = bridge.execute({
+        initiator: { name: "codex-mcp-client", version: "0.151.0" },
         dryRun: false,
         stopOnError: true,
         rollbackOnError: false,
@@ -300,6 +340,7 @@ describe("BridgeServer WebSocket limits", () => {
         actions: [{ type: "export_node", nodeId: "1:2" }],
       });
       const batch = await receivedBatch;
+      expect(batch.initiator).toEqual({ name: "codex-mcp-client", version: "0.151.0" });
 
       const base64 = "a".repeat(4096);
       const serialized = JSON.stringify({

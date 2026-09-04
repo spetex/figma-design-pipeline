@@ -17,10 +17,24 @@ function loadUiTransport() {
     send(value: string) { this.sent.push(value); }
     close() {}
   }
-  const element = () => ({ textContent: "", style: { color: "" } });
+  const elements = new Map<string, Record<string, unknown>>();
+  const element = (id: string) => {
+    if (!elements.has(id)) {
+      elements.set(id, {
+        textContent: "",
+        innerHTML: "",
+        className: "",
+        title: "",
+        style: { color: "" },
+        addEventListener() {},
+        setPointerCapture() {},
+      });
+    }
+    return elements.get(id)!;
+  };
   const context = vm.createContext({
     WebSocket: FakeWebSocket,
-    window: {},
+    window: { innerHeight: 560 },
     parent: { postMessage() {} },
     document: { getElementById: element },
     console: { error() {} },
@@ -30,9 +44,18 @@ function loadUiTransport() {
   vm.runInContext(script, context);
   return {
     socket: sockets[0]!,
+    element(id: string) { return elements.get(id)!; },
     send(data: Record<string, unknown>) {
       Object.assign(context, { testPayload: data });
       vm.runInContext("sendToBridge(testPayload)", context);
+    },
+    pluginMessage(data: Record<string, unknown>) {
+      Object.assign(context, { testPluginMessage: data });
+      vm.runInContext("window.onmessage({ data: { pluginMessage: testPluginMessage } })", context);
+    },
+    bridgeInfo(data: Record<string, unknown>) {
+      Object.assign(context, { testBridgeInfo: data });
+      vm.runInContext("applyBridgeInfo(testBridgeInfo)", context);
     },
   };
 }
@@ -104,5 +127,81 @@ describe("plugin UI result transport bounds", () => {
       success: false,
       error: expect.stringContaining("16777216-byte sender limit"),
     });
+  });
+});
+
+describe("plugin activity dashboard", () => {
+  it("starts with native connection details collapsed", () => {
+    const html = readFileSync(new URL("./ui.html", import.meta.url), "utf8");
+    expect(html).toContain('<details class="card connection-card">');
+    expect(html).not.toContain('<details class="card connection-card" open>');
+    expect(html).toContain('<h1>Design Pipeline</h1>');
+    expect(html).toContain('id="resize-handle"');
+  });
+
+  it("renders harness metadata and normalizes known MCP client names", () => {
+    const transport = loadUiTransport();
+    transport.bridgeInfo({
+      harness: { name: "codex-mcp-client", version: "1.2.3" },
+      serverVersion: "0.10.0",
+      port: 4012,
+    });
+
+    expect(transport.element("harness").textContent).toBe("Codex 1.2.3");
+    expect(transport.element("harness").title).toBe("codex-mcp-client");
+  });
+
+  it("groups multiple connected sessions by harness and version", () => {
+    const transport = loadUiTransport();
+    transport.bridgeInfo({
+      harness: { name: "figma-pipeline-broker", version: "1.1.0" },
+      harnesses: [
+        { name: "codex-mcp-client", version: "0.151.0" },
+        { name: "codex-mcp-client", version: "0.151.0" },
+        { name: "claude-code", version: "2.0.0" },
+      ],
+      serverVersion: "0.10.0",
+      port: 4010,
+    });
+
+    expect(transport.element("harness").textContent).toBe("Codex 0.151.0 ×2, Claude Code 2.0.0");
+  });
+
+  it("keeps the ten most recently active actions and renders failures safely", () => {
+    const transport = loadUiTransport();
+    for (let index = 0; index < 11; index++) {
+      transport.pluginMessage({
+        type: "activity_event",
+        event: "queued",
+        id: `batch:${index}`,
+        batchId: "batch",
+        actionIndex: index,
+        actionType: "create_frame",
+        summary: `Frame ${index}`,
+        initiator: { name: "codex-mcp-client", version: "0.151.0" },
+        at: "2026-09-04T12:00:00.000Z",
+      });
+    }
+    transport.pluginMessage({
+      type: "activity_event",
+      event: "completed",
+      id: "batch:10",
+      batchId: "batch",
+      actionIndex: 10,
+      actionType: "create_frame",
+      outcome: "failed",
+      error: '<script>alert("no")</script>',
+      at: "2026-09-04T12:00:01.000Z",
+      durationMs: 25,
+    });
+
+    const html = String(transport.element("activity-list").innerHTML);
+    expect((html.match(/class="activity"/g) || [])).toHaveLength(10);
+    expect(html).toContain("Failed");
+    expect(html).toContain("25 ms");
+    expect(html).toContain("via Codex 0.151.0");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).not.toContain("<script>alert");
+    expect(html).not.toContain("Frame 0");
   });
 });

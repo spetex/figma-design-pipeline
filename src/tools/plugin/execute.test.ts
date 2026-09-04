@@ -765,9 +765,13 @@ describe("handleExecute fallback generation", () => {
       execute,
     } as unknown as BridgeServer;
 
-    await handleExecute(bridge, { actions });
+    await handleExecute(bridge, {
+      actions,
+      initiator: { name: "codex-mcp-client", version: "0.151.0" },
+    });
     expect(execute).toHaveBeenCalledWith(
       expect.objectContaining({
+        initiator: { name: "codex-mcp-client", version: "0.151.0" },
         actions: [
           expect.objectContaining({ type: "create_frame", _ref: "$ref:node-0" }),
           { type: "set_layout_positioning", nodeId: "$ref:node-0", positioning: "ABSOLUTE" },
