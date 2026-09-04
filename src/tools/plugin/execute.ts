@@ -5,6 +5,7 @@ import { preprocessActions } from "../../plugin/assets.js";
 import { actionSchema, type Action } from "../../shared/actions.js";
 import { assertActionInputCoverage, FORBIDDEN_DELETE_NODE_TYPES, isKnownActionType } from "../../shared/action-parity.js";
 import { weightToFontStyle } from "../../shared/font.js";
+import { MAX_PLUGIN_BATCH_INSPECTION_BYTES, MAX_PLUGIN_READ_SCALAR_BYTES } from "../../shared/plugin-read.js";
 
 interface ExecuteParams {
   actions: unknown[];
@@ -37,7 +38,8 @@ export function invalidateSnapshotsAfterExecute(
   execution: ExecuteResult
 ): boolean {
   const batch = execution.result;
-  if (!execution.pluginConnected || !batch || batch.dryRun || batch.summary.applied === 0) {
+  const mutations = batch?.summary.mutations ?? batch?.summary.applied ?? 0;
+  if (!execution.pluginConnected || !batch || batch.dryRun || mutations === 0) {
     return false;
   }
   snapshotCache.invalidateAll();
@@ -102,6 +104,7 @@ function generateFallbackJs(
   const lines: string[] = [];
   const fontsNeeded = new Set<string>();
   const j = JSON.stringify;
+  const needsInspection = actions.some((action) => action.type === "inspect");
 
   for (const action of actions) {
     if (action.type === "create_text_style" || (action.type === "create_text" && !action.textStyleId && !action.textStyleName)) {
@@ -144,6 +147,7 @@ function generateFallbackJs(
   lines.push("const results = [];");
   lines.push("let failed = false;");
   lines.push("let documentWrites = 0;");
+  if (needsInspection) lines.push("let inspectionBytes = 0;");
   lines.push("let stopProcessing = false;");
   lines.push("const createdNodeIds = new Map();");
   lines.push("const recordCreatedNode = (ref, result, aliasRef) => {");
@@ -152,6 +156,28 @@ function generateFallbackJs(
   lines.push("  results.push(result);");
   lines.push("};");
   lines.push("const markDocumentWrite = () => { documentWrites++; };");
+  if (needsInspection) {
+  lines.push(`const MAX_BATCH_INSPECTION_BYTES = ${MAX_PLUGIN_BATCH_INSPECTION_BYTES};`);
+  lines.push(`const MAX_INSPECT_SCALAR_BYTES = ${MAX_PLUGIN_READ_SCALAR_BYTES};`);
+  lines.push("const inspectRead = (node, property) => { try { return node[property]; } catch { return undefined; } };");
+  lines.push("const inspectUtf8Bytes = (value) => { let bytes = 0; for (let i = 0; i < value.length; i++) { const first = value.charCodeAt(i); if (first <= 0x7f) bytes += 1; else if (first <= 0x7ff) bytes += 2; else if (first >= 0xd800 && first <= 0xdbff && i + 1 < value.length && value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) { bytes += 4; i++; } else bytes += 3; } return bytes; };");
+  lines.push("const inspectTruncate = (value) => { let bytes = 0; let returnedBytes = 0; let end = 0; let complete = true; for (let i = 0; i < value.length; i++) { const first = value.charCodeAt(i); let size; let charEnd = i + 1; if (first <= 0x7f) size = 1; else if (first <= 0x7ff) size = 2; else if (first >= 0xd800 && first <= 0xdbff && i + 1 < value.length && value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) { size = 4; charEnd = i + 2; i++; } else size = 3; bytes += size; if (complete && returnedBytes + size <= MAX_INSPECT_SCALAR_BYTES - 3) { returnedBytes += size; end = charEnd; } else complete = false; } return bytes <= MAX_INSPECT_SCALAR_BYTES ? { value, originalBytes: bytes, returnedBytes: bytes, truncated: false } : { value: value.slice(0, end) + '…', originalBytes: bytes, returnedBytes: returnedBytes + 3, truncated: true }; };");
+  lines.push("const inspectBoundString = (value, field, truncatedFields) => { const bounded = inspectTruncate(value); if (bounded.truncated) truncatedFields[field] = { originalBytes: bounded.originalBytes, returnedBytes: bounded.returnedBytes }; return bounded.value; };");
+  lines.push("const inspectSafeValue = (value) => { if (typeof value === 'symbol') return 'mixed'; try { return JSON.parse(JSON.stringify(value)); } catch { return 'mixed'; } };");
+  lines.push("const inspectNative = (node, property, truncatedFields, output) => { const raw = inspectRead(node, property); if (raw === undefined) return; const value = inspectSafeValue(raw); const originalBytes = inspectUtf8Bytes(JSON.stringify(value)); if (originalBytes > MAX_INSPECT_SCALAR_BYTES) { truncatedFields[property] = { originalBytes, returnedBytes: 0 }; return; } output[property] = value; };");
+  lines.push("const inspectNumber = (node, property, output) => { const value = inspectRead(node, property); if (typeof value === 'number' && Number.isFinite(value)) output[property] = value; };");
+  lines.push("const inspectString = (node, property, truncatedFields, output) => { const value = inspectRead(node, property); if (typeof value === 'string') output[property] = inspectBoundString(value, property, truncatedFields); };");
+  lines.push("const inspectBounds = (node) => { const box = inspectRead(node, 'absoluteBoundingBox'); if (!box || typeof box !== 'object' || !['x','y','width','height'].every((key) => typeof box[key] === 'number' && Number.isFinite(box[key]))) return undefined; return { x: box.x, y: box.y, width: box.width, height: box.height }; };");
+  lines.push("const inspectChildren = (node) => { const children = inspectRead(node, 'children'); return Array.isArray(children) ? children : []; };");
+  lines.push("const inspectSerializeNode = async (node, children, depth) => { const truncatedFields = {}; const type = typeof inspectRead(node, 'type') === 'string' ? inspectRead(node, 'type') : 'UNKNOWN'; const output = { id: inspectBoundString(typeof inspectRead(node, 'id') === 'string' ? inspectRead(node, 'id') : 'unknown', 'id', truncatedFields), name: inspectBoundString(typeof inspectRead(node, 'name') === 'string' ? inspectRead(node, 'name') : 'Unknown', 'name', truncatedFields), type: inspectBoundString(type, 'type', truncatedFields), classification: 'unknown', depth, childCount: inspectChildren(node).length, children }; const visible = inspectRead(node, 'visible'); if (typeof visible === 'boolean') output.visible = visible; const bounds = inspectBounds(node); if (bounds) output.bounds = bounds; const characters = inspectRead(node, 'characters'); if (typeof characters === 'string') output.textContent = inspectBoundString(characters, 'textContent', truncatedFields); if (type === 'INSTANCE' && typeof node.getMainComponentAsync === 'function') { try { const main = await node.getMainComponentAsync(); if (main && typeof main.id === 'string') output.componentId = inspectBoundString(main.id, 'componentId', truncatedFields); } catch {} } if ((type === 'COMPONENT' || type === 'COMPONENT_SET') && typeof inspectRead(node, 'key') === 'string') output.componentKey = inspectBoundString(inspectRead(node, 'key'), 'componentKey', truncatedFields); if ((type === 'COMPONENT' || type === 'COMPONENT_SET') && typeof inspectRead(node, 'description') === 'string') output.description = inspectBoundString(inspectRead(node, 'description'), 'description', truncatedFields); const parent = inspectRead(node, 'parent'); if (parent && parent.type === 'COMPONENT_SET') output.componentSetId = inspectBoundString(parent.id, 'componentSetId', truncatedFields); for (const property of ['itemSpacing','paddingLeft','paddingRight','paddingTop','paddingBottom','opacity','rotation','topLeftRadius','topRightRadius','bottomRightRadius','bottomLeftRadius']) inspectNumber(node, property, output); const cornerRadius = inspectRead(node, 'cornerRadius'); if (typeof cornerRadius === 'symbol') output.cornerRadius = 'mixed'; else if (typeof cornerRadius === 'number' && Number.isFinite(cornerRadius)) output.cornerRadius = cornerRadius; for (const property of ['layoutMode','layoutWrap','primaryAxisAlignItems','counterAxisAlignItems','layoutSizingHorizontal','layoutSizingVertical','fillStyleId','strokeStyleId','textStyleId','effectStyleId']) inspectString(node, property, truncatedFields, output); for (const property of ['fills','strokes','effects','componentProperties','componentPropertyDefinitions','componentPropertyReferences','boundVariables','resolvedVariableModes']) inspectNative(node, property, truncatedFields, output); if (typeof node.getCSSAsync === 'function') { try { const css = await node.getCSSAsync(); inspectNative({ css }, 'css', truncatedFields, output); } catch {} } if (Object.keys(truncatedFields).length) output.truncatedFields = truncatedFields; return output; };");
+  lines.push("const inspectTree = async (node, depth, budget, currentDepth = 0) => { if (budget.remaining <= 0) { budget.truncated = true; return null; } budget.remaining--; budget.visited++; const children = []; if (depth > 0) { for (const child of inspectChildren(node)) { const serialized = await inspectTree(child, depth - 1, budget, currentDepth + 1); if (!serialized) break; children.push(serialized); } } return inspectSerializeNode(node, children, currentDepth); };");
+  lines.push("const inspectCount = (root) => root ? 1 + root.children.reduce((count, child) => count + inspectCount(child), 0) : 0;");
+  lines.push("const inspectAtDepth = (node, depth) => ({ ...node, children: depth > 0 ? node.children.map((child) => inspectAtDepth(child, depth - 1)) : [] });");
+  lines.push("const inspectScalarSummary = (root) => { let truncatedFieldCount = 0; let omittedScalarBytes = 0; const visit = (node) => { for (const field of Object.values(node.truncatedFields || {})) { truncatedFieldCount++; omittedScalarBytes += field.originalBytes - field.returnedBytes; } node.children.forEach(visit); }; if (root) visit(root); return { truncatedFieldCount, omittedScalarBytes }; };");
+  lines.push("const inspectMeasure = (inspection) => { let responseBytes = 0; for (let attempt = 0; attempt < 8; attempt++) { const result = { ...inspection, responseBytes }; const measured = inspectUtf8Bytes(JSON.stringify(result)); if (measured === responseBytes) return result; responseBytes = measured; } return { ...inspection, responseBytes }; };");
+  lines.push("const inspectInvalidateRollback = (inspection) => { const { root, responseBytes, ...retained } = inspection; return inspectMeasure({ ...retained, returnedCount: 0, omittedNodeCount: inspection.omittedNodeCount + inspection.returnedCount, truncated: true, rolledBack: true }); };");
+  lines.push("const inspectBuild = async (node, action, maxResponseBytes) => { if (maxResponseBytes < 512) throw new Error('Batch inspection response limit of ' + MAX_BATCH_INSPECTION_BYTES + ' bytes exhausted'); const effectiveLimit = Math.min(action.limit, action.scanLimit); const budget = { remaining: effectiveLimit, visited: 0, truncated: false }; const serialized = await inspectTree(node, action.depth, budget); if (!serialized) throw new Error('Inspect result limit exhausted before serializing the root node'); const limitReasons = budget.truncated ? [action.limit <= action.scanLimit ? 'result_limit' : 'scan_limit'] : []; const scanLimitReached = budget.truncated && action.scanLimit < action.limit; const originalReturnedCount = inspectCount(serialized); let omittedPropertyCount = 0; const candidate = (root, responseLimited) => { const returnedCount = inspectCount(root); const scalar = inspectScalarSummary(root); const reasons = Array.from(new Set([...limitReasons, ...(scalar.truncatedFieldCount ? ['scalar_field_limit'] : []), ...(responseLimited ? ['response_byte_limit'] : [])])); return inspectMeasure({ root, totalScanned: budget.visited, returnedCount, omittedNodeCount: originalReturnedCount - returnedCount, truncated: reasons.length > 0, truncationReasons: reasons, traversalDepth: action.depth, resultLimit: action.limit, scanLimit: action.scanLimit, scanLimitReached, truncatedFieldCount: scalar.truncatedFieldCount, omittedScalarBytes: scalar.omittedScalarBytes, omittedPropertyCount }); }; let response = candidate(serialized, false); if (response.responseBytes <= maxResponseBytes) return response; for (let retainedDepth = Math.max(0, action.depth - 1); retainedDepth >= 0; retainedDepth--) { response = candidate(inspectAtDepth(serialized, retainedDepth), true); if (response.responseBytes <= maxResponseBytes) return response; } const root = inspectAtDepth(serialized, 0); for (const field of ['css','resolvedVariableModes','boundVariables','componentPropertyReferences','componentPropertyDefinitions','componentProperties','effects','strokes','fills','description','componentKey','componentId','componentSetId','textContent','fillStyleId','strokeStyleId','textStyleId','effectStyleId']) { if (root[field] === undefined) continue; delete root[field]; omittedPropertyCount++; response = candidate(root, true); if (response.responseBytes <= maxResponseBytes) return response; } throw new Error('Inspect root cannot fit within remaining batch response limit of ' + maxResponseBytes + ' bytes'); };");
+  }
   lines.push("const resolveRefId = (id) => {");
   lines.push("  if (typeof id !== \"string\") return id;");
   lines.push("  if (!id.startsWith(\"$\")) return id;");
@@ -246,6 +272,9 @@ function generateFallbackJs(
     };
 
     switch (a.type) {
+      case "inspect":
+        lines.push(`{ const resolvedNodeId = resolveRefId(${j(nid)}); const inspection = await inspectBuild(requireNode(resolvedNodeId), ${j(a)}, MAX_BATCH_INSPECTION_BYTES - inspectionBytes); inspectionBytes += inspection.responseBytes; results.push({ type: "inspect", nodeId: resolvedNodeId, inspection }); }`);
+        break;
       case "rename":
         lines.push(`{ ${g(nid)}.name = ${j(a.name)}; markDocumentWrite(); ${r("rename")} }`);
         break;
@@ -431,6 +460,7 @@ function generateFallbackJs(
 
   lines.push("if (executionOptions.rollbackOnError && failed && documentWrites > 0) {");
   lines.push("  figma.triggerUndo();");
+  if (needsInspection) lines.push("  for (const result of results) if (result.inspection) result.inspection = inspectInvalidateRollback(result.inspection);");
   lines.push("  results.push({ type: \"rollback\", status: \"applied\" });");
   lines.push("} else if (executionOptions.rollbackOnError && documentWrites > 0) {");
   lines.push("  figma.commitUndo();");

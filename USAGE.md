@@ -178,7 +178,7 @@ Plans are reviewable: the agent inspects, edits, or filters before sending to `f
 
 Fallback JavaScript preserves `dryRun`, `stopOnError`, and `rollbackOnError` semantics. Rollback requires the host runtime to expose both `figma.commitUndo` and `figma.triggerUndo`; successful and failed batches use explicit undo boundaries so a failed batch cannot undo an earlier successful one. When `rollbackOnError: true`, the tool returns a structured `fallbackLimitations` entry and fails closed before executing any action if either API is unavailable.
 
-54 action types are available. Highlights:
+55 action types are available. Highlights:
 
 - **Nodes**: `create_frame`, `create_text`, `create_component_from_node`, `create_instance`, `duplicate_node`, `delete_node`
 - **Layout**: `set_layout_mode`, `set_child_layout_sizing` (FILL / HUG / FIXED), `set_constraints`, `move`, `resize`
@@ -189,6 +189,7 @@ Fallback JavaScript preserves `dryRun`, `stopOnError`, and `rollbackOnError` sem
 - **Pages**: `create_page`, `switch_page`
 - **Components**: component-set properties/references, `set_component_properties`, and nested text/visibility/swap overrides
 - **Boards/prototypes**: `create_section`, `resize_section`, `move_to_section`, bounded `set_reaction`
+- **Read-back**: read-only `inspect` after earlier mutations, including nodes addressed through stable aliases
 
 `create_frame` creates a transparent frame (`fills: []`) by default, making it suitable for structural and auto-layout containers. Apply `set_fills` explicitly when the frame should render a background or other visual surface.
 
@@ -201,7 +202,8 @@ figma_execute({
   actions: [
     { type: "create_page", name: "Dashboard", as: "dashboard" },
     { type: "create_frame", name: "Sidebar", parentId: "$dashboard", width: 240, height: 800, as: "sidebar" },
-    { type: "create_text", parentId: "$sidebar", characters: "Analytics", fontSize: 24, name: "Sidebar/Title" }
+    { type: "create_text", parentId: "$sidebar", characters: "Analytics", fontSize: 24, name: "Sidebar/Title" },
+    { type: "inspect", nodeId: "$sidebar", depth: 2 }
   ],
   dryRun: false,
   stopOnError: true
@@ -216,7 +218,9 @@ Image fills accept exactly one of `imageBase64`, a server-local `path`, or a pub
 
 Variable and style names are exact matches. Use `collectionName`/`collectionId` and `resolvedType` to disambiguate variables; duplicate matches are errors. Nested instance operations use `childPath`, where every segment must match exactly one direct child.
 
-Same-batch read-back is intentionally not available yet. It depends on issue #30's plugin-native inspection transport; use a separate inspection call once that foundation lands.
+Use `inspect: { nodeId, depth?, limit?, scanLimit? }` after writes when later logic needs the exact plugin-native state immediately. It returns a tree with child IDs, bounds/dimensions, text, visibility, paints, resolved CSS, style and variable bindings, component properties/definitions/references, and safe layout fields. Defaults are depth 2, 100 results, and 1,000 scanned nodes; hard caps match plugin inspection (depth 20, 1,000 results, 10,000 scanned nodes, 4KB per scalar/native property). All `inspect` results in one batch share an 80KB response budget and report `responseBytes`, omission counts, and truncation reasons.
+
+`inspect` is not a mutation: it increments `summary.applied` as a completed action but not `summary.mutations`, and an inspect-only batch does not invalidate inspection caches. With `rollbackOnError`, if a later failure rolls back earlier writes, every transient inspection tree is removed from the returned result and its metadata is marked `rolledBack: true`; this prevents pre-rollback state from being mistaken for committed state.
 
 ### dryRun
 

@@ -4,11 +4,13 @@ import { assertActionInputCoverage, isForbiddenDeleteNodeType, isKnownActionType
 import { classifyNode } from "../src/analysis/node-classifier";
 import {
   MAX_PLUGIN_READ_DEPTH,
+  MAX_PLUGIN_BATCH_INSPECTION_BYTES,
   MAX_PLUGIN_READ_RESULTS,
   MAX_PLUGIN_READ_SCALAR_BYTES,
   MAX_PLUGIN_READ_VISITS,
   MAX_PLUGIN_SELECTION_METADATA,
   type PluginComponentNode,
+  type PluginBatchInspection,
   type PluginReadFilters,
   type PluginReadNode,
   type PluginReadRequest,
@@ -270,6 +272,58 @@ function safeSerialize(value: unknown): unknown {
   try { return JSON.parse(JSON.stringify(value)); } catch { return "mixed"; }
 }
 
+function boundedNativeProperty(
+  node: BaseNode,
+  property: string,
+  truncatedFields: PluginTruncatedFields
+): Record<string, unknown> {
+  const raw = readProperty(node, property);
+  if (raw === undefined) return {};
+  const value = safeSerialize(raw);
+  const serialized = JSON.stringify(value);
+  const originalBytes = truncateFigmaString(serialized).originalBytes;
+  if (originalBytes > MAX_PLUGIN_READ_SCALAR_BYTES) {
+    truncatedFields[property] = { originalBytes, returnedBytes: 0 };
+    return {};
+  }
+  return { [property]: value };
+}
+
+async function nativeInspectionProperties(
+  node: BaseNode,
+  truncatedFields: PluginTruncatedFields
+): Promise<Partial<PluginReadNode>> {
+  const result: Record<string, unknown> = {};
+  for (const property of [
+    "opacity", "rotation", "topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius",
+  ]) {
+    Object.assign(result, numberProperty(node, property));
+  }
+  for (const property of [
+    "layoutWrap", "primaryAxisAlignItems", "counterAxisAlignItems", "layoutSizingHorizontal",
+    "layoutSizingVertical", "fillStyleId", "strokeStyleId", "textStyleId", "effectStyleId",
+  ]) {
+    Object.assign(result, stringProperty(node, property, truncatedFields));
+  }
+  Object.assign(result, cornerRadiusProperty(node));
+  for (const property of [
+    "fills", "strokes", "effects", "componentProperties", "componentPropertyDefinitions",
+    "componentPropertyReferences", "boundVariables", "resolvedVariableModes",
+  ]) {
+    Object.assign(result, boundedNativeProperty(node, property, truncatedFields));
+  }
+  const getCSSAsync = readProperty(node, "getCSSAsync");
+  if (typeof getCSSAsync === "function") {
+    try {
+      const css = await (getCSSAsync as () => Promise<Record<string, string>>).call(node);
+      Object.assign(result, boundedNativeProperty({ css } as unknown as BaseNode, "css", truncatedFields));
+    } catch {
+      // CSS resolution is useful enrichment, not a reason to fail inspection.
+    }
+  }
+  return result as Partial<PluginReadNode>;
+}
+
 function captureSnapshot(node: SceneNode): Record<string, unknown> {
   const snap: Record<string, unknown> = {
     id: node.id,
@@ -430,7 +484,12 @@ async function componentMetadata(node: BaseNode): Promise<Pick<PluginReadNode,
   };
 }
 
-async function serializeReadNode(node: BaseNode, children: PluginReadNode[], depth: number): Promise<PluginReadNode> {
+async function serializeReadNode(
+  node: BaseNode,
+  children: PluginReadNode[],
+  depth: number,
+  includeNativeProperties = false
+): Promise<PluginReadNode> {
   const truncatedFields: PluginTruncatedFields = {};
   const bounds = safeBounds(node);
   const visible = readProperty(node, "visible");
@@ -442,6 +501,9 @@ async function serializeReadNode(node: BaseNode, children: PluginReadNode[], dep
   const componentKey = boundedOptionalFigmaString(rawMetadata.componentKey, "componentKey", truncatedFields);
   const description = boundedOptionalFigmaString(rawMetadata.description, "description", truncatedFields);
   const componentSetId = boundedOptionalFigmaString(rawMetadata.componentSetId, "componentSetId", truncatedFields);
+  const nativeProperties = includeNativeProperties
+    ? await nativeInspectionProperties(node, truncatedFields)
+    : {};
   const sourceChildren = readChildren(node);
   const classificationChildren = sourceChildren.slice(0, 20).map((child) => ({
     id: child.id,
@@ -477,6 +539,7 @@ async function serializeReadNode(node: BaseNode, children: PluginReadNode[], dep
     ...numberProperty(node, "paddingRight"),
     ...numberProperty(node, "paddingTop"),
     ...numberProperty(node, "paddingBottom"),
+    ...nativeProperties,
     childCount: sourceChildren.length,
     ...(Object.keys(truncatedFields).length > 0 ? { truncatedFields } : {}),
     children,
@@ -488,11 +551,27 @@ function numberProperty(node: BaseNode, property: string): Record<string, number
   return value === undefined ? {} : { [property]: value };
 }
 
+function stringProperty(
+  node: BaseNode,
+  property: string,
+  truncatedFields: PluginTruncatedFields
+): Record<string, string> {
+  const value = boundedOptionalFigmaString(readProperty(node, property), property, truncatedFields);
+  return value === undefined ? {} : { [property]: value };
+}
+
+function cornerRadiusProperty(node: BaseNode): Pick<PluginReadNode, "cornerRadius"> {
+  const value = readProperty(node, "cornerRadius");
+  if (typeof value === "symbol") return { cornerRadius: "mixed" };
+  return typeof value === "number" && Number.isFinite(value) ? { cornerRadius: value } : {};
+}
+
 async function serializeTree(
   node: BaseNode,
   depth: number,
   budget: { remaining: number; visited: number; truncated: boolean },
-  currentDepth = 0
+  currentDepth = 0,
+  includeNativeProperties = false
 ): Promise<PluginReadNode | null> {
   if (budget.remaining <= 0) {
     budget.truncated = true;
@@ -503,12 +582,12 @@ async function serializeTree(
   const children: PluginReadNode[] = [];
   if (depth > 0) {
     for (const child of readChildren(node)) {
-      const serialized = await serializeTree(child, depth - 1, budget, currentDepth + 1);
+      const serialized = await serializeTree(child, depth - 1, budget, currentDepth + 1, includeNativeProperties);
       if (!serialized) break;
       children.push(serialized);
     }
   }
-  return serializeReadNode(node, children, currentDepth);
+  return serializeReadNode(node, children, currentDepth, includeNativeProperties);
 }
 
 async function resolveReadRoots(request: PluginReadRequest): Promise<readonly BaseNode[]> {
@@ -660,6 +739,144 @@ function finalizeReadResponse(
   };
 }
 
+const INSPECTION_OPTIONAL_FIELDS: ReadonlyArray<keyof PluginReadNode> = [
+  "css", "resolvedVariableModes", "boundVariables", "componentPropertyReferences",
+  "componentPropertyDefinitions", "componentProperties", "effects", "strokes", "fills",
+  "description", "componentKey", "componentId", "componentSetId", "textContent",
+  "fillStyleId", "strokeStyleId", "textStyleId", "effectStyleId",
+];
+
+function inspectionScalarSummary(root: PluginReadNode | undefined): {
+  truncatedFieldCount: number;
+  omittedScalarBytes: number;
+} {
+  let truncatedFieldCount = 0;
+  let omittedScalarBytes = 0;
+  const visit = (node: PluginReadNode): void => {
+    for (const field of Object.values(node.truncatedFields ?? {})) {
+      truncatedFieldCount++;
+      omittedScalarBytes += field.originalBytes - field.returnedBytes;
+    }
+    node.children.forEach(visit);
+  };
+  if (root) visit(root);
+  return { truncatedFieldCount, omittedScalarBytes };
+}
+
+function countInspectionNodes(root: PluginReadNode | undefined): number {
+  if (!root) return 0;
+  return 1 + root.children.reduce((count, child) => count + countInspectionNodes(child), 0);
+}
+
+function inspectionTreeAtDepth(node: PluginReadNode, maxDepth: number): PluginReadNode {
+  return {
+    ...node,
+    children: maxDepth > 0
+      ? node.children.map((child) => inspectionTreeAtDepth(child, maxDepth - 1))
+      : [],
+  };
+}
+
+function measureInspection(
+  inspection: Omit<PluginBatchInspection, "responseBytes">
+): PluginBatchInspection {
+  let responseBytes = 0;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const result = { ...inspection, responseBytes };
+    const measured = truncateFigmaString(JSON.stringify(result)).originalBytes;
+    if (measured === responseBytes) return result;
+    responseBytes = measured;
+  }
+  return { ...inspection, responseBytes };
+}
+
+function invalidateInspectionAfterRollback(inspection: PluginBatchInspection): PluginBatchInspection {
+  const { root: _root, responseBytes: _responseBytes, ...retained } = inspection;
+  return measureInspection({
+    ...retained,
+    returnedCount: 0,
+    omittedNodeCount: inspection.omittedNodeCount + inspection.returnedCount,
+    truncated: true,
+    rolledBack: true,
+  });
+}
+
+async function inspectBatchNode(
+  node: BaseNode,
+  depth: number,
+  limit: number,
+  scanLimit: number,
+  maxResponseBytes: number
+): Promise<PluginBatchInspection> {
+  if (!Number.isInteger(depth) || depth < 0 || depth > MAX_PLUGIN_READ_DEPTH) {
+    throw new Error(`Inspect depth must be between 0 and ${MAX_PLUGIN_READ_DEPTH}`);
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PLUGIN_READ_RESULTS) {
+    throw new Error(`Inspect limit must be between 1 and ${MAX_PLUGIN_READ_RESULTS}`);
+  }
+  if (!Number.isInteger(scanLimit) || scanLimit < 1 || scanLimit > MAX_PLUGIN_READ_VISITS) {
+    throw new Error(`Inspect scan limit must be between 1 and ${MAX_PLUGIN_READ_VISITS}`);
+  }
+  if (maxResponseBytes < 512) {
+    throw new Error(`Batch inspection response limit of ${MAX_PLUGIN_BATCH_INSPECTION_BYTES} bytes exhausted`);
+  }
+
+  const effectiveLimit = Math.min(limit, scanLimit);
+  const budget = { remaining: effectiveLimit, visited: 0, truncated: false };
+  const serialized = await serializeTree(node, depth, budget, 0, true);
+  if (!serialized) throw new Error("Inspect result limit exhausted before serializing the root node");
+  const scannedCount = budget.visited;
+  const limitReasons = budget.truncated
+    ? [limit <= scanLimit ? "result_limit" as const : "scan_limit" as const]
+    : [];
+  const scanLimitReached = budget.truncated && scanLimit < limit;
+  const originalReturnedCount = countInspectionNodes(serialized);
+  let omittedPropertyCount = 0;
+
+  const candidate = (root: PluginReadNode, responseLimited: boolean): PluginBatchInspection => {
+    const returnedCount = countInspectionNodes(root);
+    const scalar = inspectionScalarSummary(root);
+    const reasons = Array.from(new Set([
+      ...limitReasons,
+      ...(scalar.truncatedFieldCount > 0 ? ["scalar_field_limit" as const] : []),
+      ...(responseLimited ? ["response_byte_limit" as const] : []),
+    ]));
+    return measureInspection({
+      root,
+      totalScanned: scannedCount,
+      returnedCount,
+      omittedNodeCount: originalReturnedCount - returnedCount,
+      truncated: reasons.length > 0,
+      truncationReasons: reasons,
+      traversalDepth: depth,
+      resultLimit: limit,
+      scanLimit,
+      scanLimitReached,
+      truncatedFieldCount: scalar.truncatedFieldCount,
+      omittedScalarBytes: scalar.omittedScalarBytes,
+      omittedPropertyCount,
+    });
+  };
+
+  let response = candidate(serialized, false);
+  if (response.responseBytes <= maxResponseBytes) return response;
+
+  for (let retainedDepth = Math.max(0, depth - 1); retainedDepth >= 0; retainedDepth--) {
+    response = candidate(inspectionTreeAtDepth(serialized, retainedDepth), true);
+    if (response.responseBytes <= maxResponseBytes) return response;
+  }
+
+  const root = inspectionTreeAtDepth(serialized, 0);
+  for (const field of INSPECTION_OPTIONAL_FIELDS) {
+    if (root[field] === undefined) continue;
+    delete (root as unknown as Record<string, unknown>)[field];
+    omittedPropertyCount++;
+    response = candidate(root, true);
+    if (response.responseBytes <= maxResponseBytes) return response;
+  }
+  throw new Error(`Inspect root cannot fit within remaining batch response limit of ${maxResponseBytes} bytes`);
+}
+
 async function processReadRequest(request: PluginReadRequest): Promise<PluginReadResponse> {
   if (!figma.fileKey || request.fileKey !== figma.fileKey) {
     throw new Error(`Plugin file mismatch: requested ${request.fileKey}, open ${figma.fileKey || "unknown"}`);
@@ -804,22 +1021,37 @@ type ActionResult = {
   newNodeId?: string;
   before?: Record<string, unknown>;
   after?: Record<string, unknown>;
+  inspection?: PluginBatchInspection;
   error?: string;
 };
 
 async function executeAction(
   action: Record<string, unknown>,
-  markDocumentWrite: () => void
+  markDocumentWrite: () => void,
+  maxInspectionBytes = MAX_PLUGIN_BATCH_INSPECTION_BYTES
 ): Promise<{
   before?: Record<string, unknown>;
   after?: Record<string, unknown>;
   newNodeId?: string;
+  inspection?: PluginBatchInspection;
 }> {
   const type = action.type as string;
   if (!isKnownActionType(type)) throw new Error(`Unknown action type: ${type}`);
   assertActionInputCoverage(action);
 
   switch (type) {
+    case "inspect": {
+      const node = await findNode(action.nodeId as string);
+      const inspection = await inspectBatchNode(
+        node,
+        action.depth as number,
+        action.limit as number,
+        action.scanLimit as number,
+        maxInspectionBytes
+      );
+      return { inspection };
+    }
+
     case "rename": {
       const node = await findNode(action.nodeId as string);
       const before = { name: node.name };
@@ -1748,7 +1980,8 @@ interface BatchResult {
   success: boolean;
   results: ActionResult[];
   nodeIdMap: Record<string, string>;
-  summary: { total: number; applied: number; failed: number; skipped: number };
+  summary: { total: number; applied: number; failed: number; skipped: number; mutations: number };
+  rollbackApplied?: boolean;
   error?: string;
 }
 
@@ -1771,6 +2004,7 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
   let documentWrites = 0;
   let failed = 0;
   let skipped = 0;
+  let inspectionBytes = 0;
   let stopProcessing = false;
 
   for (let i = 0; i < batch.actions.length; i++) {
@@ -1806,7 +2040,8 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
 
       const result = await executeAction(action, () => {
         actionWroteDocument = true;
-      });
+      }, MAX_PLUGIN_BATCH_INSPECTION_BYTES - inspectionBytes);
+      if (result.inspection) inspectionBytes += result.inspection.responseBytes;
 
       // Register new node ID for symbolic ref
       if (result.newNodeId && action._ref) {
@@ -1822,6 +2057,7 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
         newNodeId: result.newNodeId,
         before: result.before,
         after: result.after,
+        inspection: result.inspection,
       });
       applied++;
       if (actionWroteDocument) documentWrites++;
@@ -1840,6 +2076,9 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
   if (batch.rollbackOnError && failed > 0 && documentWrites > 0) {
     figma.triggerUndo();
     rollbackApplied = true;
+    for (const result of results) {
+      if (result.inspection) result.inspection = invalidateInspectionAfterRollback(result.inspection);
+    }
   } else if (batch.rollbackOnError && documentWrites > 0) {
     // Close the successful batch as its own undo unit.
     figma.commitUndo();
@@ -1851,7 +2090,7 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
     success: failed === 0,
     results,
     nodeIdMap: Object.fromEntries(refMap),
-    summary: { total: batch.actions.length, applied, failed, skipped },
+    summary: { total: batch.actions.length, applied, failed, skipped, mutations: documentWrites },
     ...(rollbackApplied ? { rollbackApplied: true } : {}),
   };
 }

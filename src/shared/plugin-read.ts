@@ -3,11 +3,13 @@ export const MAX_PLUGIN_READ_RESULTS = 1_000;
 export const MAX_PLUGIN_READ_VISITS = 10_000;
 export const MAX_PLUGIN_READ_SCALAR_BYTES = 4_000;
 export const MAX_PLUGIN_SELECTION_METADATA = 100;
+/** Shared cap for all inspect payloads returned by one figma_execute batch. */
+export const MAX_PLUGIN_BATCH_INSPECTION_BYTES = 80_000;
 
 export type InspectionSource = "auto" | "plugin" | "rest";
 export type PluginReadRoot = "node" | "current-page" | "selection";
 export type PluginReadOperation = "tree" | "find" | "components";
-export type PluginReadTruncationReason = "result_limit" | "scan_limit" | "scalar_field_limit";
+export type PluginReadTruncationReason = "result_limit" | "scan_limit" | "scalar_field_limit" | "response_byte_limit";
 
 export interface PluginScalarTruncation {
   originalBytes: number;
@@ -79,9 +81,53 @@ export interface PluginReadNode {
   paddingRight?: number;
   paddingTop?: number;
   paddingBottom?: number;
+  opacity?: number;
+  rotation?: number;
+  cornerRadius?: number | "mixed";
+  topLeftRadius?: number;
+  topRightRadius?: number;
+  bottomRightRadius?: number;
+  bottomLeftRadius?: number;
+  layoutWrap?: string;
+  primaryAxisAlignItems?: string;
+  counterAxisAlignItems?: string;
+  layoutSizingHorizontal?: string;
+  layoutSizingVertical?: string;
+  fillStyleId?: string;
+  strokeStyleId?: string;
+  textStyleId?: string;
+  effectStyleId?: string;
+  fills?: unknown;
+  strokes?: unknown;
+  effects?: unknown;
+  componentProperties?: unknown;
+  componentPropertyDefinitions?: unknown;
+  componentPropertyReferences?: unknown;
+  boundVariables?: unknown;
+  resolvedVariableModes?: unknown;
+  css?: Record<string, string>;
   childCount: number;
   truncatedFields?: PluginTruncatedFields;
   children: PluginReadNode[];
+}
+
+/** The bounded payload attached to a same-batch `inspect` action result. */
+export interface PluginBatchInspection {
+  root?: PluginReadNode;
+  totalScanned: number;
+  returnedCount: number;
+  omittedNodeCount: number;
+  truncated: boolean;
+  truncationReasons: PluginReadTruncationReason[];
+  traversalDepth: number;
+  resultLimit: number;
+  scanLimit: number;
+  scanLimitReached: boolean;
+  truncatedFieldCount: number;
+  omittedScalarBytes: number;
+  omittedPropertyCount: number;
+  responseBytes: number;
+  rolledBack?: boolean;
 }
 
 export interface PluginComponentNode {

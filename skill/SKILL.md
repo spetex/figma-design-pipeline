@@ -77,7 +77,7 @@ or inspection cache.
 - Resolve variables and styles by exact name when IDs are unavailable. Supply collection/type disambiguation for variables; ambiguity is an error.
 - Use `childPath: ["Exact parent", "Exact child"]` for nested instance text, visibility, and component swaps. Every segment must identify one direct child.
 - Image fills may use one bounded base64 payload, server-local path, or public HTTP(S) URL. Local paths require an explicit `FIGMA_ASSET_ROOTS` allowlist and cannot escape it through traversal or symlinks. SVG input must be inert. The server preprocesses assets before plugin transport.
-- Same-batch read-back is not implemented until issue #30 provides the plugin-native inspection transport. Use a later inspection request rather than assuming REST immediately reflects a write.
+- Add `inspect: { nodeId: "$alias", depth?, limit?, scanLimit? }` after earlier actions for immediate bounded plugin-native read-back. It is read-only, shares an 80KB aggregate batch budget, and exposes truncation metadata. If rollback occurs, its tree is redacted and marked `rolledBack`.
 
 ## What This Skill Provides
 

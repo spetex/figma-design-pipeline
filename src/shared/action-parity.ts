@@ -14,6 +14,7 @@ export interface ActionOperationSpec {
 const operation = (...inputFields: string[]): ActionOperationSpec => ({ inputFields });
 
 export const ACTION_OPERATIONS = {
+  inspect: operation("nodeId", "depth", "limit", "scanLimit"),
   rename: operation("nodeId", "name"),
   move: operation("nodeId", "targetParentId", "insertIndex"),
   create_text: operation("parentId", "characters", "name", "fontFamily", "fontWeight", "fontSize", "lineHeight", "letterSpacing", "fills", "textCase", "textAlignHorizontal", "textAutoResize", "layoutSizingHorizontal", "layoutSizingVertical", "opacity", "textTruncation", "maxLines", "textStyleId", "textStyleName", "as"),

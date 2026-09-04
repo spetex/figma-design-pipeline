@@ -9,6 +9,7 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 - Expanded `figma_execute` from 43 to 54 actions for design-system construction: component-property references, exact-path nested instance text/visibility/swap overrides, variable value updates, style updates/copies, safe SVG creation, sections, and bounded ON_CLICK prototype reactions.
 - Added stable `as` aliases (`$alias`) to every node-producing action while preserving `$ref:node-N`, plus whole-batch reference-graph preflight and alias entries in connected `nodeIdMap` results.
 - Added exact-name variable/style resolution with explicit collection/type disambiguation, per-corner and counter-axis variable binding, and server-side local-path/HTTP(S) image ingestion with explicit asset-root containment, complete PNG/JPEG/GIF validation, 4096×4096 limits, timeout, redirect, and private-network protections.
+- Added a 55th, read-only `inspect` batch action for immediate alias-addressed read-back after writes. Connected and fallback execution return the same bounded tree/property payload, including IDs, dimensions, text, visibility, paints, resolved CSS, style/variable bindings, and component state.
 
 ### Changed
 - Extended targeted duplication with parent, insertion, and position controls; component-property definition to component sets; and text creation with style selection, truncation, and maximum-line controls.
@@ -25,9 +26,8 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 - Image ingestion now rejects incomplete/corrupt/oversized content and unsupported WebP. Local paths require configured roots and cannot escape by traversal or symlink.
 - Component property strings are treated as symbolic references only for resolved `INSTANCE_SWAP` definitions, and section creation/resizing enforces the Plugin API’s `0.01` minimum dimension before mutation.
 - Gradient and per-corner-radius result snapshots no longer expose Figma mixed-value symbols through the bridge. Connected and fallback executors retain full schema/action behavior parity.
+- Same-batch inspection uses the approved plugin serializer's depth/result/scan/scalar limits and a shared 80KB aggregate batch budget. Inspection actions do not count as mutations or invalidate caches; rollback redacts transient inspection trees and marks them `rolledBack`.
 
-### Known limitation
-- Same-batch write read-back remains deferred until issue #30 provides plugin-native inspection and bounded response transport; this release does not add the separately owned read protocol.
 ## [0.8.2] - 2026-08-02
 
 ### Changed

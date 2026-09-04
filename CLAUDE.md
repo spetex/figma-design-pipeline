@@ -38,7 +38,7 @@ AI Agent (Claude Code / Codex / Gemini)
     │   ├─ Codegen tools: map-components, generate-page, export-tokens
     │   └─ Plugin bridge (WebSocket, port 4010-4014)
     │         ↕ WebSocket
-    │       Figma Plugin (batch executor, 54 action types)
+    │       Figma Plugin (inspection + batch executor, 55 action types)
     │
     └─ Browser Tools ───────→ Website capture & analysis
 ```
@@ -74,7 +74,7 @@ Two esbuild bundles:
 
 - **FIGMA_ACCESS_TOKEN is optional**: Connected-plugin tree, node, and component inspection works without it when `figma.fileKey` exactly matches. The token is needed for REST analysis and fallback.
 - **Plugin bridge is optional but recommended**: When connected, `figma_execute` is 30-60x faster. When not, it falls back to generating `use_figma` JS.
-- **Plan tools return action arrays**: Validated against Zod schemas, can be executed via `figma_execute` or `use_figma`.
+- **Plan tools return action arrays**: Validated against Zod schemas, can be executed via `figma_execute` or `use_figma`. A trailing bounded `inspect` action can read earlier writes through their stable aliases.
 - **Tree auto-truncation at 80KB**: `figma_get_tree` progressively prunes deeper children.
 - **diff-tokens accepts style data as input**: No REST API or plugin needed.
 

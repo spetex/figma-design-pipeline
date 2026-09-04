@@ -726,6 +726,7 @@ const EFFECT = { type: "DROP_SHADOW", visible: true, radius: 4, blendMode: "NORM
 const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 const BEHAVIORAL_PARITY_CASES: ParityCase[] = [
+  { type: "inspect", action: { type: "inspect", nodeId: "node", depth: 0, limit: 10, scanLimit: 10 } },
   { type: "rename", action: { type: "rename", nodeId: "node", name: "Renamed" } },
   { type: "move", action: { type: "move", nodeId: "node", targetParentId: "parent", insertIndex: 0 } },
   { type: "create_text", action: { type: "create_text", parentId: "parent", characters: "Text", name: "Title", fontFamily: "Inter", fontWeight: 600, fontSize: 16, lineHeight: 20, letterSpacing: 1, fills: [PAINT], textCase: "UPPER", textAlignHorizontal: "CENTER", textAutoResize: "TRUNCATE", layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG", opacity: 0.5, textTruncation: "ENDING", maxLines: 2 } },
@@ -1046,6 +1047,75 @@ function createBehavioralFigma() {
   };
 }
 
+function createInspectableBehavioralFigma() {
+  const environment = createBehavioralFigma();
+  environment.figma.loadAllPagesAsync = vi.fn().mockResolvedValue(undefined);
+  const parent = environment.nodes.get("parent")!;
+  parent.children = [];
+  const attach = (container: Record<string, unknown>, child: Record<string, unknown>) => {
+    (container.children as Record<string, unknown>[]).push(child);
+    child.parent = container;
+  };
+  parent.appendChild = (child: Record<string, unknown>) => attach(parent, child);
+
+  const makeNode = (id: string, type: string, name: string, width: number, height: number) => {
+    const node: Record<string, unknown> = {
+      id, type, name, parent: undefined, children: [], visible: true, opacity: 1,
+      width, height, absoluteBoundingBox: { x: 0, y: 0, width, height },
+      fills: [{ type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3 }, opacity: 0.8 }],
+      strokes: [], effects: [], fillStyleId: "paint-style", boundVariables: {},
+      resize: (nextWidth: number, nextHeight: number) => {
+        node.width = nextWidth;
+        node.height = nextHeight;
+        node.absoluteBoundingBox = { x: 0, y: 0, width: nextWidth, height: nextHeight };
+      },
+      appendChild: (child: Record<string, unknown>) => attach(node, child),
+      getCSSAsync: async () => ({ background: "rgba(26, 51, 77, 0.8)", width: `${node.width}px` }),
+    };
+    environment.nodes.set(id, node);
+    return node;
+  };
+
+  environment.figma.createFrame = () => makeNode("created-card", "FRAME", "Frame", 100, 100);
+  environment.figma.createText = () => {
+    const text = makeNode("created-label", "TEXT", "Text", 80, 20);
+    text.fontName = { family: "Inter", style: "Regular" };
+    text.characters = "";
+    text.textAutoResize = "HEIGHT";
+    text.setTextStyleIdAsync = async () => {};
+    return text;
+  };
+  const component = environment.nodes.get("component")!;
+  component.componentPropertyDefinitions = {
+    Variant: { type: "VARIANT", defaultValue: "Primary" },
+    Disabled: { type: "BOOLEAN", defaultValue: false },
+  };
+  component.createInstance = () => {
+    const instance = makeNode("created-instance", "INSTANCE", "Button", 120, 40);
+    instance.componentProperties = {
+      Variant: { type: "VARIANT", value: "Primary" },
+      Disabled: { type: "BOOLEAN", value: false },
+    };
+    instance.getMainComponentAsync = async () => component;
+    instance.setProperties = (properties: Record<string, unknown>) => {
+      for (const [key, value] of Object.entries(properties)) {
+        (instance.componentProperties as Record<string, { type: string; value: unknown }>)[key].value = value;
+      }
+    };
+    return instance;
+  };
+  return environment;
+}
+
+function normalizeInspection(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeInspection);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([key, item]) => key === "responseBytes" ? [] : [[
+    key,
+    key === "classification" ? "normalized" : normalizeInspection(item),
+  ]]));
+}
+
 describe("all-action behavioral parity", () => {
   it("has a full-field behavior case for every action schema", () => {
     expect(BEHAVIORAL_PARITY_CASES.map(({ type }) => type).sort()).toEqual([...ACTION_TYPES].sort());
@@ -1242,6 +1312,119 @@ describe("stable named references", () => {
     expect(result.summary).toMatchObject({ applied: 3, failed: 0 });
     expect(result.nodeIdMap).toMatchObject({ "$ref:node-0": "frame", "$outer": "frame", "$ref:node-1": "clone", "$copy": "clone" });
     expect(environment.trace).toContain('set:clone.name:"Copy"');
+  });
+});
+
+describe("same-batch inspect action", () => {
+  const actions = [
+    { type: "create_frame", parentId: "parent", name: "Card", width: 320, height: 180, as: "card" },
+    { type: "create_text", parentId: "$card", characters: "Hello", name: "Title", fontFamily: "Inter", fontWeight: 400, fills: [PAINT], as: "label" },
+    { type: "create_instance", componentId: "component", parentId: "$card", x: 8, y: 24, as: "button" },
+    { type: "set_component_properties", nodeId: "$button", properties: { Variant: "Secondary", Disabled: true } },
+    { type: "inspect", nodeId: "$card", depth: 2, limit: 20, scanLimit: 20 },
+  ];
+
+  it("returns ordered create-to-inspect data with connected/fallback contract parity", async () => {
+    const fallback = createInspectableBehavioralFigma();
+    const generated = await handleExecute(null, { actions, rollbackOnError: true });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<Array<Record<string, unknown>>>;
+    const fallbackResults = await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+
+    const connected = createInspectableBehavioralFigma();
+    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, actions, { preloadFonts: true });
+    const connectedInspection = pluginResult.results[4].inspection;
+    const fallbackInspection = fallbackResults[4].inspection;
+
+    expect(pluginResult.results.map((result: { type: string }) => result.type)).toEqual(actions.map((action) => action.type));
+    expect(fallbackResults.slice(0, actions.length).map((result) => result.type)).toEqual(actions.map((action) => action.type));
+    expect(pluginResult.summary).toMatchObject({ applied: 5, failed: 0, mutations: 4 });
+    expect(pluginResult.nodeIdMap).toMatchObject({ "$card": "created-card", "$label": "created-label", "$button": "created-instance" });
+    expect(connectedInspection.root).toMatchObject({
+      id: "created-card",
+      bounds: { width: 320, height: 180 },
+      css: { background: "rgba(26, 51, 77, 0.8)", width: "320px" },
+      children: [
+        { id: "created-label", textContent: "Hello", bounds: { width: 80, height: 20 }, fills: [{ color: { r: 0.1, g: 0.2, b: 0.3 } }] },
+        { id: "created-instance", componentId: "component", componentProperties: { Variant: { value: "Secondary" }, Disabled: { value: true } } },
+      ],
+    });
+    expect(normalizeInspection(fallbackInspection)).toEqual(normalizeInspection(connectedInspection));
+    expect(pluginResult.summary.mutations).toBe(actions.length - 1);
+    expect(connected.figma.triggerUndo).not.toHaveBeenCalled();
+    expect(fallback.figma.triggerUndo).not.toHaveBeenCalled();
+  });
+
+  it("enforces scalar, result, scan, and aggregate response bounds in both paths", async () => {
+    const inspectActions = [
+      { type: "inspect", nodeId: "node", depth: 1, limit: 50, scanLimit: 1_000 },
+      { type: "inspect", nodeId: "node", depth: 1, limit: 1_000, scanLimit: 50 },
+    ];
+    const configureLargeTree = (environment: ReturnType<typeof createInspectableBehavioralFigma>) => {
+      const root = environment.nodes.get("node")!;
+      root.characters = "😀".repeat(5_000);
+      root.absoluteBoundingBox = { x: 0, y: 0, width: 1000, height: 1000 };
+      root.children = Array.from({ length: 80 }, (_, index) => ({
+        id: `child-${index}`,
+        name: `Child ${index} ${"x".repeat(800)}`,
+        type: "FRAME",
+        visible: true,
+        absoluteBoundingBox: { x: 0, y: index * 10, width: 100, height: 10 },
+        children: [],
+        parent: root,
+      }));
+    };
+
+    const fallback = createInspectableBehavioralFigma();
+    configureLargeTree(fallback);
+    const generated = await handleExecute(null, { actions: inspectActions });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<Array<Record<string, unknown>>>;
+    const fallbackResults = await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+
+    const connected = createInspectableBehavioralFigma();
+    configureLargeTree(connected);
+    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, inspectActions);
+
+    for (const results of [fallbackResults, pluginResult.results]) {
+      const inspections = results.map((result: { inspection: { responseBytes: number; truncationReasons: string[]; root: { textContent: string; truncatedFields: Record<string, unknown> } } }) => result.inspection);
+      expect(inspections.reduce((bytes, inspection) => bytes + inspection.responseBytes, 0)).toBeLessThanOrEqual(80_000);
+      for (const inspection of inspections) {
+        expect(inspection.responseBytes).toBe(Buffer.byteLength(JSON.stringify(inspection), "utf8"));
+      }
+      expect(inspections.some((inspection) => inspection.truncationReasons.includes("response_byte_limit"))).toBe(true);
+      expect(inspections[0].truncationReasons).toContain("result_limit");
+      expect(inspections[1].truncationReasons).toContain("scan_limit");
+      expect(inspections[0].truncationReasons).toContain("scalar_field_limit");
+      expect(Buffer.byteLength(inspections[0].root.textContent, "utf8")).toBeLessThanOrEqual(4_000);
+      expect(inspections[0].root.truncatedFields).toHaveProperty("textContent");
+    }
+    expect(pluginResult.summary).toMatchObject({ applied: 2, failed: 0, mutations: 0 });
+  });
+
+  it("redacts transient inspection trees after rollback in both paths", async () => {
+    const rollbackActions = [
+      { type: "create_frame", parentId: "parent", name: "Card", as: "card" },
+      { type: "inspect", nodeId: "$card", depth: 1, limit: 10, scanLimit: 10 },
+      { type: "rename", nodeId: "missing", name: "Fails" },
+    ];
+    const fallback = createInspectableBehavioralFigma();
+    const generated = await handleExecute(null, { actions: rollbackActions, rollbackOnError: true });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<Array<Record<string, unknown>>>;
+    const fallbackResults = await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+    const connected = createInspectableBehavioralFigma();
+    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, rollbackActions);
+
+    for (const inspection of [fallbackResults[1].inspection, pluginResult.results[1].inspection]) {
+      expect(inspection).toMatchObject({ rolledBack: true, returnedCount: 0, truncated: true });
+      expect(inspection).not.toHaveProperty("root");
+    }
+    expect(fallbackResults.at(-1)).toEqual({ type: "rollback", status: "applied" });
+    expect(pluginResult).toMatchObject({ rollbackApplied: true, summary: { applied: 2, failed: 1, mutations: 1 } });
   });
 });
 

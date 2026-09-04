@@ -59,6 +59,15 @@ describe("actionSchema (zod v4)", () => {
     }
   });
 
+  it("applies bounded inspect defaults and rejects values above plugin read limits", () => {
+    expect(actionSchema.parse({ type: "inspect", nodeId: "$card" })).toEqual({
+      type: "inspect", nodeId: "$card", depth: 2, limit: 100, scanLimit: 1_000,
+    });
+    expect(actionSchema.safeParse({ type: "inspect", nodeId: "node", depth: 21 }).success).toBe(false);
+    expect(actionSchema.safeParse({ type: "inspect", nodeId: "node", limit: 1_001 }).success).toBe(false);
+    expect(actionSchema.safeParse({ type: "inspect", nodeId: "node", scanLimit: 10_001 }).success).toBe(false);
+  });
+
   it("rejects invalid gradients and section sizes before bridge mutation", async () => {
     const execute = vi.fn();
     const bridge = { isConnected: () => true, execute } as unknown as BridgeServer;
@@ -104,10 +113,18 @@ describe("symbolic reference preflight", () => {
       { type: "rename", nodeId: "$ref:node-0", name: "Too early" },
       { type: "create_frame", parentId: "1:2", name: "Later" },
     ], "forward reference"],
+    ["inspect-unknown", [
+      { type: "inspect", nodeId: "$missing" },
+    ], "unknown reference"],
+    ["inspect-forward", [
+      { type: "inspect", nodeId: "$later" },
+      { type: "create_frame", parentId: "1:2", name: "Later", as: "later" },
+    ], "forward reference"],
   ])("rejects %s references before bridge execution", async (_label, actions, message) => {
     const execute = vi.fn();
     const bridge = { isConnected: () => true, execute } as unknown as BridgeServer;
     await expect(handleExecute(bridge, { actions })).rejects.toThrow(message as string);
+    await expect(handleExecute(null, { actions })).rejects.toThrow(message as string);
     expect(execute).not.toHaveBeenCalled();
   });
 
@@ -931,5 +948,24 @@ describe("inspection cache invalidation after execution", () => {
       expect(invalidateSnapshotsAfterExecute(snapshotCache, execution)).toBe(false);
       expect(snapshotCache.get("file/root", Number.POSITIVE_INFINITY)).not.toBeNull();
     }
+  });
+
+  it("does not invalidate for an applied inspect-only connected batch", () => {
+    const snapshotCache = new SnapshotCache();
+    snapshotCache.set("file/root", {} as EnrichedNode);
+    const cacheInvalidated = invalidateSnapshotsAfterExecute(snapshotCache, {
+      pluginConnected: true,
+      result: {
+        batchId: "batch-inspect",
+        dryRun: false,
+        success: true,
+        results: [],
+        nodeIdMap: {},
+        summary: { total: 1, applied: 1, failed: 0, skipped: 0, mutations: 0 },
+      },
+    });
+
+    expect(cacheInvalidated).toBe(false);
+    expect(snapshotCache.get("file/root", Number.POSITIVE_INFINITY)).not.toBeNull();
   });
 });

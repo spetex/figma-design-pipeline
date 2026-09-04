@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type Server } from "node:http";
 import { randomUUID } from "node:crypto";
-import type { PluginReadRequest, PluginReadResponse } from "../shared/plugin-read.js";
+import type { PluginBatchInspection, PluginReadRequest, PluginReadResponse } from "../shared/plugin-read.js";
 
 export const DEFAULT_BRIDGE_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_BRIDGE_MAX_CHUNKED_RESULT_BYTES = 64 * 1024 * 1024;
@@ -63,10 +63,12 @@ export interface BatchResult {
     newNodeId?: string;
     before?: Record<string, unknown>;
     after?: Record<string, unknown>;
+    inspection?: PluginBatchInspection;
     error?: string;
   }>;
   nodeIdMap: Record<string, string>;
-  summary: { total: number; applied: number; failed: number; skipped: number };
+  summary: { total: number; applied: number; failed: number; skipped: number; mutations?: number };
+  rollbackApplied?: boolean;
   error?: string;
 }
 

@@ -113,6 +113,10 @@ limit are closed with WebSocket status 1009.
 
 The plugin runs inside Figma's sandboxed environment and can only access the current file's scene graph through the official Plugin API.
 
+### Same-batch inspection
+
+The read-only `inspect` action exposes an explicit allowlist of plugin-native node data; arbitrary property names or code are not accepted. It applies the plugin inspection caps (depth 20, 1,000 returned nodes, 10,000 scanned nodes, and 4KB per scalar/native property) plus an 80KB aggregate budget across all inspection payloads in a batch. Responses report byte, node, property, and scalar omission metadata. If a failed batch triggers rollback, transient trees captured before rollback are removed and marked `rolledBack` so they cannot be confused with committed document state.
+
 ### Asset ingestion
 
 `set_image_fill` rejects local paths unless `FIGMA_ASSET_ROOTS` explicitly

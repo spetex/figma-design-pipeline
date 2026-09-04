@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  MAX_PLUGIN_READ_DEPTH,
+  MAX_PLUGIN_READ_RESULTS,
+  MAX_PLUGIN_READ_VISITS,
+} from "./plugin-read.js";
 
 export const actionAliasSchema = z
   .string()
@@ -723,9 +728,21 @@ export const setReactionActionSchema = z
   })
   .strict();
 
+export const inspectActionSchema = z
+  .object({
+    type: z.literal("inspect"),
+    nodeId: z.string().describe("Existing node ID or an alias declared by an earlier node-producing action"),
+    depth: z.number().int().min(0).max(MAX_PLUGIN_READ_DEPTH).default(2),
+    limit: z.number().int().min(1).max(MAX_PLUGIN_READ_RESULTS).default(100),
+    scanLimit: z.number().int().min(1).max(MAX_PLUGIN_READ_VISITS).default(1_000),
+  })
+  .strict();
+
 // ─── Union of all actions ────────────────────────────────────────────
 
 export const actionSchema = z.discriminatedUnion("type", [
+  // Bounded, read-only same-batch inspection
+  inspectActionSchema,
   // Core scene graph
   renameActionSchema,
   moveActionSchema,

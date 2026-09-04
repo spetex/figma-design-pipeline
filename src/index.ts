@@ -212,10 +212,13 @@ Use this path when turning organized Figma structure into code or schema output.
 - Keep generation scoped to a focused page or section node for cleaner output.
 `;
 
-const ACTION_REFERENCE = `# figma_execute Action Reference — 54 Action Types
+const ACTION_REFERENCE = `# figma_execute Action Reference — 55 Action Types
 
 Use with figma_execute({ actions: [...] }) for batch execution via the plugin bridge.
 Node-producing actions accept \`as\` (for example \`as: "card"\`); later ID fields can use \`$card\`. Legacy \`$ref:node-N\` references remain supported. The complete reference graph and asset payloads are validated before execution.
+
+## Read-back
+- **inspect: { nodeId, depth?, limit?, scanLimit? }** — read-only same-batch tree/property inspection; may reference an earlier alias. Returns bounded IDs, bounds, text, visibility, paints/resolved CSS, style/variable bindings, component state, and truncation/byte metadata. Defaults: depth 2, result limit 100, scan limit 1,000; hard caps: 20/1,000/10,000 plus 4KB per scalar/native property and 80KB aggregate inspection data per batch. Rollback removes transient trees and marks their metadata \`rolledBack\`.
 
 ## Scene Graph
 - rename: { nodeId, name }
@@ -291,7 +294,7 @@ Node-producing actions accept \`as\` (for example \`as: "card"\`); later ID fiel
 ## Export
 - export_node: { nodeId, format?, scale? }
 
-All name resolution is exact and rejects ambiguity. Same-batch read-back remains dependent on issue #30's plugin-native inspection transport and is not part of this action set.
+All name resolution is exact and rejects ambiguity. Inspection actions count as applied but not as mutations; inspect-only batches do not invalidate cached snapshots.
 `;
 
 // ─── MCP Server ─────────────────────────────────────────────────────
@@ -306,7 +309,7 @@ const server = new McpServer({
 server.resource(
   "action-reference",
   "figma://actions",
-  { mimeType: "text/markdown", description: "Schema reference for all 54 figma_execute action types. Use with figma_execute({ actions: [...] }) for batch execution." },
+  { mimeType: "text/markdown", description: "Schema reference for all 55 figma_execute action types, including bounded same-batch inspection. Use with figma_execute({ actions: [...] }) for batch execution." },
   async () => ({
     contents: [{ uri: "figma://actions", mimeType: "text/markdown", text: ACTION_REFERENCE }],
   })
@@ -551,7 +554,7 @@ server.tool(
 
 server.tool(
   "figma_execute",
-  "PREFERRED TOOL for ALL Figma write operations. Execute a batch of validated actions via plugin bridge — 30-60x faster than use_figma. Do NOT use use_figma for writes; use this tool instead. Supports 54 action types including design-system components, nested overrides, name-resolved variables/styles, safe assets, sections, reactions, layout, and text. If plugin not connected, returns fallback JavaScript for use_figma. Call figma_plugin_status to check connection.",
+  "PREFERRED TOOL for ALL Figma write operations. Execute a batch of validated actions via plugin bridge — 30-60x faster than use_figma. Do NOT use use_figma for writes; use this tool instead. Supports 55 action types including bounded same-batch inspect read-back, design-system components, nested overrides, name-resolved variables/styles, safe assets, sections, reactions, layout, and text. If plugin not connected, returns equivalent bounded fallback JavaScript for use_figma. Call figma_plugin_status to check connection.",
   executeInputSchema.shape,
   async (params) => {
     const result = await handleExecute(bridge, {
