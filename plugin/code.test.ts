@@ -88,6 +88,7 @@ async function runPluginRead(
       nodeId: "root",
       depth: 2,
       limit: 50,
+      scanLimit: 1000,
       ...request,
     },
   });
@@ -236,8 +237,9 @@ describe("connected plugin read inspection", () => {
       operation: "tree",
       fileKey: "file-a",
       returnedCount: 2,
-      totalNodeCount: 4,
+      totalScanned: 2,
       truncated: true,
+      truncationReasons: ["result_limit"],
       currentPage: { id: "page", name: "Components" },
       selection: [{ id: "frame", name: "Card", type: "FRAME" }],
       roots: [{
@@ -249,7 +251,54 @@ describe("connected plugin read inspection", () => {
       }],
     });
     expect(JSON.stringify(result)).not.toContain("Symbol");
+    expect(result).not.toHaveProperty("totalNodeCount");
     expect(figma.triggerUndo).not.toHaveBeenCalled();
+  });
+
+  it.each(["find", "components"] as const)(
+    "bounds sparse %s reads by visited nodes and reports scan-limit truncation",
+    async (operation) => {
+      const result = await runPluginRead(inspectionFigma().figma, {
+        operation,
+        filters: { name: "Never matches" },
+        scanLimit: operation === "find" ? 2 : 1,
+      });
+
+      expect(result).toMatchObject({
+        returnedCount: 0,
+        totalScanned: operation === "find" ? 2 : 1,
+        scanLimit: operation === "find" ? 2 : 1,
+        scanLimitReached: true,
+        truncated: true,
+        truncationReasons: ["scan_limit"],
+      });
+      expect(operation === "find" ? result.matches : result.components).toEqual([]);
+    }
+  );
+
+  it("does not scan the full tree before bounded serialization", async () => {
+    let childReads = 0;
+    const nodes = Array.from({ length: 50 }, (_, index) => ({
+      id: `child-${index}`,
+      name: `Child ${index}`,
+      type: "FRAME",
+      parent: null,
+    })) as Array<Record<string, unknown>>;
+    for (const node of nodes) {
+      Object.defineProperty(node, "children", {
+        get: () => {
+          childReads++;
+          return [];
+        },
+      });
+    }
+    const root = { id: "root", name: "Root", type: "FRAME", children: nodes, parent: null };
+    const figma = baseFigma(async (id) => id === "root" ? root : null);
+
+    const result = await runPluginRead(figma, { depth: 2, limit: 2 });
+
+    expect(result).toMatchObject({ returnedCount: 2, totalScanned: 2, truncated: true });
+    expect(childReads).toBeLessThan(10);
   });
 
   it("filters descendants by exact name, regex name, and node type", async () => {
@@ -287,8 +336,10 @@ describe("connected plugin read inspection", () => {
   it.each([
     [{ nodeId: "missing" }, "Node not found: missing"],
     [{ operation: "find", filters: { namePattern: "[" } }, "Invalid namePattern regex"],
+    [{ operation: "find", filters: { namePattern: "(a+)+$" } }, "Unsafe namePattern regex"],
     [{ depth: 21 }, "Read depth must be between 0 and 20"],
     [{ limit: 1001 }, "Read limit must be between 1 and 1000"],
+    [{ scanLimit: 10001 }, "Read scan limit must be between 1 and 10000"],
     [{ fileKey: "file-b" }, "Plugin file mismatch"],
   ])("returns a correlated read error for invalid input %#", async (request, message) => {
     const result = await runPluginRead(inspectionFigma().figma, request);

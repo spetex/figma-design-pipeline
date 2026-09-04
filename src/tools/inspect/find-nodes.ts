@@ -5,6 +5,7 @@ import type { SnapshotProvenance } from "../../pipeline/snapshot.js";
 import type { InspectionSource, PluginReadNode, PluginReadRoot } from "../../shared/plugin-read.js";
 import type { InspectionContext } from "./source.js";
 import { requireRest, selectInspectionSource } from "./source.js";
+import { compileInspectionRegex } from "../../shared/safe-regex.js";
 
 export interface FindNodesParams {
   nodeId: string;
@@ -31,6 +32,7 @@ export interface FindNodesSourceParams extends Omit<FindNodesParams, "nodeId"> {
   source?: InspectionSource;
   root?: PluginReadRoot;
   timeoutMs?: number;
+  scanLimit?: number;
 }
 
 export interface FoundNode {
@@ -54,6 +56,9 @@ export interface FindNodesResult extends SnapshotProvenance {
   truncated: boolean;
   traversalDepth: number;
   matchLimit: number;
+  scanLimit?: number;
+  scanLimitReached?: boolean;
+  truncationReasons?: Array<"result_limit" | "scan_limit">;
   fromCache: boolean;
   source: "plugin" | "rest";
   currentPage?: { id: string; name: string };
@@ -83,8 +88,8 @@ export async function handleFindNodes(
   let totalScanned = 0;
   let hasAdditionalMatch = false;
 
-  const nameRegex = params.namePattern ? new RegExp(params.namePattern, "i") : null;
-  const textRegex = params.textContent ? new RegExp(params.textContent, "i") : null;
+  const nameRegex = compileInspectionRegex(params.namePattern, "namePattern");
+  const textRegex = compileInspectionRegex(params.textContent, "textContent");
 
   walkTree(tree, (node) => {
     totalScanned++;
@@ -147,6 +152,9 @@ export async function handleFindNodesFromSource(
   const source = selectInspectionSource(ctx, params.source ?? "auto", params.fileKey);
   const depth = params.depth ?? 10;
   const limit = params.limit ?? 50;
+  const scanLimit = params.scanLimit ?? 1_000;
+  compileInspectionRegex(params.namePattern, "namePattern");
+  compileInspectionRegex(params.textContent, "textContent");
   if (source === "rest") {
     if ((params.root ?? "node") !== "node") {
       throw new Error(`${params.root} is available only with plugin inspection`);
@@ -165,6 +173,7 @@ export async function handleFindNodesFromSource(
     ...(params.nodeId ? { nodeId: params.nodeId } : {}),
     depth,
     limit,
+    scanLimit,
     filters: {
       name: params.name,
       namePattern: params.namePattern,
@@ -185,6 +194,9 @@ export async function handleFindNodesFromSource(
     truncated: response.truncated,
     traversalDepth: response.traversalDepth,
     matchLimit: response.resultLimit,
+    scanLimit: response.scanLimit,
+    scanLimitReached: response.scanLimitReached,
+    truncationReasons: response.truncationReasons,
     fromCache: false,
     source: "plugin",
     snapshotAt: new Date().toISOString(),

@@ -1,9 +1,11 @@
 export const MAX_PLUGIN_READ_DEPTH = 20;
 export const MAX_PLUGIN_READ_RESULTS = 1_000;
+export const MAX_PLUGIN_READ_VISITS = 10_000;
 
 export type InspectionSource = "auto" | "plugin" | "rest";
 export type PluginReadRoot = "node" | "current-page" | "selection";
 export type PluginReadOperation = "tree" | "find" | "components";
+export type PluginReadTruncationReason = "result_limit" | "scan_limit";
 
 export interface PluginReadFilters {
   name?: string;
@@ -28,6 +30,7 @@ export interface PluginReadRequest {
   nodeId?: string;
   depth: number;
   limit: number;
+  scanLimit: number;
   filters?: PluginReadFilters;
 }
 
@@ -77,9 +80,13 @@ export interface PluginReadResponse {
   returnedCount: number;
   totalNodeCount?: number;
   truncated: boolean;
+  truncationReasons: PluginReadTruncationReason[];
   traversalDepth: number;
   resultLimit: number;
+  scanLimit: number;
+  scanLimitReached: boolean;
   currentPage: { id: string; name: string };
   selection: Array<{ id: string; name: string; type: string }>;
+  selectionCount: number;
   error?: string;
 }

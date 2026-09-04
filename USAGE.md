@@ -49,13 +49,18 @@ the file differs; `rest` always selects REST. Plugin inspection needs no
 configured (see [INSTALL.md](INSTALL.md)).
 
 Plugin-backed tools accept `root: "node" | "current-page" | "selection"`.
-Traversal is bounded by `depth` and `limit`; current page and selection context
-are included in find/component responses. `figma_find_nodes` supports both an
-exact, case-sensitive `name` and a case-insensitive regex `namePattern`, plus
-the existing type and structural filters. `figma_get_components` discovers
-both `COMPONENT` and `COMPONENT_SET` nodes under the chosen root. Plugin trees
-return the safe structural subset; choose `source: "rest"` when style/token
-enrichment from `includeStyles` is required.
+Traversal is bounded by `depth` and `limit`; searches and component discovery
+also stop at `scanLimit` (default 1,000 nodes) even when matches are sparse or
+absent. Responses distinguish `result_limit` from `scan_limit`. Current page
+and selection context are included in find/component responses. Selection-tree
+responses retain the full selection count and metadata, including omitted root
+IDs when the result limit is reached. `figma_find_nodes` supports both an exact,
+case-sensitive `name` and a restricted case-insensitive regex `namePattern`,
+plus the existing type and structural filters. Backreferences, lookarounds,
+oversized patterns, and quantified groups containing alternation or another
+quantifier are rejected to prevent unbounded regex work. Plugin trees return
+the safe structural subset; choose `source: "rest"` when style/token enrichment
+from `includeStyles` is required.
 
 | Tool | What it does | When to use |
 |---|---|---|
@@ -63,7 +68,7 @@ enrichment from `includeStyles` is required.
 | `figma_audit` | Structural audit: naming, layout, components, tokens, accessibility. | Bounded list of issues before a cleanup pass. |
 | `figma_extract_tokens` | Colors, fonts, spacing, radius, layered shadows, and opacity — with Tailwind mapping. | Token sync, theming, brand audits. |
 | `figma_find_nodes` | Filter nodes by name / type / classification / text / size, with explicit limit and depth metadata. | "Where is the button styled like X?" |
-| `figma_get_components` | Discover components and component sets under a root; REST without a root retains the published-component listing. | Before mapping to your code components. |
+| `figma_get_components` | Discover components and component sets under a root; omitting both root and node retains the paginated published-component REST listing. | Before mapping to your code components. |
 | `figma_get_styles` | List published color/text/effect styles. | Token drift check. |
 | `figma_diff_tokens` | Compare Figma styles vs your code tokens. | Sync workflow. Accepts style data directly — no REST call. |
 | `figma_export_images` | Render nodes to PNG/JPG/SVG via REST. | Snapshots, before/after, docs. |
@@ -124,13 +129,25 @@ record remain present and retrievable. The response includes
 For compatibility, `nodeCount` continues to count every serialized tree entry,
 including synthetic `COLLAPSED` and `TRUNCATED` markers. Use
 `returnedNodeCount` for the number of real source nodes present and
-`totalNodeCount` for the real source-node total before omissions. Size-limited
-responses retain the legacy `note` field alongside the structured metadata.
+`totalNodeCount` for the real source-node total before omissions. A
+result-limited plugin tree cannot count the remaining tree without defeating
+its work bound, so its node and omission counts are lower bounds with
+`totalNodeCountExact: false` and `omittedNodeCountExact: false`;
+selection responses separately include `selectionCount` and
+`omittedSelection`. Size-limited responses retain the legacy `note` field
+alongside the structured metadata.
 
 `figma_find_nodes` echoes the requested relative traversal depth as `traversalDepth`
-(the requested root is depth 0) and its match cap as `matchLimit`. Its
-`truncated` flag is true only after the traversal detects at least one matching
-node beyond the cap, so an exact-limit complete result is not mislabeled.
+(the requested root is depth 0), its match cap as `matchLimit`, and plugin work
+caps as `scanLimit` / `scanLimitReached`. Its `truncated` flag is true after an
+additional match or an incomplete scan; `truncationReasons` says which bound
+stopped the read. An exact-limit complete result is not mislabeled.
+
+For the legacy whole-file published-component REST listing, omit both `root`
+and `nodeId`. Follow `nextOffset` by passing it back as `offset`; a response
+without `nextOffset` is terminal. Explicit `current-page` and `selection` roots
+never fall back to this whole-file listing and therefore require a matching
+plugin. An explicit `depth: 0` is preserved on REST node requests.
 
 ### Pattern: explore a file
 

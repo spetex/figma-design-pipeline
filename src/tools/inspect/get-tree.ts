@@ -96,8 +96,10 @@ export interface GetTreeResponsePayload {
   nodeCount: number;
   returnedNodeCount: number;
   totalNodeCount: number;
+  totalNodeCountExact?: boolean;
   truncated: boolean;
   omittedNodeCount: number;
+  omittedNodeCountExact?: boolean;
   truncatedFieldCount: number;
   omittedScalarBytes: number;
   truncationReasons: TreeTruncationReason[];
@@ -107,6 +109,8 @@ export interface GetTreeResponsePayload {
   source: "plugin" | "rest";
   traversalDepth: number;
   resultLimit?: number;
+  selectionCount?: number;
+  omittedSelection?: Array<{ id: string; name: string; type: string }>;
   note?: string;
   directChildren?: {
     offset: number;
@@ -130,6 +134,9 @@ export interface GetTreeResult extends SnapshotProvenance {
   traversalDepth: number;
   resultLimit?: number;
   sourceOmittedNodeCount?: number;
+  sourceNodeCountExact?: boolean;
+  selectionCount?: number;
+  omittedSelection?: Array<{ id: string; name: string; type: string }>;
 }
 
 export async function handleGetTree(
@@ -192,19 +199,24 @@ export async function handleGetTreeFromSource(
     ...(params.nodeId ? { nodeId: params.nodeId } : {}),
     depth,
     limit,
+    scanLimit: limit,
   }, params.timeoutMs);
   const roots = response.roots.map(pluginNodeToEnriched);
   const root = (params.root ?? "node") === "selection"
-    ? selectionRoot(roots)
+    ? selectionRoot(roots, response.selectionCount)
     : roots[0];
   if (!root) {
     throw new Error((params.root ?? "node") === "selection"
       ? "Current selection is empty"
       : `Node ${params.nodeId ?? "root"} not found in Figma file`);
   }
-  const syntheticCount = (params.root ?? "node") === "selection" ? 1 : 0;
-  const returnedCount = response.returnedCount + syntheticCount;
-  const totalNodeCount = (response.totalNodeCount ?? response.returnedCount) + syntheticCount;
+  const returnedSelectionIds = new Set(response.roots.map((candidate) => candidate.id));
+  const omittedSelection = (params.root ?? "node") === "selection"
+    ? response.selection.filter((candidate) => !returnedSelectionIds.has(candidate.id))
+    : undefined;
+  const knownOmittedCount = response.totalNodeCount === undefined
+    ? Math.max(response.truncated ? 1 : 0, omittedSelection?.length ?? 0)
+    : Math.max(0, response.totalNodeCount - response.returnedCount);
   return {
     nodeId: root.id,
     tree: root,
@@ -214,18 +226,23 @@ export async function handleGetTreeFromSource(
     source: "plugin",
     traversalDepth: depth,
     resultLimit: limit,
-    sourceOmittedNodeCount: Math.max(0, totalNodeCount - returnedCount),
+    sourceOmittedNodeCount: knownOmittedCount,
+    sourceNodeCountExact: response.totalNodeCount !== undefined,
+    ...((params.root ?? "node") === "selection" ? {
+      selectionCount: response.selectionCount,
+      omittedSelection,
+    } : {}),
   };
 }
 
-function selectionRoot(children: EnrichedNode[]): EnrichedNode {
+function selectionRoot(children: EnrichedNode[], selectionCount: number): EnrichedNode {
   return {
     id: "selection",
     name: "Current selection",
     type: "SELECTION",
     classification: "container",
     depth: 0,
-    childCount: children.length,
+    childCount: selectionCount,
     visible: true,
     tokens: [],
     isComponent: false,
@@ -567,12 +584,22 @@ function serializeCandidate(
     source: result.source,
     traversalDepth: result.traversalDepth,
     ...(result.resultLimit !== undefined ? { resultLimit: result.resultLimit } : {}),
+    ...(result.selectionCount !== undefined ? { selectionCount: result.selectionCount } : {}),
+    ...(result.omittedSelection && result.omittedSelection.length > 0
+      ? { omittedSelection: result.omittedSelection }
+      : {}),
     fromCache: result.fromCache,
     snapshotAt: result.snapshotAt,
     cacheAgeMs: result.cacheAgeMs,
     nodeCount,
     returnedNodeCount,
     totalNodeCount: returnedNodeCount + omittedNodeCount,
+    ...(result.sourceNodeCountExact !== undefined
+      ? {
+          totalNodeCountExact: result.sourceNodeCountExact,
+          omittedNodeCountExact: result.sourceNodeCountExact,
+        }
+      : {}),
     truncated: omittedNodeCount > 0 || scalarSummary.truncatedFieldCount > 0,
     omittedNodeCount,
     truncatedFieldCount: scalarSummary.truncatedFieldCount,

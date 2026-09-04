@@ -8,6 +8,7 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 - `figma_get_tree`, `figma_find_nodes`, and `figma_get_components` now support bounded, token-free plugin inspection with exact file-key identity, node/current-page/selection roots, exact or regex name and type filtering, component-set discovery, correlated concurrent reads, and guarded chunked responses. `source: auto` prefers the matching plugin while preserving REST fallback; plugin reads never write or alter inspection caches.
 
 ### Fixed
+- Plugin inspection now uses deterministic serialization and visited-node budgets instead of full-tree pre-counts or unbounded sparse searches. Responses distinguish result and scan limits, selection trees retain full selection metadata, unsafe backtracking-prone regexes are rejected on both read paths, REST preserves an explicit `depth: 0`, and whole-file REST component truncation provides advancing `offset` / `nextOffset` pagination without changing explicit current-page roots into whole-file reads.
 - Newly created frames now start with transparent fills in both connected-plugin execution and disconnected fallback JavaScript, avoiding unintended white surfaces on structural containers.
 - The dynamic-page plugin now loads all pages before registering its global document-change listener, preserving debounced cache invalidation while containing and logging initialization failures so bridge startup can continue.
 

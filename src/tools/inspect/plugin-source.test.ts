@@ -5,6 +5,7 @@ import { handleGetTreeFromSource, serializeGetTreeResponse } from "./get-tree.js
 import { handleFindNodesFromSource } from "./find-nodes.js";
 import { handleGetComponentsFromSource } from "./get-components.js";
 import type { InspectionContext } from "./source.js";
+import { getComponentsInputSchema } from "../../shared/types.js";
 
 function pluginResponse(overrides: Partial<PluginReadResponse> = {}): PluginReadResponse {
   return {
@@ -39,10 +40,14 @@ function pluginResponse(overrides: Partial<PluginReadResponse> = {}): PluginRead
     returnedCount: 2,
     totalNodeCount: 2,
     truncated: false,
+    truncationReasons: [],
     traversalDepth: 2,
     resultLimit: 50,
+    scanLimit: 1000,
+    scanLimitReached: false,
     currentPage: { id: "page", name: "Page" },
     selection: [{ id: "child", name: "Primary", type: "COMPONENT" }],
+    selectionCount: 1,
     ...overrides,
   };
 }
@@ -66,7 +71,17 @@ function context({
       },
     },
   }));
-  const rest = withRest ? { defaultFileKey: "file-a", getFileNodes } : null;
+  const getFileComponents = vi.fn(async () => ({
+    meta: {
+      components: Array.from({ length: 5 }, (_, index) => ({
+        key: `key-${index}`,
+        name: `Component ${index}`,
+        description: "",
+        node_id: `component-${index}`,
+      })),
+    },
+  }));
+  const rest = withRest ? { defaultFileKey: "file-a", getFileNodes, getFileComponents } : null;
   const snapshotCache = new SnapshotCache();
   const bridge = {
     isConnected: () => connected,
@@ -78,11 +93,18 @@ function context({
     ctx: { rest, snapshotCache, bridge } as unknown as InspectionContext,
     read,
     getFileNodes,
+    getFileComponents,
     snapshotCache,
   };
 }
 
 describe("plugin inspection source routing", () => {
+  it("keeps an omitted component root distinct from an explicit root", () => {
+    expect(getComponentsInputSchema.parse({})).toMatchObject({ offset: 0, scanLimit: 1000 });
+    expect(getComponentsInputSchema.parse({}).root).toBeUndefined();
+    expect(getComponentsInputSchema.parse({ root: "current-page" }).root).toBe("current-page");
+  });
+
   it("uses an exactly matching plugin without a token and never writes inspection snapshots", async () => {
     const { ctx, read, snapshotCache } = context();
     const cacheGet = vi.spyOn(snapshotCache, "get");
@@ -230,6 +252,122 @@ describe("plugin inspection source routing", () => {
     expect(components).toMatchObject({
       source: "plugin",
       components: [{ nodeId: "set", name: "Buttons", type: "COMPONENT_SET", key: "set-key" }],
+    });
+  });
+
+  it("rejects unsafe regexes before either plugin or REST traversal", async () => {
+    const pluginContext = context();
+    await expect(handleFindNodesFromSource(pluginContext.ctx, {
+      fileKey: "file-a",
+      nodeId: "root",
+      source: "plugin",
+      namePattern: "(a+)+$",
+    })).rejects.toThrow("Unsafe namePattern regex");
+    expect(pluginContext.read).not.toHaveBeenCalled();
+
+    const restContext = context({ withRest: true });
+    await expect(handleFindNodesFromSource(restContext.ctx, {
+      fileKey: "file-a",
+      nodeId: "root",
+      source: "rest",
+      namePattern: "(a|aa)+$",
+    })).rejects.toThrow("Unsafe namePattern regex");
+    expect(restContext.getFileNodes).not.toHaveBeenCalled();
+  });
+
+  it("preserves explicit current-page semantics instead of falling back to a whole-file REST list", async () => {
+    const { ctx, getFileComponents } = context({ connected: false, withRest: true });
+
+    await expect(handleGetComponentsFromSource(ctx, {
+      fileKey: "file-a",
+      source: "auto",
+      root: "current-page",
+    })).rejects.toThrow("current-page is available only with plugin inspection");
+    expect(getFileComponents).not.toHaveBeenCalled();
+  });
+
+  it("paginates the legacy whole-file REST component listing with a deterministic offset", async () => {
+    const { ctx, read, getFileComponents } = context({ withRest: true });
+
+    const first = await handleGetComponentsFromSource(ctx, {
+      fileKey: "file-a",
+      source: "auto",
+      limit: 2,
+      offset: 0,
+    });
+    const second = await handleGetComponentsFromSource(ctx, {
+      fileKey: "file-a",
+      source: "rest",
+      limit: 2,
+      offset: first.nextOffset,
+    });
+
+    expect(first).toMatchObject({
+      source: "rest",
+      totalCount: 5,
+      totalCountExact: true,
+      returnedCount: 2,
+      offset: 0,
+      nextOffset: 2,
+      truncated: true,
+      components: [{ nodeId: "component-0" }, { nodeId: "component-1" }],
+    });
+    expect(second).toMatchObject({
+      offset: 2,
+      nextOffset: 4,
+      components: [{ nodeId: "component-2" }, { nodeId: "component-3" }],
+    });
+    const terminal = await handleGetComponentsFromSource(ctx, {
+      fileKey: "file-a",
+      source: "rest",
+      limit: 2,
+      offset: second.nextOffset,
+    });
+    expect(terminal).toMatchObject({
+      offset: 4,
+      returnedCount: 1,
+      truncated: false,
+      components: [{ nodeId: "component-4" }],
+    });
+    expect(terminal).not.toHaveProperty("nextOffset");
+    expect(getFileComponents).toHaveBeenCalledTimes(3);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("retains full selection metadata when a result-limited tree omits selected roots", async () => {
+    const selected = [
+      { id: "child", name: "Primary", type: "COMPONENT" },
+      { id: "second", name: "Secondary", type: "COMPONENT" },
+      { id: "third", name: "Tertiary", type: "FRAME" },
+    ];
+    const { ctx } = context({ response: pluginResponse({
+      roots: [pluginResponse().roots[0]!.children[0]!],
+      returnedCount: 1,
+      totalScanned: 1,
+      totalNodeCount: undefined,
+      truncated: true,
+      truncationReasons: ["result_limit"],
+      resultLimit: 1,
+      selection: selected,
+      selectionCount: 3,
+    }) });
+
+    const result = await handleGetTreeFromSource(ctx, {
+      fileKey: "file-a",
+      source: "plugin",
+      root: "selection",
+      depth: 2,
+      limit: 1,
+    });
+    const payload = serializeGetTreeResponse(result).payload;
+
+    expect(payload).toMatchObject({
+      selectionCount: 3,
+      totalNodeCountExact: false,
+      omittedNodeCountExact: false,
+      omittedNodeCount: 2,
+      omittedSelection: [selected[1], selected[2]],
+      tree: { id: "selection", childCount: 3, returnedChildCount: 1 },
     });
   });
 

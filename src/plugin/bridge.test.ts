@@ -58,10 +58,14 @@ function readResponse(request: Record<string, unknown>, name: string) {
     totalScanned: 1,
     returnedCount: 1,
     truncated: false,
+    truncationReasons: [],
     traversalDepth: request.depth,
     resultLimit: request.limit,
+    scanLimit: request.scanLimit,
+    scanLimitReached: false,
     currentPage: { id: "page", name: "Page 1" },
     selection: [],
+    selectionCount: 0,
   };
 }
 
@@ -73,6 +77,7 @@ function readParams(name: string) {
     nodeId: name,
     depth: 2,
     limit: 10,
+    scanLimit: 1000,
   };
 }
 

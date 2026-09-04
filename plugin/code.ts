@@ -5,12 +5,14 @@ import { classifyNode } from "../src/analysis/node-classifier";
 import {
   MAX_PLUGIN_READ_DEPTH,
   MAX_PLUGIN_READ_RESULTS,
+  MAX_PLUGIN_READ_VISITS,
   type PluginComponentNode,
   type PluginReadFilters,
   type PluginReadNode,
   type PluginReadRequest,
   type PluginReadResponse,
 } from "../src/shared/plugin-read";
+import { compileInspectionRegex } from "../src/shared/safe-regex";
 
 // ─── SPFR Design Pipeline Plugin v2 ──────────────────────────────
 // High-performance batch executor with font caching, symbolic refs,
@@ -198,6 +200,13 @@ async function serializeReadNode(node: BaseNode, children: PluginReadNode[], dep
   const characters = safeString(readProperty(node, "characters"));
   const layoutMode = safeString(readProperty(node, "layoutMode"));
   const metadata = await componentMetadata(node);
+  const sourceChildren = readChildren(node);
+  const classificationChildren = sourceChildren.slice(0, 20).map((child) => ({
+    id: child.id,
+    name: child.name,
+    type: child.type,
+    absoluteBoundingBox: safeBounds(child),
+  }));
   return {
     id: node.id,
     name: node.name,
@@ -208,7 +217,7 @@ async function serializeReadNode(node: BaseNode, children: PluginReadNode[], dep
       type: node.type,
       absoluteBoundingBox: bounds,
       characters,
-      children: readChildren(node).map((child) => ({ id: child.id, name: child.name, type: child.type })),
+      children: classificationChildren,
     }),
     depth,
     ...(typeof visible === "boolean" ? { visible } : {}),
@@ -223,7 +232,7 @@ async function serializeReadNode(node: BaseNode, children: PluginReadNode[], dep
     ...numberProperty(node, "paddingRight"),
     ...numberProperty(node, "paddingTop"),
     ...numberProperty(node, "paddingBottom"),
-    childCount: readChildren(node).length,
+    childCount: sourceChildren.length,
     children,
   };
 }
@@ -233,19 +242,18 @@ function numberProperty(node: BaseNode, property: string): Record<string, number
   return value === undefined ? {} : { [property]: value };
 }
 
-function countTree(node: BaseNode, depth: number): number {
-  if (depth <= 0) return 1;
-  return 1 + readChildren(node).reduce((sum, child) => sum + countTree(child, depth - 1), 0);
-}
-
 async function serializeTree(
   node: BaseNode,
   depth: number,
-  budget: { remaining: number },
+  budget: { remaining: number; visited: number; truncated: boolean },
   currentDepth = 0
 ): Promise<PluginReadNode | null> {
-  if (budget.remaining <= 0) return null;
+  if (budget.remaining <= 0) {
+    budget.truncated = true;
+    return null;
+  }
   budget.remaining--;
+  budget.visited++;
   const children: PluginReadNode[] = [];
   if (depth > 0) {
     for (const child of readChildren(node)) {
@@ -267,12 +275,7 @@ async function resolveReadRoots(request: PluginReadRequest): Promise<BaseNode[]>
 }
 
 function compileReadRegex(pattern: string | undefined, label: string): RegExp | undefined {
-  if (pattern === undefined) return undefined;
-  try {
-    return new RegExp(pattern, "i");
-  } catch {
-    throw new Error(`Invalid ${label} regex: ${pattern}`);
-  }
+  return compileInspectionRegex(pattern, label);
 }
 
 function nodeMatches(
@@ -298,9 +301,15 @@ function nodeMatches(
 async function walkReadNodes(
   roots: readonly BaseNode[],
   depth: number,
+  budget: { limit: number; visited: number; limitReached: boolean },
   visit: (node: BaseNode, depth: number) => Promise<boolean>
 ): Promise<boolean> {
   const walk = async (node: BaseNode, remainingDepth: number, currentDepth: number): Promise<boolean> => {
+    if (budget.visited >= budget.limit) {
+      budget.limitReached = true;
+      return false;
+    }
+    budget.visited++;
     if (!await visit(node, currentDepth)) return false;
     if (remainingDepth <= 0) return true;
     for (const child of readChildren(node)) {
@@ -315,7 +324,7 @@ async function walkReadNodes(
 }
 
 function readResponseBase(request: PluginReadRequest): Omit<PluginReadResponse,
-  "success" | "roots" | "matches" | "components" | "totalScanned" | "returnedCount" | "truncated"> {
+  "success" | "roots" | "matches" | "components" | "totalScanned" | "returnedCount" | "truncated" | "truncationReasons" | "scanLimitReached"> {
   return {
     type: "read_response",
     requestId: request.requestId,
@@ -323,8 +332,10 @@ function readResponseBase(request: PluginReadRequest): Omit<PluginReadResponse,
     fileKey: figma.fileKey!,
     traversalDepth: request.depth,
     resultLimit: request.limit,
+    scanLimit: request.scanLimit,
     currentPage: { id: figma.currentPage.id, name: figma.currentPage.name },
     selection: figma.currentPage.selection.map((node) => ({ id: node.id, name: node.name, type: node.type })),
+    selectionCount: figma.currentPage.selection.length,
   };
 }
 
@@ -338,6 +349,9 @@ async function processReadRequest(request: PluginReadRequest): Promise<PluginRea
   if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > MAX_PLUGIN_READ_RESULTS) {
     throw new Error(`Read limit must be between 1 and ${MAX_PLUGIN_READ_RESULTS}`);
   }
+  if (!Number.isInteger(request.scanLimit) || request.scanLimit < 1 || request.scanLimit > MAX_PLUGIN_READ_VISITS) {
+    throw new Error(`Read scan limit must be between 1 and ${MAX_PLUGIN_READ_VISITS}`);
+  }
   if (request.operation !== "tree" && request.operation !== "find" && request.operation !== "components") {
     throw new Error(`Unsupported read operation: ${String(request.operation)}`);
   }
@@ -348,8 +362,7 @@ async function processReadRequest(request: PluginReadRequest): Promise<PluginRea
   const roots = await resolveReadRoots(request);
   const base = readResponseBase(request);
   if (request.operation === "tree") {
-    const totalNodeCount = roots.reduce((sum, root) => sum + countTree(root, request.depth), 0);
-    const budget = { remaining: request.limit };
+    const budget = { remaining: request.limit, visited: 0, truncated: false };
     const serializedRoots: PluginReadNode[] = [];
     for (const root of roots) {
       const serialized = await serializeTree(root, request.depth, budget);
@@ -363,33 +376,34 @@ async function processReadRequest(request: PluginReadRequest): Promise<PluginRea
       roots: serializedRoots,
       matches: [],
       components: [],
-      totalScanned: totalNodeCount,
+      totalScanned: budget.visited,
       returnedCount,
-      totalNodeCount,
-      truncated: returnedCount < totalNodeCount,
+      ...(!budget.truncated ? { totalNodeCount: returnedCount } : {}),
+      truncated: budget.truncated,
+      truncationReasons: budget.truncated ? ["result_limit"] : [],
+      scanLimitReached: false,
     };
   }
 
   const matches: PluginReadNode[] = [];
   const components: PluginComponentNode[] = [];
-  let totalScanned = 0;
-  let truncated = false;
+  let resultLimitReached = false;
+  const scanBudget = { limit: request.scanLimit, visited: 0, limitReached: false };
   const filters = request.filters ?? {};
   const nameRegex = compileReadRegex(filters.namePattern, "namePattern");
   const textRegex = compileReadRegex(filters.textContent, "textContent");
-  await walkReadNodes(roots, request.depth, async (node, nodeDepth) => {
-    totalScanned++;
+  await walkReadNodes(roots, request.depth, scanBudget, async (node, nodeDepth) => {
     const serialized = await serializeReadNode(node, [], nodeDepth);
     if (request.operation === "find" && nodeMatches(serialized, filters, nameRegex, textRegex)) {
       if (matches.length >= request.limit) {
-        truncated = true;
+        resultLimitReached = true;
         return false;
       }
       matches.push(serialized);
     }
     if (request.operation === "components" && (node.type === "COMPONENT" || node.type === "COMPONENT_SET")) {
       if (components.length >= request.limit) {
-        truncated = true;
+        resultLimitReached = true;
         return false;
       }
       components.push({
@@ -410,9 +424,14 @@ async function processReadRequest(request: PluginReadRequest): Promise<PluginRea
     roots: [],
     matches,
     components,
-    totalScanned,
+    totalScanned: scanBudget.visited,
     returnedCount: request.operation === "find" ? matches.length : components.length,
-    truncated,
+    truncated: resultLimitReached || scanBudget.limitReached,
+    truncationReasons: [
+      ...(resultLimitReached ? ["result_limit" as const] : []),
+      ...(scanBudget.limitReached ? ["scan_limit" as const] : []),
+    ],
+    scanLimitReached: scanBudget.limitReached,
   };
 }
 
@@ -1336,6 +1355,8 @@ figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
             totalScanned: 0,
             returnedCount: 0,
             truncated: false,
+            truncationReasons: [],
+            scanLimitReached: false,
             error: message,
           } satisfies PluginReadResponse,
         });
