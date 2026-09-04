@@ -214,6 +214,7 @@ async function executeAction(
       const parent = await findNode(action.parentId as string);
       const container = requireContainer(parent, action.parentId as string);
       const frame = figma.createFrame();
+      frame.fills = [];
       markDocumentWrite();
       frame.name = action.name as string;
       frame.resize((action.width as number) || 100, (action.height as number) || 100);
@@ -1047,15 +1048,24 @@ figma.on("currentpagechange", () => {
 // bridge notification. The bridge invalidates all REST inspection snapshots,
 // including those affected by edits made outside figma_execute.
 let documentChangeTimer: ReturnType<typeof setTimeout> | null = null;
-figma.on("documentchange", () => {
-  if (documentChangeTimer) return;
-  documentChangeTimer = setTimeout(() => {
-    documentChangeTimer = null;
-    figma.ui.postMessage({
-      type: "send_to_bridge",
-      data: { type: "document_changed" },
-    });
-  }, 100);
+async function registerDocumentChangeListener(): Promise<void> {
+  // Global documentchange listeners require every page to be loaded when the
+  // manifest uses dynamic-page document access.
+  await figma.loadAllPagesAsync();
+  figma.on("documentchange", () => {
+    if (documentChangeTimer) return;
+    documentChangeTimer = setTimeout(() => {
+      documentChangeTimer = null;
+      figma.ui.postMessage({
+        type: "send_to_bridge",
+        data: { type: "document_changed" },
+      });
+    }, 100);
+  });
+}
+
+void registerDocumentChangeListener().catch((error) => {
+  console.error("[plugin] Failed to register documentchange listener", error);
 });
 
 pushUiContext();

@@ -230,7 +230,7 @@ function generateFallbackJs(
         lines.push(`{ const n = requireNode(${j(nid)}); const p = requireContainer(${j(a.targetParentId)}); ${a.insertIndex !== undefined ? `p.insertChild(${a.insertIndex}, n)` : "p.appendChild(n)"}; markDocumentWrite(); ${r("move")} }`);
         break;
       case "create_frame":
-        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const f = figma.createFrame(); markDocumentWrite(); f.name = ${j(a.name)}; f.resize(${a.width}, ${a.height}); parent.appendChild(f); f.x = ${a.x}; f.y = ${a.y}; ${cr("create_frame", "f.id")} }`);
+        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const f = figma.createFrame(); f.fills = []; markDocumentWrite(); f.name = ${j(a.name)}; f.resize(${a.width}, ${a.height}); parent.appendChild(f); f.x = ${a.x}; f.y = ${a.y}; ${cr("create_frame", "f.id")} }`);
         break;
       case "create_text": {
         const fam = a.fontFamily || "Inter";

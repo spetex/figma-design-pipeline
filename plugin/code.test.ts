@@ -12,6 +12,7 @@ type PluginFigma = {
   on: ReturnType<typeof vi.fn>;
   getNodeByIdAsync: (id: string) => Promise<unknown>;
   triggerUndo: ReturnType<typeof vi.fn>;
+  loadAllPagesAsync: ReturnType<typeof vi.fn>;
   loadFontAsync?: (font: { family: string; style: string }) => Promise<void>;
   createFrame?: ReturnType<typeof vi.fn>;
   createText?: ReturnType<typeof vi.fn>;
@@ -62,15 +63,120 @@ function baseFigma(getNodeByIdAsync: PluginFigma["getNodeByIdAsync"]): PluginFig
     on: vi.fn(),
     getNodeByIdAsync,
     triggerUndo: vi.fn(),
+    loadAllPagesAsync: vi.fn().mockResolvedValue(undefined),
   };
 }
 
 afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.resetModules();
 });
 
+describe("plugin startup", () => {
+  it("loads all pages before registering the debounced document-change listener", async () => {
+    vi.useFakeTimers();
+    let finishLoading!: () => void;
+    const figma = baseFigma(async () => null);
+    figma.loadAllPagesAsync = vi.fn(() => new Promise<void>((resolve) => {
+      finishLoading = resolve;
+    }));
+
+    vi.resetModules();
+    vi.stubGlobal("figma", figma);
+    vi.stubGlobal("__html__", "");
+    await import("./code.js");
+
+    expect(figma.loadAllPagesAsync).toHaveBeenCalledTimes(1);
+    expect(figma.on).not.toHaveBeenCalledWith("documentchange", expect.any(Function));
+
+    finishLoading();
+    await vi.waitFor(() => {
+      expect(figma.on).toHaveBeenCalledWith("documentchange", expect.any(Function));
+    });
+
+    const registrationIndex = figma.on.mock.calls.findIndex((call) => call[0] === "documentchange");
+    expect(figma.loadAllPagesAsync.mock.invocationCallOrder[0]).toBeLessThan(
+      figma.on.mock.invocationCallOrder[registrationIndex]
+    );
+
+    const listener = figma.on.mock.calls.find((call) => call[0] === "documentchange")![1] as () => void;
+    listener();
+    listener();
+    expect(figma.ui.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: { type: "document_changed" },
+    }));
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(figma.ui.postMessage).toHaveBeenCalledTimes(2);
+    expect(figma.ui.postMessage).toHaveBeenLastCalledWith({
+      type: "send_to_bridge",
+      data: { type: "document_changed" },
+    });
+  });
+
+  it("logs page-loading failures without interrupting plugin startup", async () => {
+    const failure = new Error("pages unavailable");
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const figma = baseFigma(async () => null);
+    figma.loadAllPagesAsync = vi.fn().mockRejectedValue(failure);
+
+    vi.resetModules();
+    vi.stubGlobal("figma", figma);
+    vi.stubGlobal("__html__", "");
+    await expect(import("./code.js")).resolves.toBeDefined();
+    await vi.waitFor(() => {
+      expect(error).toHaveBeenCalledWith(
+        "[plugin] Failed to register documentchange listener",
+        failure
+      );
+    });
+
+    expect(figma.showUI).toHaveBeenCalledTimes(1);
+    expect(figma.ui.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "ui_status" }));
+    expect(figma.on).not.toHaveBeenCalledWith("documentchange", expect.any(Function));
+  });
+});
+
 describe("connected plugin batch execution", () => {
+  it("clears a new frame's fills immediately after creation", async () => {
+    const operations: string[] = [];
+    const parent = {
+      id: "parent",
+      appendChild: () => { operations.push("appendChild"); },
+    };
+    let fills: unknown = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }];
+    const frame = {
+      id: "frame",
+      name: "",
+      resize: () => { operations.push("resize"); },
+      x: 0,
+      y: 0,
+    } as Record<string, unknown>;
+    Object.defineProperty(frame, "fills", {
+      enumerable: true,
+      get: () => fills,
+      set: (value) => {
+        operations.push("fills");
+        fills = value;
+      },
+    });
+    const figma = baseFigma(async () => parent);
+    figma.createFrame = vi.fn(() => {
+      operations.push("createFrame");
+      return frame;
+    });
+
+    const result = await runPlugin(figma, [
+      { type: "create_frame", name: "Frame", parentId: "parent" },
+    ]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(fills).toEqual([]);
+    expect(operations.slice(0, 2)).toEqual(["createFrame", "fills"]);
+  });
+
   it("rejects delete_node for a page before calling remove", async () => {
     const remove = vi.fn();
     const figma = baseFigma(async () => ({ id: "page", type: "PAGE", parent: { id: "document" }, remove }));
