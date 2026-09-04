@@ -469,7 +469,8 @@ function generateFallbackJs(
   lines.push("      result.rolledBack = true;");
   lines.push("      delete result.after;");
   lines.push("      if (result.newNodeId && transientNodeIds.has(result.newNodeId)) delete result.newNodeId;");
-  lines.push("      if (result.nodeId && transientNodeIds.has(result.nodeId)) delete result.nodeId;");
+  lines.push("      const resolvedNodeId = typeof result.nodeId === 'string' && result.nodeId.startsWith('$') ? createdNodeIds.get(result.nodeId) : result.nodeId;");
+  lines.push("      if (resolvedNodeId && transientNodeIds.has(resolvedNodeId)) delete result.nodeId;");
   lines.push("    }");
   lines.push("    results[index] = redactTransientIds(result, transientNodeIds);");
   lines.push("  }");

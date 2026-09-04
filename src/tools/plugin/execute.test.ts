@@ -640,7 +640,9 @@ describe("handleExecute fallback generation", () => {
     const parent = { id: "parent", appendChild: vi.fn() };
     const existingParent = { id: "existing-parent" };
     const existing: Record<string, unknown> = {
-      id: "existing-1", name: "Before", parent: existingParent,
+      id: "existing-1", type: "INSTANCE", name: "$transient", parent: existingParent,
+      getMainComponentAsync: vi.fn(async () => ({ componentPropertyDefinitions: {} })),
+      setProperties: vi.fn(),
     };
     const transient: Record<string, unknown> = {
       id: "transient-1", name: "", fills: [], x: 0, y: 0,
@@ -652,9 +654,10 @@ describe("handleExecute fallback generation", () => {
     const fallback = await handleExecute(null, {
       actions: [
         { type: "create_frame", parentId: "parent", name: "Transient", as: "transient" },
+        { type: "rename", nodeId: "$transient", name: "Renamed transient" },
         { type: "rename", nodeId: "existing-1", name: "Renamed" },
         { type: "move", nodeId: "existing-1", targetParentId: "$transient" },
-        { type: "rename", nodeId: "missing", name: "Fails" },
+        { type: "set_component_properties", nodeId: "existing-1", properties: { "$transient": "Fails" } },
       ],
       rollbackOnError: true,
     });
@@ -676,14 +679,54 @@ describe("handleExecute fallback generation", () => {
 
     expect(result[0]).toMatchObject({ type: "create_frame", rolledBack: true });
     expect(result[0]).not.toHaveProperty("nodeId");
-    expect(result[1]).toMatchObject({ type: "rename", nodeId: "existing-1", rolledBack: true });
+    expect(result[1]).toMatchObject({ type: "rename", rolledBack: true });
+    expect(result[1]).not.toHaveProperty("nodeId");
     expect(result[2]).toMatchObject({
+      type: "rename", nodeId: "existing-1", rolledBack: true,
+    });
+    expect(result[3]).toMatchObject({
       type: "move",
       nodeId: "existing-1",
       before: { parentId: "existing-parent" },
       rolledBack: true,
     });
+    expect(result[4]).toMatchObject({
+      type: "set_component_properties", status: "failed", error: "Component property not found: $transient",
+    });
     expect(JSON.stringify(result)).not.toContain("transient-1");
+  });
+
+  it("redacts the symbolic target in the exact create, rename, failure fallback rollback", async () => {
+    const parent = { id: "parent", appendChild: vi.fn() };
+    const transient: Record<string, unknown> = {
+      id: "transient-1", name: "", fills: [], x: 0, y: 0,
+      resize: vi.fn(),
+    };
+    const fallback = await handleExecute(null, {
+      actions: [
+        { type: "create_frame", parentId: "parent", name: "Transient", as: "transient" },
+        { type: "rename", nodeId: "$transient", name: "Renamed" },
+        { type: "rename", nodeId: "missing", name: "Fails" },
+      ],
+      rollbackOnError: true,
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>;
+
+    const result = await new AsyncFunction("figma", fallback.fallbackJs!)({
+      getNodeById: (id: string) => id === "parent" ? parent : id === "transient-1" ? transient : undefined,
+      createFrame: () => transient,
+      commitUndo: vi.fn(),
+      triggerUndo: vi.fn(),
+    });
+
+    expect(result).toEqual([
+      { type: "create_frame", rolledBack: true },
+      { type: "rename", rolledBack: true },
+      { actionIndex: 2, type: "rename", status: "failed", error: "Cannot set properties of undefined (setting 'name')" },
+      { type: "rollback", status: "applied" },
+    ]);
   });
 
   it("keeps a planned grouping wrapper absolute in plugin and fallback execution paths", async () => {

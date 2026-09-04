@@ -577,7 +577,9 @@ describe("connected plugin batch execution", () => {
     const parent = { id: "parent", type: "PAGE", appendChild: vi.fn() };
     const existingParent = { id: "existing-parent" };
     const existing: Record<string, unknown> = {
-      id: "existing-1", type: "RECTANGLE", name: "Before", parent: existingParent,
+      id: "existing-1", type: "INSTANCE", name: "$transient", parent: existingParent,
+      getMainComponentAsync: vi.fn(async () => ({ componentPropertyDefinitions: {} })),
+      setProperties: vi.fn(),
     };
     const transient: Record<string, unknown> = {
       id: "transient-1", type: "FRAME", name: "", fills: [], x: 0, y: 0,
@@ -594,9 +596,10 @@ describe("connected plugin batch execution", () => {
 
     const result = await runPlugin(figma, [
       { type: "create_frame", parentId: "parent", name: "Transient", as: "transient" },
+      { type: "rename", nodeId: "$transient", name: "Renamed transient" },
       { type: "rename", nodeId: "existing-1", name: "Renamed" },
       { type: "move", nodeId: "existing-1", targetParentId: "$transient" },
-      { type: "rename", nodeId: "missing", name: "Fails" },
+      { type: "set_component_properties", nodeId: "existing-1", properties: { "$transient": "Fails" } },
     ]);
 
     expect(result.results[0]).toMatchObject({ type: "create_frame", rolledBack: true });
@@ -604,15 +607,24 @@ describe("connected plugin batch execution", () => {
     expect(result.results[0]).not.toHaveProperty("newNodeId");
     expect(result.results[1]).toMatchObject({
       type: "rename",
-      nodeId: "existing-1",
-      before: { name: "Before" },
+      before: { name: "Transient" },
       rolledBack: true,
     });
+    expect(result.results[1]).not.toHaveProperty("nodeId");
     expect(result.results[2]).toMatchObject({
+      type: "rename",
+      nodeId: "existing-1",
+      before: { name: "$transient" },
+      rolledBack: true,
+    });
+    expect(result.results[3]).toMatchObject({
       type: "move",
       nodeId: "existing-1",
       before: { parentId: "existing-parent" },
       rolledBack: true,
+    });
+    expect(result.results[4]).toMatchObject({
+      type: "set_component_properties", status: "failed", error: "Component property not found: $transient",
     });
     expect(JSON.stringify(result)).not.toContain("transient-1");
   });
