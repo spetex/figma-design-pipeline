@@ -8,13 +8,31 @@ only against the exact release tag described below.
 
 ## What Ships
 
-- `dist/index.js` — standalone MCP server bundle (includes WebSocket bridge)
-- `plugin/dist/` — Figma plugin (code.js, ui.html, manifest.json)
-- `skill/` — design assistant skill
-- `scripts/install.mjs` — client installer + plugin deployer
-- `scripts/build-server.mjs`, `scripts/build-plugin.mjs` — build scripts (for source installs)
-- `bin/` — entry shims
-- `CHANGELOG.md`, `INSTALL.md`, `LICENSE`, `PUBLISHING.md`, `README.md`, `USAGE.md`
+The release verifier enforces this exact 21-file allowlist:
+
+```text
+CHANGELOG.md
+INSTALL.md
+LICENSE
+PUBLISHING.md
+README.md
+USAGE.md
+bin/spetex-figma-design-pipeline
+bin/spetex-figma-design-pipeline-install
+bin/spfr-figma-design-pipeline
+bin/spfr-figma-design-pipeline-install
+dist/index.js
+package.json
+plugin/dist/code.js
+plugin/dist/manifest.json
+plugin/dist/ui.html
+scripts/build-plugin.mjs
+scripts/build-server.mjs
+scripts/install.mjs
+skill/README.md
+skill/references/design-guidance.md
+skill/SKILL.md
+```
 
 ## Runtime
 

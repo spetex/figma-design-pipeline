@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const EXPECTED_PACKAGE_NAME = "@spetex/figma-design-pipeline";
 const TAG_PREFIX = "figma-design-pipeline-v";
@@ -60,9 +61,25 @@ export function verifyReleaseTag(packagePath) {
   return { eventName, packageName: packageMetadata.name, version: packageMetadata.version, ref };
 }
 
-if (process.argv.length !== 3) {
-  fail("Usage: node scripts/verify-release-tag.mjs <package-json>");
+function isDirectExecution(moduleUrl) {
+  const entrypoint = process.argv[1];
+  if (!entrypoint) return false;
+
+  try {
+    const moduleIdentity = statSync(fileURLToPath(moduleUrl));
+    const entrypointIdentity = statSync(resolve(entrypoint));
+    return moduleIdentity.dev === entrypointIdentity.dev
+      && moduleIdentity.ino === entrypointIdentity.ino;
+  } catch {
+    return false;
+  }
 }
 
-const result = verifyReleaseTag(process.argv[2]);
-console.log(`Verified ${result.ref} for ${result.packageName}@${result.version} (${result.eventName})`);
+if (isDirectExecution(import.meta.url)) {
+  if (process.argv.length !== 3) {
+    fail("Usage: node scripts/verify-release-tag.mjs <package-json>");
+  }
+
+  const result = verifyReleaseTag(process.argv[2]);
+  console.log(`Verified ${result.ref} for ${result.packageName}@${result.version} (${result.eventName})`);
+}
