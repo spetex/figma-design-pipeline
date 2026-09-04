@@ -218,7 +218,7 @@ Use with figma_execute({ actions: [...] }) for batch execution via the plugin br
 Node-producing actions accept \`as\` (for example \`as: "card"\`); later ID fields can use \`$card\`. Legacy \`$ref:node-N\` references remain supported. The complete reference graph and asset payloads are validated before execution.
 
 ## Read-back
-- **inspect: { nodeId, depth?, limit?, scanLimit? }** — read-only same-batch tree/property inspection; may reference an earlier alias. Returns bounded IDs, bounds, text, visibility, paints/resolved CSS, style/variable bindings, component state, and truncation/byte metadata. Defaults: depth 2, result limit 100, scan limit 1,000; hard caps: 20/1,000/10,000 plus 4KB per scalar/native property and 80KB aggregate inspection data per batch. Rollback removes transient trees and marks their metadata \`rolledBack\`.
+- **inspect: { nodeId, depth?, limit?, scanLimit? }** — read-only same-batch tree/property inspection; may reference an earlier alias. Returns bounded IDs, bounds, text, visibility, paints/resolved CSS, style/variable bindings, component state, and truncation/byte metadata. Defaults: depth 2, result limit 100, scan limit 1,000; hard caps: 20/1,000/10,000 plus 4KB per scalar/native property and 80KB aggregate inspection data per batch. \`omittedNodeCount\` is an exact count only when \`omittedNodeCountExact\` is true and otherwise is a nonzero lower bound for result/scan truncation. Rollback removes transient trees and identifiers and marks affected action/inspection metadata \`rolledBack\`.
 
 ## Scene Graph
 - rename: { nodeId, name }

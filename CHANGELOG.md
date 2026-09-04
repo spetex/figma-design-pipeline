@@ -27,6 +27,9 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 - Component property strings are treated as symbolic references only for resolved `INSTANCE_SWAP` definitions, and section creation/resizing enforces the Plugin API’s `0.01` minimum dimension before mutation.
 - Gradient and per-corner-radius result snapshots no longer expose Figma mixed-value symbols through the bridge. Connected and fallback executors retain full schema/action behavior parity.
 - Same-batch inspection uses the approved plugin serializer's depth/result/scan/scalar limits and a shared 80KB aggregate batch budget. Inspection actions do not count as mutations or invalidate caches; rollback redacts transient inspection trees and marks them `rolledBack`.
+- Connected batches are FIFO-serialized at both bridge and plugin boundaries, use batch-local alias maps, and recover cleanly after batch errors, timeouts, disconnects, and reconnects so rollback cannot interfere with adjacent callers.
+- GIF and JPEG ingestion now performs bounded full decode validation with `modern-gif` and `jpeg-js`, rejecting empty LZW streams, malformed scan/table shells, corrupt/truncated content, excessive decoded frame data, and oversized dimensions. These exact runtime dependencies and their lockfile entries must be carried into the final release branch.
+- Same-batch inspection reports `omittedNodeCount` as an explicit lower bound with `omittedNodeCountExact: false` when result or scan budgets stop traversal; rollback now also scrubs transient action IDs, create maps, and post-mutation snapshots while preserving errors and summary accounting.
 
 ## [0.8.2] - 2026-08-02
 

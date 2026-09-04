@@ -20,12 +20,12 @@ type PluginFigma = {
   createText?: ReturnType<typeof vi.fn>;
 };
 
-function batch(actions: Array<Record<string, unknown>>, preloadFonts = false) {
+function batch(actions: Array<Record<string, unknown>>, preloadFonts = false, batchId = "test-batch") {
   const compiled = compileBatch(actions.map((action) => actionSchema.parse(action)), {
     rollbackOnError: true,
   });
   return {
-    batchId: "test-batch",
+    batchId,
     ...compiled,
     requiredFonts: preloadFonts ? compiled.requiredFonts : [],
   };
@@ -599,6 +599,81 @@ describe("connected plugin batch execution", () => {
 
     expect(currentName).toBe("Successful");
     expect(figma.commitUndo).toHaveBeenCalledTimes(3);
+    expect(figma.triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("serializes overlapping rollback batches with batch-local aliases", async () => {
+    type MutableNode = { id: string; type: string; name: string; fills: unknown[]; x: number; y: number; resize: (width: number, height: number) => void };
+    const nodes = new Map<string, MutableNode>();
+    let nextNode = 0;
+    let committed: Array<[string, string]> = [];
+    let releaseFirstLookup!: () => void;
+    const firstLookup = new Promise<void>((resolve) => { releaseFirstLookup = resolve; });
+    let delayed = false;
+    const parent = {
+      id: "parent",
+      type: "PAGE",
+      appendChild: (node: MutableNode) => { nodes.set(node.id, node); },
+    };
+    const figma = baseFigma(async (id) => {
+      if (!delayed) {
+        delayed = true;
+        await firstLookup;
+      }
+      return id === "parent" ? parent : nodes.get(id) ?? null;
+    });
+    figma.createFrame = vi.fn(() => ({
+      id: `created-${nextNode++}`,
+      type: "FRAME",
+      name: "",
+      fills: [],
+      x: 0,
+      y: 0,
+      resize: vi.fn(),
+    }));
+    figma.commitUndo.mockImplementation(() => {
+      committed = [...nodes].map(([id, node]) => [id, node.name]);
+    });
+    figma.triggerUndo.mockImplementation(() => {
+      const retained = new Set(committed.map(([id]) => id));
+      for (const id of nodes.keys()) if (!retained.has(id)) nodes.delete(id);
+      for (const [id, name] of committed) nodes.get(id)!.name = name;
+    });
+
+    vi.resetModules();
+    vi.stubGlobal("figma", figma);
+    vi.stubGlobal("__html__", "");
+    await import("./code.js");
+    const first = figma.ui.onmessage!({ type: "bridge_message", data: { type: "batch", ...batch([
+      { type: "create_frame", parentId: "parent", name: "Prior", as: "item" },
+    ], false, "first") } });
+    const failing = figma.ui.onmessage!({ type: "bridge_message", data: { type: "batch", ...batch([
+      { type: "create_frame", parentId: "parent", name: "Transient", as: "item" },
+      { type: "rename", nodeId: "missing", name: "Fails" },
+    ], false, "failing") } });
+    const later = figma.ui.onmessage!({ type: "bridge_message", data: { type: "batch", ...batch([
+      { type: "create_frame", parentId: "parent", name: "Later", as: "item" },
+    ], false, "later") } });
+
+    await Promise.resolve();
+    expect(figma.ui.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ type: "batch_result" }),
+    }));
+    releaseFirstLookup();
+    await Promise.all([first, failing, later]);
+
+    const responses = figma.ui.postMessage.mock.calls
+      .map(([message]) => message.data)
+      .filter((data) => data?.type === "batch_result");
+    expect(responses.map((response) => response.batchId)).toEqual(["first", "failing", "later"]);
+    expect(responses[0].nodeIdMap.$item).toBe("created-0");
+    expect(responses[1]).toMatchObject({ rollbackApplied: true, nodeIdMap: {} });
+    expect(JSON.stringify(responses[1])).not.toContain("created-1");
+    expect(responses[2].nodeIdMap.$item).toBe("created-2");
+    expect([...nodes].map(([id, node]) => [id, node.name])).toEqual([
+      ["created-0", "Prior"],
+      ["created-2", "Later"],
+    ]);
     expect(figma.triggerUndo).toHaveBeenCalledTimes(1);
   });
 
@@ -1404,6 +1479,52 @@ describe("same-batch inspect action", () => {
     expect(pluginResult.summary).toMatchObject({ applied: 2, failed: 0, mutations: 0 });
   });
 
+  it("reports nonzero lower-bound omissions for result and scan truncation in both paths", async () => {
+    const inspectActions = [
+      { type: "inspect", nodeId: "node", depth: 1, limit: 2, scanLimit: 10 },
+      { type: "inspect", nodeId: "node", depth: 1, limit: 10, scanLimit: 2 },
+    ];
+    const configureThreeChildren = (environment: ReturnType<typeof createInspectableBehavioralFigma>) => {
+      const root = environment.nodes.get("node")!;
+      root.children = Array.from({ length: 3 }, (_, index) => ({
+        id: `child-${index}`,
+        name: `Child ${index}`,
+        type: "FRAME",
+        visible: true,
+        children: [],
+        parent: root,
+      }));
+    };
+    const fallback = createInspectableBehavioralFigma();
+    configureThreeChildren(fallback);
+    const generated = await handleExecute(null, { actions: inspectActions });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<Array<Record<string, unknown>>>;
+    const fallbackResults = await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+    const connected = createInspectableBehavioralFigma();
+    configureThreeChildren(connected);
+    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, inspectActions);
+
+    for (const results of [fallbackResults, pluginResult.results]) {
+      expect(results[0].inspection).toMatchObject({
+        returnedCount: 2,
+        omittedNodeCount: 2,
+        omittedNodeCountExact: false,
+        truncated: true,
+        truncationReasons: ["result_limit"],
+      });
+      expect(results[1].inspection).toMatchObject({
+        returnedCount: 2,
+        omittedNodeCount: 2,
+        omittedNodeCountExact: false,
+        truncated: true,
+        truncationReasons: ["scan_limit"],
+        scanLimitReached: true,
+      });
+    }
+  });
+
   it("redacts transient inspection trees after rollback in both paths", async () => {
     const rollbackActions = [
       { type: "create_frame", parentId: "parent", name: "Card", as: "card" },
@@ -1423,8 +1544,17 @@ describe("same-batch inspect action", () => {
       expect(inspection).toMatchObject({ rolledBack: true, returnedCount: 0, truncated: true });
       expect(inspection).not.toHaveProperty("root");
     }
+    for (const results of [fallbackResults, pluginResult.results]) {
+      expect(results[0]).toMatchObject({ type: "create_frame", rolledBack: true });
+      expect(results[0]).not.toHaveProperty("nodeId");
+      expect(results[0]).not.toHaveProperty("newNodeId");
+      expect(results[0]).not.toHaveProperty("after");
+      expect(results[1]).toMatchObject({ type: "inspect", rolledBack: true });
+      expect(results[1]).not.toHaveProperty("nodeId");
+      expect(JSON.stringify(results)).not.toContain("created-card");
+    }
     expect(fallbackResults.at(-1)).toEqual({ type: "rollback", status: "applied" });
-    expect(pluginResult).toMatchObject({ rollbackApplied: true, summary: { applied: 2, failed: 1, mutations: 1 } });
+    expect(pluginResult).toMatchObject({ rollbackApplied: true, nodeIdMap: {}, summary: { applied: 2, failed: 1, mutations: 1 } });
   });
 });
 

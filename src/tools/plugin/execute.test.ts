@@ -629,9 +629,10 @@ describe("handleExecute fallback generation", () => {
     expect(node.name).toBe("Continues");
     expect(result).toEqual(expect.arrayContaining([
       expect.objectContaining({ actionIndex: 0, status: "failed" }),
-      expect.objectContaining({ type: "rename", nodeId: "node" }),
+      expect.objectContaining({ type: "rename", rolledBack: true }),
       { type: "rollback", status: "applied" },
     ]));
+    expect(result[1]).not.toHaveProperty("nodeId");
     expect(triggerUndo).toHaveBeenCalledTimes(1);
   });
 

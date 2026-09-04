@@ -49,26 +49,24 @@ async function ensureFonts(fonts: Array<{ family: string; style?: string }>): Pr
 
 // ─── Node Ref Resolution ────────────────────────────────────────
 
-const refMap = new Map<string, string>();
-
-function resolveId(id: string): string {
+function resolveBatchId(id: string, references: ReadonlyMap<string, string>): string {
   if (id.startsWith("$")) {
-    const real = refMap.get(id);
+    const real = references.get(id);
     if (!real) throw new Error(`Unresolved ref: ${id}`);
     return real;
   }
   return id;
 }
 
-async function findNode(nodeId: string): Promise<BaseNode> {
-  const id = resolveId(nodeId);
+async function findBatchNode(nodeId: string, references: ReadonlyMap<string, string>): Promise<BaseNode> {
+  const id = resolveBatchId(nodeId, references);
   const node = await figma.getNodeByIdAsync(id);
   if (!node) throw new Error(`Node not found: ${id}`);
   return node;
 }
 
-async function findSceneNode(nodeId: string): Promise<SceneNode> {
-  const node = await findNode(nodeId);
+async function findBatchSceneNode(nodeId: string, references: ReadonlyMap<string, string>): Promise<SceneNode> {
+  const node = await findBatchNode(nodeId, references);
   if (!("parent" in node)) throw new Error(`Not a scene node: ${nodeId}`);
   return node as SceneNode;
 }
@@ -96,8 +94,8 @@ function resolveComponentPropertyKey(
   return matches[0];
 }
 
-async function requireAttachedInstance(instanceId: string): Promise<InstanceNode> {
-  const node = await findSceneNode(instanceId);
+async function requireBatchAttachedInstance(instanceId: string, references: ReadonlyMap<string, string>): Promise<InstanceNode> {
+  const node = await findBatchSceneNode(instanceId, references);
   if (node.type !== "INSTANCE") throw new Error(`Node ${instanceId} is not an instance`);
   if (typeof node.getMainComponentAsync === "function" && !(await node.getMainComponentAsync())) {
     throw new Error(`Instance ${instanceId} is detached or has no main component`);
@@ -105,8 +103,8 @@ async function requireAttachedInstance(instanceId: string): Promise<InstanceNode
   return node;
 }
 
-async function findInstanceChild(instanceId: string, childPath: string[]): Promise<SceneNode> {
-  let current: BaseNode = await requireAttachedInstance(instanceId);
+async function findBatchInstanceChild(instanceId: string, childPath: string[], references: ReadonlyMap<string, string>): Promise<SceneNode> {
+  let current: BaseNode = await requireBatchAttachedInstance(instanceId, references);
   for (const segment of childPath) {
     if (!("children" in current)) throw new Error(`Child path cannot descend through ${current.type}`);
     const matches: SceneNode[] = current.children.filter((child: SceneNode) => child.name === segment);
@@ -118,12 +116,12 @@ async function findInstanceChild(instanceId: string, childPath: string[]): Promi
   return current as SceneNode;
 }
 
-async function resolveVariable(action: Record<string, unknown>): Promise<Variable> {
+async function resolveBatchVariable(action: Record<string, unknown>, references: ReadonlyMap<string, string>): Promise<Variable> {
   let variable: Variable | null = null;
   if (typeof action.variableId === "string") {
     variable = typeof figma.variables.getVariableByIdAsync === "function"
-      ? await figma.variables.getVariableByIdAsync(resolveId(action.variableId))
-      : figma.variables.getVariableById(resolveId(action.variableId));
+      ? await figma.variables.getVariableByIdAsync(resolveBatchId(action.variableId, references))
+      : figma.variables.getVariableById(resolveBatchId(action.variableId, references));
   } else {
     const name = action.variableName as string;
     let candidates = (await figma.variables.getLocalVariablesAsync(action.resolvedType as VariableResolvedDataType | undefined))
@@ -131,7 +129,7 @@ async function resolveVariable(action: Record<string, unknown>): Promise<Variabl
     if (action.collectionId || action.collectionName) {
       const collections = await figma.variables.getLocalVariableCollectionsAsync();
       const collectionMatches = action.collectionId
-        ? collections.filter((collection) => collection.id === resolveId(action.collectionId as string))
+        ? collections.filter((collection) => collection.id === resolveBatchId(action.collectionId as string, references))
         : collections.filter((collection) => collection.name === action.collectionName);
       if (collectionMatches.length === 0) throw new Error(`Variable collection not found: ${String(action.collectionId ?? action.collectionName)}`);
       if (collectionMatches.length > 1) throw new Error(`Variable collection name is ambiguous: ${String(action.collectionName)}`);
@@ -148,7 +146,7 @@ async function resolveVariable(action: Record<string, unknown>): Promise<Variabl
   if (action.collectionId || action.collectionName) {
     let collections: VariableCollection[];
     if (action.collectionId) {
-      const collectionId = resolveId(action.collectionId as string);
+      const collectionId = resolveBatchId(action.collectionId as string, references);
       const collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
       collections = collection ? [collection] : [];
     } else {
@@ -170,13 +168,14 @@ async function localStyles(type: "PAINT" | "TEXT" | "EFFECT"): Promise<Array<Pai
   return figma.getLocalEffectStylesAsync();
 }
 
-async function resolveStyle(
+async function resolveBatchStyle(
   type: "PAINT" | "TEXT" | "EFFECT",
   id: unknown,
-  name: unknown
+  name: unknown,
+  references: ReadonlyMap<string, string>,
 ): Promise<PaintStyle | TextStyle | EffectStyle> {
   if (typeof id === "string") {
-    const style = await figma.getStyleByIdAsync(resolveId(id));
+    const style = await figma.getStyleByIdAsync(resolveBatchId(id, references));
     if (!style) throw new Error(`Style not found: ${id}`);
     if (style.type !== type) throw new Error(`Style ${id} is ${style.type}, not ${type}`);
     return style as PaintStyle | TextStyle | EffectStyle;
@@ -569,21 +568,27 @@ function cornerRadiusProperty(node: BaseNode): Pick<PluginReadNode, "cornerRadiu
 async function serializeTree(
   node: BaseNode,
   depth: number,
-  budget: { remaining: number; visited: number; truncated: boolean },
+  budget: { remaining: number; visited: number; truncated: boolean; omittedNodeCount: number },
   currentDepth = 0,
   includeNativeProperties = false
 ): Promise<PluginReadNode | null> {
   if (budget.remaining <= 0) {
     budget.truncated = true;
+    budget.omittedNodeCount++;
     return null;
   }
   budget.remaining--;
   budget.visited++;
   const children: PluginReadNode[] = [];
   if (depth > 0) {
-    for (const child of readChildren(node)) {
+    const sourceChildren = readChildren(node);
+    for (let index = 0; index < sourceChildren.length; index++) {
+      const child = sourceChildren[index]!;
       const serialized = await serializeTree(child, depth - 1, budget, currentDepth + 1, includeNativeProperties);
-      if (!serialized) break;
+      if (!serialized) {
+        budget.omittedNodeCount += sourceChildren.length - index - 1;
+        break;
+      }
       children.push(serialized);
     }
   }
@@ -822,7 +827,7 @@ async function inspectBatchNode(
   }
 
   const effectiveLimit = Math.min(limit, scanLimit);
-  const budget = { remaining: effectiveLimit, visited: 0, truncated: false };
+  const budget = { remaining: effectiveLimit, visited: 0, truncated: false, omittedNodeCount: 0 };
   const serialized = await serializeTree(node, depth, budget, 0, true);
   if (!serialized) throw new Error("Inspect result limit exhausted before serializing the root node");
   const scannedCount = budget.visited;
@@ -845,7 +850,8 @@ async function inspectBatchNode(
       root,
       totalScanned: scannedCount,
       returnedCount,
-      omittedNodeCount: originalReturnedCount - returnedCount,
+      omittedNodeCount: budget.omittedNodeCount + originalReturnedCount - returnedCount,
+      omittedNodeCountExact: !budget.truncated,
       truncated: reasons.length > 0,
       truncationReasons: reasons,
       traversalDepth: depth,
@@ -909,7 +915,7 @@ async function processReadRequest(request: PluginReadRequest): Promise<PluginRea
   const roots = await resolveReadRoots(request);
   const base = readResponseBase(request);
   if (request.operation === "tree") {
-    const budget = { remaining: request.limit, visited: 0, truncated: false };
+    const budget = { remaining: request.limit, visited: 0, truncated: false, omittedNodeCount: 0 };
     const serializedRoots: PluginReadNode[] = [];
     for (const root of roots) {
       const serialized = await serializeTree(root, request.depth, budget);
@@ -1022,12 +1028,14 @@ type ActionResult = {
   before?: Record<string, unknown>;
   after?: Record<string, unknown>;
   inspection?: PluginBatchInspection;
+  rolledBack?: boolean;
   error?: string;
 };
 
 async function executeAction(
   action: Record<string, unknown>,
   markDocumentWrite: () => void,
+  references: ReadonlyMap<string, string>,
   maxInspectionBytes = MAX_PLUGIN_BATCH_INSPECTION_BYTES
 ): Promise<{
   before?: Record<string, unknown>;
@@ -1035,6 +1043,14 @@ async function executeAction(
   newNodeId?: string;
   inspection?: PluginBatchInspection;
 }> {
+  const resolveId = (id: string) => resolveBatchId(id, references);
+  const findNode = (id: string) => findBatchNode(id, references);
+  const findSceneNode = (id: string) => findBatchSceneNode(id, references);
+  const requireAttachedInstance = (id: string) => requireBatchAttachedInstance(id, references);
+  const findInstanceChild = (id: string, path: string[]) => findBatchInstanceChild(id, path, references);
+  const resolveVariable = (input: Record<string, unknown>) => resolveBatchVariable(input, references);
+  const resolveStyle = (styleType: "PAINT" | "TEXT" | "EFFECT", id: unknown, name: unknown) =>
+    resolveBatchStyle(styleType, id, name, references);
   const type = action.type as string;
   if (!isKnownActionType(type)) throw new Error(`Unknown action type: ${type}`);
   assertActionInputCoverage(action);
@@ -1987,8 +2003,8 @@ interface BatchResult {
 
 async function processBatch(batch: Batch): Promise<BatchResult> {
   preflightActionReferences(batch.actions);
-  // Clear ref map for this batch
-  refMap.clear();
+  const references = new Map<string, string>();
+  const resolveId = (id: string) => resolveBatchId(id, references);
 
   // Preload all required fonts
   if (batch.requiredFonts.length > 0) {
@@ -2040,13 +2056,13 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
 
       const result = await executeAction(action, () => {
         actionWroteDocument = true;
-      }, MAX_PLUGIN_BATCH_INSPECTION_BYTES - inspectionBytes);
+      }, references, MAX_PLUGIN_BATCH_INSPECTION_BYTES - inspectionBytes);
       if (result.inspection) inspectionBytes += result.inspection.responseBytes;
 
       // Register new node ID for symbolic ref
       if (result.newNodeId && action._ref) {
-        refMap.set(action._ref as string, result.newNodeId);
-        if (action._aliasRef) refMap.set(action._aliasRef as string, result.newNodeId);
+        references.set(action._ref as string, result.newNodeId);
+        if (action._aliasRef) references.set(action._aliasRef as string, result.newNodeId);
       }
 
       results.push({
@@ -2076,8 +2092,18 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
   if (batch.rollbackOnError && failed > 0 && documentWrites > 0) {
     figma.triggerUndo();
     rollbackApplied = true;
+    const transientNodeIds = new Set(references.values());
     for (const result of results) {
       if (result.inspection) result.inspection = invalidateInspectionAfterRollback(result.inspection);
+      if (result.error) {
+        for (const nodeId of transientNodeIds) result.error = result.error.split(nodeId).join("[rolled back node]");
+      }
+      if (result.status === "applied") {
+        result.rolledBack = true;
+        delete result.after;
+        delete result.newNodeId;
+        delete result.nodeId;
+      }
     }
   } else if (batch.rollbackOnError && documentWrites > 0) {
     // Close the successful batch as its own undo unit.
@@ -2089,13 +2115,34 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
     dryRun: batch.dryRun,
     success: failed === 0,
     results,
-    nodeIdMap: Object.fromEntries(refMap),
+    nodeIdMap: rollbackApplied ? {} : Object.fromEntries(references),
     summary: { total: batch.actions.length, applied, failed, skipped, mutations: documentWrites },
     ...(rollbackApplied ? { rollbackApplied: true } : {}),
   };
 }
 
 // ─── Message Handler ────────────────────────────────────────────
+
+async function respondToBatch(batch: Batch): Promise<void> {
+  try {
+    const result = await processBatch(batch);
+    figma.ui.postMessage({ type: "send_to_bridge", data: { type: "batch_result", ...result } });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    figma.ui.postMessage({
+      type: "send_to_bridge",
+      data: { type: "batch_result", batchId: batch.batchId, success: false, error: message, results: [], nodeIdMap: {}, summary: { total: 0, applied: 0, failed: 0, skipped: 0 } },
+    });
+  }
+}
+
+let batchQueueTail: Promise<void> = Promise.resolve();
+
+function enqueueBatch(batch: Batch): Promise<void> {
+  const execution = batchQueueTail.then(() => respondToBatch(batch));
+  batchQueueTail = execution.then(() => undefined, () => undefined);
+  return execution;
+}
 
 figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
   if (msg.type === "bridge_connected") {
@@ -2142,16 +2189,7 @@ figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
         console.error("[plugin] Malformed batch payload, ignoring");
         return;
       }
-      try {
-        const result = await processBatch(batch);
-        figma.ui.postMessage({ type: "send_to_bridge", data: { type: "batch_result", ...result } });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        figma.ui.postMessage({
-          type: "send_to_bridge",
-          data: { type: "batch_result", batchId: batch.batchId, success: false, error: message, results: [], nodeIdMap: {}, summary: { total: 0, applied: 0, failed: 0, skipped: 0 } },
-        });
-      }
+      await enqueueBatch(batch);
     } else if (data.type === "read_request") {
       const request = data as unknown as PluginReadRequest;
       if (!request.requestId || !request.operation || !request.fileKey) {

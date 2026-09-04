@@ -7,6 +7,8 @@ import { IMAGE_FIXTURES } from "./__fixtures__/images.js";
 import { MAX_IMAGE_BYTES, inspectImage, preprocessActions, validateSvg } from "./assets.js";
 
 const PNG = Buffer.from(IMAGE_FIXTURES.png, "base64");
+const JPEG = Buffer.from(IMAGE_FIXTURES.jpeg, "base64");
+const GIF = Buffer.from(IMAGE_FIXTURES.gif, "base64");
 const tempDirectories: string[] = [];
 
 afterEach(async () => {
@@ -47,6 +49,35 @@ describe("asset preprocessing", () => {
     const bytes = Buffer.from(encoded, "base64");
     await expect(preprocessActions([imageAction({ imageBase64: bytes.subarray(0, -1).toString("base64") })]))
       .rejects.toThrow();
+  });
+
+  it("rejects the empty-data GIF and 19-byte structural-shell JPEG probes", async () => {
+    const emptyDataGif = Buffer.from("47494638396101000100800000ffffff0000002c00000000010001000002003b", "hex");
+    const structuralShellJpeg = Buffer.from("ffd8ffc00008080001000101ffda000200ffd9", "hex");
+    expect(structuralShellJpeg).toHaveLength(19);
+
+    await expect(preprocessActions([imageAction({ imageBase64: emptyDataGif.toString("base64") })]))
+      .rejects.toThrow("empty LZW");
+    await expect(preprocessActions([imageAction({ imageBase64: structuralShellJpeg.toString("base64") })]))
+      .rejects.toThrow("JPEG decode failed");
+  });
+
+  it("rejects corrupt and oversized-dimension GIF/JPEG inputs after bounded decode validation", async () => {
+    const corruptGif = Buffer.from(GIF);
+    corruptGif[corruptGif.length - 4] ^= 0xff;
+    const corruptJpeg = Buffer.from(JPEG);
+    corruptJpeg[corruptJpeg.length - 4] ^= 0xff;
+    const oversizedGif = Buffer.from(GIF);
+    oversizedGif.writeUInt16LE(4097, 6);
+    const oversizedJpeg = Buffer.from(JPEG);
+    const sof = oversizedJpeg.indexOf(Buffer.from([0xff, 0xc0]));
+    expect(sof).toBeGreaterThan(0);
+    oversizedJpeg.writeUInt16BE(4097, sof + 7);
+
+    await expect(preprocessActions([imageAction({ imageBase64: corruptGif.toString("base64") })])).rejects.toThrow();
+    await expect(preprocessActions([imageAction({ imageBase64: corruptJpeg.toString("base64") })])).rejects.toThrow();
+    await expect(preprocessActions([imageAction({ imageBase64: oversizedGif.toString("base64") })])).rejects.toThrow("4096x4096");
+    await expect(preprocessActions([imageAction({ imageBase64: oversizedJpeg.toString("base64") })])).rejects.toThrow("4096x4096");
   });
 
   it("rejects corrupt, truncated, oversized-byte, oversized-dimension, WebP, and private-network sources", async () => {

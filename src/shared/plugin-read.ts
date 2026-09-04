@@ -116,7 +116,9 @@ export interface PluginBatchInspection {
   root?: PluginReadNode;
   totalScanned: number;
   returnedCount: number;
+  /** Truthful omission count; a lower bound when exactness is false. */
   omittedNodeCount: number;
+  omittedNodeCountExact: boolean;
   truncated: boolean;
   truncationReasons: PluginReadTruncationReason[];
   traversalDepth: number;

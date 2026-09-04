@@ -5,6 +5,8 @@ import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
 import { delimiter, isAbsolute, relative, resolve } from "node:path";
 import { inflateSync } from "node:zlib";
+import { decode as decodeJpeg } from "jpeg-js";
+import { decode as decodeGif, decodeFrame as decodeGifFrame } from "modern-gif";
 import type { Action } from "../shared/actions.js";
 
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -12,6 +14,8 @@ export const MAX_SVG_BYTES = 1024 * 1024;
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_REDIRECTS = 5;
 const MAX_IMAGE_DIMENSION = 4096;
+const MAX_DECODED_PIXELS = MAX_IMAGE_DIMENSION * MAX_IMAGE_DIMENSION;
+const MAX_JPEG_MEMORY_MB = 128;
 const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif"]);
 
 export interface AssetPolicy {
@@ -244,15 +248,73 @@ function parsePng(bytes: Buffer): ImageMetadata {
   return { type: "image/png", width, height };
 }
 
-function skipGifSubBlocks(bytes: Buffer, start: number): number {
+function readGifSubBlocks(bytes: Buffer, start: number): { end: number; data: Buffer } {
   let offset = start;
+  const blocks: Buffer[] = [];
   while (true) {
     if (offset >= bytes.length) throw new Error("Truncated GIF data blocks");
     const length = bytes[offset++];
-    if (length === 0) return offset;
+    if (length === 0) return { end: offset, data: Buffer.concat(blocks) };
     if (offset + length > bytes.length) throw new Error("Truncated GIF data block");
+    blocks.push(bytes.subarray(offset, offset + length));
     offset += length;
   }
+}
+
+function validateGifLzw(data: Buffer, minimumCodeSize: number, expectedPixels: number): void {
+  if (minimumCodeSize < 2 || minimumCodeSize > 8 || data.length === 0) {
+    throw new Error("GIF contains invalid or empty LZW image data");
+  }
+  const clearCode = 1 << minimumCodeSize;
+  const endCode = clearCode + 1;
+  const lengths = new Uint16Array(4096);
+  for (let code = 0; code < clearCode; code++) lengths[code] = 1;
+  let codeSize = minimumCodeSize + 1;
+  let nextCode = endCode + 1;
+  let previousCode = -1;
+  let bitOffset = 0;
+  let outputPixels = 0;
+  let sawClear = false;
+
+  const readCode = (): number | undefined => {
+    if (bitOffset + codeSize > data.length * 8) return undefined;
+    let value = 0;
+    for (let bit = 0; bit < codeSize; bit++) {
+      value |= ((data[(bitOffset + bit) >> 3]! >> ((bitOffset + bit) & 7)) & 1) << bit;
+    }
+    bitOffset += codeSize;
+    return value;
+  };
+
+  for (let code = readCode(); code !== undefined; code = readCode()) {
+    if (code === clearCode) {
+      codeSize = minimumCodeSize + 1;
+      nextCode = endCode + 1;
+      previousCode = -1;
+      sawClear = true;
+      continue;
+    }
+    if (code === endCode) {
+      if (!sawClear || outputPixels !== expectedPixels) {
+        throw new Error("GIF LZW image data does not decode to the declared frame size");
+      }
+      return;
+    }
+    if (!sawClear || code > nextCode || (code === nextCode && previousCode < 0)) {
+      throw new Error("GIF contains an invalid LZW code stream");
+    }
+    const decodedLength = code < nextCode ? lengths[code] : lengths[previousCode] + 1;
+    if (!decodedLength || outputPixels + decodedLength > expectedPixels) {
+      throw new Error("GIF LZW image data exceeds the declared frame size");
+    }
+    outputPixels += decodedLength;
+    if (previousCode >= 0 && nextCode < 4096) {
+      lengths[nextCode++] = lengths[previousCode] + 1;
+      if (nextCode === 1 << codeSize && codeSize < 12) codeSize++;
+    }
+    previousCode = code;
+  }
+  throw new Error("GIF LZW image data is truncated or missing an end code");
 }
 
 function parseGif(bytes: Buffer): ImageMetadata {
@@ -262,7 +324,9 @@ function parseGif(bytes: Buffer): ImageMetadata {
   assertDimensions(width, height);
   let offset = 13;
   if (bytes[10] & 0x80) offset += 3 * (1 << ((bytes[10] & 0x07) + 1));
+  if (offset > bytes.length) throw new Error("Truncated GIF global color table");
   let sawImage = false;
+  let decodedPixels = 0;
   while (offset < bytes.length) {
     const marker = bytes[offset++];
     if (marker === 0x3b) {
@@ -271,15 +335,27 @@ function parseGif(bytes: Buffer): ImageMetadata {
     }
     if (marker === 0x21) {
       if (offset >= bytes.length) throw new Error("Truncated GIF extension");
-      offset = skipGifSubBlocks(bytes, offset + 1);
+      offset = readGifSubBlocks(bytes, offset + 1).end;
       continue;
     }
     if (marker !== 0x2c || offset + 9 > bytes.length) throw new Error("Invalid or truncated GIF image descriptor");
+    const left = bytes.readUInt16LE(offset);
+    const top = bytes.readUInt16LE(offset + 2);
+    const frameWidth = bytes.readUInt16LE(offset + 4);
+    const frameHeight = bytes.readUInt16LE(offset + 6);
+    if (frameWidth < 1 || frameHeight < 1 || left + frameWidth > width || top + frameHeight > height) {
+      throw new Error("GIF frame lies outside its declared dimensions");
+    }
+    decodedPixels += frameWidth * frameHeight;
+    if (decodedPixels > MAX_DECODED_PIXELS) throw new Error("GIF decoded frame data exceeds the resource limit");
     const packed = bytes[offset + 8];
     offset += 9;
     if (packed & 0x80) offset += 3 * (1 << ((packed & 0x07) + 1));
     if (offset >= bytes.length) throw new Error("Truncated GIF image data");
-    offset = skipGifSubBlocks(bytes, offset + 1);
+    const minimumCodeSize = bytes[offset++];
+    const blocks = readGifSubBlocks(bytes, offset);
+    validateGifLzw(blocks.data, minimumCodeSize, frameWidth * frameHeight);
+    offset = blocks.end;
     sawImage = true;
   }
   throw new Error("GIF is missing its trailer");
@@ -300,6 +376,20 @@ function parseJpeg(bytes: Buffer): ImageMetadata {
     const marker = bytes[offset++];
     if (marker === 0xd9) {
       if (!width || !sawScan || !sawScanData || offset !== bytes.length) throw new Error("Invalid JPEG end marker or missing image data/dimensions");
+      try {
+        const decoded = decodeJpeg(bytes, {
+          useTArray: true,
+          formatAsRGBA: false,
+          tolerantDecoding: false,
+          maxResolutionInMP: MAX_DECODED_PIXELS / 1_000_000,
+          maxMemoryUsageInMB: MAX_JPEG_MEMORY_MB,
+        });
+        if (decoded.width !== width || decoded.height !== height || decoded.data.length === 0) {
+          throw new Error("decoded dimensions do not match the frame header");
+        }
+      } catch (error) {
+        throw new Error(`JPEG decode failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
       return { type: "image/jpeg", width, height };
     }
     if (marker === 0x00 || marker === 0xd8) throw new Error("Invalid JPEG marker");
@@ -343,7 +433,22 @@ export function inspectImage(bytes: Uint8Array): ImageMetadata {
   const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return parsePng(buffer);
   if (buffer[0] === 0xff && buffer[1] === 0xd8) return parseJpeg(buffer);
-  if (["GIF87a", "GIF89a"].includes(buffer.toString("ascii", 0, 6))) return parseGif(buffer);
+  if (["GIF87a", "GIF89a"].includes(buffer.toString("ascii", 0, 6))) {
+    const metadata = parseGif(buffer);
+    try {
+      // modern-gif reads an ArrayBuffer from offset zero; copy the bounded
+      // Buffer view so pooled Node backing bytes cannot become parser input.
+      const gifSource = Uint8Array.from(buffer).buffer;
+      const decoded = decodeGif(gifSource);
+      if (decoded.width !== metadata.width || decoded.height !== metadata.height || decoded.frames.length < 1) {
+        throw new Error("decoded dimensions or frame count are invalid");
+      }
+      for (let frame = 0; frame < decoded.frames.length; frame++) decodeGifFrame(gifSource, frame, decoded);
+    } catch (error) {
+      throw new Error(`GIF decode failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return metadata;
+  }
   if (buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP") {
     throw new Error("WebP is not supported by the installed Figma Plugin API contract");
   }
