@@ -1,10 +1,23 @@
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { actionSchema, type Action } from "../shared/actions.js";
 import { IMAGE_FIXTURES } from "./__fixtures__/images.js";
-import { MAX_IMAGE_BYTES, inspectImage, preprocessActions, validateSvg } from "./assets.js";
+import { GIF_DECODE_BUDGET, MAX_IMAGE_BYTES, inspectImage, preprocessActions, validateSvg } from "./assets.js";
+
+const gifFrameDecodeCalls = vi.hoisted(() => [] as Array<{ index: number; width: number; height: number; bytes: number }>);
+vi.mock("modern-gif", async () => {
+  const actual = await vi.importActual<typeof import("modern-gif")>("modern-gif");
+  return {
+    ...actual,
+    decodeUndisposedFrame: (...args: Parameters<typeof actual.decodeUndisposedFrame>) => {
+      const decoded = actual.decodeUndisposedFrame(...args);
+      gifFrameDecodeCalls.push({ index: args[2], width: decoded.width, height: decoded.height, bytes: decoded.data.byteLength });
+      return decoded;
+    },
+  };
+});
 
 const PNG = Buffer.from(IMAGE_FIXTURES.png, "base64");
 const JPEG = Buffer.from(IMAGE_FIXTURES.jpeg, "base64");
@@ -12,8 +25,17 @@ const GIF = Buffer.from(IMAGE_FIXTURES.gif, "base64");
 const tempDirectories: string[] = [];
 
 afterEach(async () => {
+  gifFrameDecodeCalls.length = 0;
   await Promise.all(tempDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
+
+function repeatedLocalFrameGif(frameCount: number): Buffer {
+  const header = Buffer.from(GIF.subarray(0, 19));
+  header.writeUInt16LE(256, 6);
+  header.writeUInt16LE(256, 8);
+  const frame = GIF.subarray(27, -1);
+  return Buffer.concat([header, ...Array.from({ length: frameCount }, () => frame), Buffer.from([0x3b])]);
+}
 
 function imageAction(source: Record<string, unknown>): Action {
   return actionSchema.parse({ type: "set_image_fill", nodeId: "1:2", ...source });
@@ -78,6 +100,24 @@ describe("asset preprocessing", () => {
     await expect(preprocessActions([imageAction({ imageBase64: corruptJpeg.toString("base64") })])).rejects.toThrow();
     await expect(preprocessActions([imageAction({ imageBase64: oversizedGif.toString("base64") })])).rejects.toThrow("4096x4096");
     await expect(preprocessActions([imageAction({ imageBase64: oversizedJpeg.toString("base64") })])).rejects.toThrow("4096x4096");
+  });
+
+  it("decodes the 1,520-byte 100-frame GIF probe exactly once per local frame", () => {
+    const probe = repeatedLocalFrameGif(100);
+    expect(probe).toHaveLength(1_520);
+    expect(100).toBeLessThanOrEqual(GIF_DECODE_BUDGET.maxFrames);
+
+    expect(inspectImage(probe)).toEqual({ type: "image/gif", width: 256, height: 256 });
+    expect(gifFrameDecodeCalls).toEqual(Array.from({ length: 100 }, (_, index) => ({
+      index, width: 1, height: 1, bytes: 4,
+    })));
+  });
+
+  it("rejects GIFs over the declared frame budget before any frame allocation", () => {
+    const overBudget = repeatedLocalFrameGif(GIF_DECODE_BUDGET.maxFrames + 1);
+
+    expect(() => inspectImage(overBudget)).toThrow("frame count exceeds");
+    expect(gifFrameDecodeCalls).toEqual([]);
   });
 
   it("rejects corrupt, truncated, oversized-byte, oversized-dimension, WebP, and private-network sources", async () => {

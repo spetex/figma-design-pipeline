@@ -6,7 +6,7 @@ import { isIP } from "node:net";
 import { delimiter, isAbsolute, relative, resolve } from "node:path";
 import { inflateSync } from "node:zlib";
 import { decode as decodeJpeg } from "jpeg-js";
-import { decode as decodeGif, decodeFrame as decodeGifFrame } from "modern-gif";
+import { decode as decodeGif, decodeUndisposedFrame as decodeGifFrame } from "modern-gif";
 import type { Action } from "../shared/actions.js";
 
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -17,6 +17,15 @@ const MAX_IMAGE_DIMENSION = 4096;
 const MAX_DECODED_PIXELS = MAX_IMAGE_DIMENSION * MAX_IMAGE_DIMENSION;
 const MAX_JPEG_MEMORY_MB = 128;
 const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif"]);
+
+export const GIF_DECODE_BUDGET = Object.freeze({
+  maxFrames: 256,
+  maxDecodedPixels: MAX_DECODED_PIXELS,
+  maxDecodedBytes: MAX_DECODED_PIXELS * 4,
+  // Structural LZW validation and local-frame decoding each visit every
+  // decoded pixel once; compressed bytes are scanned once as well.
+  maxWorkUnits: MAX_DECODED_PIXELS * 2 + MAX_IMAGE_BYTES,
+});
 
 export interface AssetPolicy {
   /** Explicit directories from which server-local image paths may be read. */
@@ -138,6 +147,7 @@ function decodeBase64(input: string): Buffer {
 }
 
 type ImageMetadata = { type: "image/png" | "image/jpeg" | "image/gif"; width: number; height: number };
+type GifMetadata = ImageMetadata & { type: "image/gif"; frameCount: number };
 
 function assertDimensions(width: number, height: number): void {
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
@@ -317,7 +327,7 @@ function validateGifLzw(data: Buffer, minimumCodeSize: number, expectedPixels: n
   throw new Error("GIF LZW image data is truncated or missing an end code");
 }
 
-function parseGif(bytes: Buffer): ImageMetadata {
+function parseGif(bytes: Buffer): GifMetadata {
   if (bytes.length < 14 || !["GIF87a", "GIF89a"].includes(bytes.toString("ascii", 0, 6))) throw new Error("Invalid or truncated GIF");
   const width = bytes.readUInt16LE(6);
   const height = bytes.readUInt16LE(8);
@@ -326,12 +336,15 @@ function parseGif(bytes: Buffer): ImageMetadata {
   if (bytes[10] & 0x80) offset += 3 * (1 << ((bytes[10] & 0x07) + 1));
   if (offset > bytes.length) throw new Error("Truncated GIF global color table");
   let sawImage = false;
+  let frameCount = 0;
   let decodedPixels = 0;
+  let decodedBytes = 0;
+  let decodeWorkUnits = 0;
   while (offset < bytes.length) {
     const marker = bytes[offset++];
     if (marker === 0x3b) {
       if (!sawImage || offset !== bytes.length) throw new Error("Invalid GIF trailer or missing image data");
-      return { type: "image/gif", width, height };
+      return { type: "image/gif", width, height, frameCount };
     }
     if (marker === 0x21) {
       if (offset >= bytes.length) throw new Error("Truncated GIF extension");
@@ -346,15 +359,22 @@ function parseGif(bytes: Buffer): ImageMetadata {
     if (frameWidth < 1 || frameHeight < 1 || left + frameWidth > width || top + frameHeight > height) {
       throw new Error("GIF frame lies outside its declared dimensions");
     }
-    decodedPixels += frameWidth * frameHeight;
-    if (decodedPixels > MAX_DECODED_PIXELS) throw new Error("GIF decoded frame data exceeds the resource limit");
+    frameCount++;
+    if (frameCount > GIF_DECODE_BUDGET.maxFrames) throw new Error("GIF frame count exceeds the resource limit");
+    const framePixels = frameWidth * frameHeight;
+    decodedPixels += framePixels;
+    decodedBytes += framePixels * 4;
+    if (decodedPixels > GIF_DECODE_BUDGET.maxDecodedPixels) throw new Error("GIF decoded pixels exceed the resource limit");
+    if (decodedBytes > GIF_DECODE_BUDGET.maxDecodedBytes) throw new Error("GIF decoded bytes exceed the resource limit");
     const packed = bytes[offset + 8];
     offset += 9;
     if (packed & 0x80) offset += 3 * (1 << ((packed & 0x07) + 1));
     if (offset >= bytes.length) throw new Error("Truncated GIF image data");
     const minimumCodeSize = bytes[offset++];
     const blocks = readGifSubBlocks(bytes, offset);
-    validateGifLzw(blocks.data, minimumCodeSize, frameWidth * frameHeight);
+    decodeWorkUnits += framePixels * 2 + blocks.data.byteLength;
+    if (decodeWorkUnits > GIF_DECODE_BUDGET.maxWorkUnits) throw new Error("GIF decode work exceeds the resource limit");
+    validateGifLzw(blocks.data, minimumCodeSize, framePixels);
     offset = blocks.end;
     sawImage = true;
   }
@@ -440,14 +460,22 @@ export function inspectImage(bytes: Uint8Array): ImageMetadata {
       // Buffer view so pooled Node backing bytes cannot become parser input.
       const gifSource = Uint8Array.from(buffer).buffer;
       const decoded = decodeGif(gifSource);
-      if (decoded.width !== metadata.width || decoded.height !== metadata.height || decoded.frames.length < 1) {
+      if (decoded.width !== metadata.width || decoded.height !== metadata.height
+        || decoded.frames.length !== metadata.frameCount) {
         throw new Error("decoded dimensions or frame count are invalid");
       }
-      for (let frame = 0; frame < decoded.frames.length; frame++) decodeGifFrame(gifSource, frame, decoded);
+      for (let frame = 0; frame < decoded.frames.length; frame++) {
+        const expected = decoded.frames[frame]!;
+        const local = decodeGifFrame(gifSource, decoded, frame);
+        if (local.width !== expected.width || local.height !== expected.height
+          || local.data.byteLength !== expected.width * expected.height * 4) {
+          throw new Error(`decoded frame ${frame} has invalid dimensions or byte length`);
+        }
+      }
     } catch (error) {
       throw new Error(`GIF decode failed: ${error instanceof Error ? error.message : String(error)}`);
     }
-    return metadata;
+    return { type: metadata.type, width: metadata.width, height: metadata.height };
   }
   if (buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP") {
     throw new Error("WebP is not supported by the installed Figma Plugin API contract");

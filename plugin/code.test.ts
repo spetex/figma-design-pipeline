@@ -1556,6 +1556,61 @@ describe("same-batch inspect action", () => {
     expect(fallbackResults.at(-1)).toEqual({ type: "rollback", status: "applied" });
     expect(pluginResult).toMatchObject({ rollbackApplied: true, nodeIdMap: {}, summary: { applied: 2, failed: 1, mutations: 1 } });
   });
+
+  it("recursively redacts a transient parent ID from move snapshots in both paths", async () => {
+    const rollbackActions = [
+      { type: "create_frame", parentId: "parent", name: "Outer", as: "outer" },
+      { type: "create_frame", parentId: "$outer", name: "Child", as: "child" },
+      { type: "move", nodeId: "$child", targetParentId: "parent" },
+      { type: "rename", nodeId: "missing", name: "Fails" },
+    ];
+    const configureTransientFrames = (environment: ReturnType<typeof createInspectableBehavioralFigma>) => {
+      let nextId = 0;
+      environment.figma.createFrame = () => {
+        const node: Record<string, unknown> = {
+          id: `transient-${nextId++}`, type: "FRAME", name: "", fills: [], x: 0, y: 0,
+          width: 100, height: 100, children: [], parent: undefined,
+          resize(width: number, height: number) { node.width = width; node.height = height; },
+          appendChild(child: Record<string, unknown>) {
+            (node.children as Record<string, unknown>[]).push(child);
+            child.parent = node;
+          },
+        };
+        environment.nodes.set(node.id as string, node);
+        return node;
+      };
+    };
+
+    const fallback = createInspectableBehavioralFigma();
+    configureTransientFrames(fallback);
+    const generated = await handleExecute(null, { actions: rollbackActions, rollbackOnError: true });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<Array<Record<string, unknown>>>;
+    const fallbackResults = await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+
+    const connected = createInspectableBehavioralFigma();
+    configureTransientFrames(connected);
+    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, rollbackActions);
+
+    for (const results of [fallbackResults, pluginResult.results]) {
+      expect(results[2]).toMatchObject({
+        type: "move",
+        before: { parentId: "[rolled back node]" },
+        rolledBack: true,
+      });
+      expect(results[2]).not.toHaveProperty("after");
+      expect(results[3]).toMatchObject({ status: "failed", error: expect.any(String) });
+      expect(JSON.stringify(results)).not.toContain("transient-0");
+      expect(JSON.stringify(results)).not.toContain("transient-1");
+    }
+    expect(fallbackResults.at(-1)).toEqual({ type: "rollback", status: "applied" });
+    expect(pluginResult).toMatchObject({
+      rollbackApplied: true,
+      nodeIdMap: {},
+      summary: { total: 4, applied: 3, failed: 1, skipped: 0, mutations: 3 },
+    });
+  });
 });
 
 describe("deterministic write resolvers", () => {

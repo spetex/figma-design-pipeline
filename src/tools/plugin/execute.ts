@@ -156,6 +156,7 @@ function generateFallbackJs(
   lines.push("  results.push(result);");
   lines.push("};");
   lines.push("const markDocumentWrite = () => { documentWrites++; };");
+  lines.push("const redactTransientIds = (value, transientIds) => { if (typeof value === 'string') { let redacted = value; for (const id of transientIds) redacted = redacted.split(id).join('[rolled back node]'); return redacted; } if (Array.isArray(value)) return value.map(item => redactTransientIds(item, transientIds)); if (!value || typeof value !== 'object') return value; return Object.fromEntries(Object.entries(value).map(([key, item]) => [redactTransientIds(key, transientIds), redactTransientIds(item, transientIds)])); };");
   if (needsInspection) {
   lines.push(`const MAX_BATCH_INSPECTION_BYTES = ${MAX_PLUGIN_BATCH_INSPECTION_BYTES};`);
   lines.push(`const MAX_INSPECT_SCALAR_BYTES = ${MAX_PLUGIN_READ_SCALAR_BYTES};`);
@@ -279,7 +280,7 @@ function generateFallbackJs(
         lines.push(`{ ${g(nid)}.name = ${j(a.name)}; markDocumentWrite(); ${r("rename")} }`);
         break;
       case "move":
-        lines.push(`{ const n = requireNode(${j(nid)}); const p = requireContainer(${j(a.targetParentId)}); ${a.insertIndex !== undefined ? `p.insertChild(${a.insertIndex}, n)` : "p.appendChild(n)"}; markDocumentWrite(); ${r("move")} }`);
+        lines.push(`{ const n = requireNode(${j(nid)}); const p = requireContainer(${j(a.targetParentId)}); const beforeParentId = n.parent && n.parent.id; ${a.insertIndex !== undefined ? `p.insertChild(${a.insertIndex}, n)` : "p.appendChild(n)"}; markDocumentWrite(); results.push({ type: "move", nodeId: n.id, before: { parentId: beforeParentId }, after: { parentId: p.id } }); }`);
         break;
       case "create_frame":
         lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const f = figma.createFrame(); f.fills = []; markDocumentWrite(); f.name = ${j(a.name)}; f.resize(${a.width}, ${a.height}); parent.appendChild(f); f.x = ${a.x}; f.y = ${a.y}; ${cr("create_frame", "f.id")} }`);
@@ -461,16 +462,18 @@ function generateFallbackJs(
   lines.push("if (executionOptions.rollbackOnError && failed && documentWrites > 0) {");
   lines.push("  figma.triggerUndo();");
   lines.push("  const transientNodeIds = new Set(createdNodeIds.values());");
-  lines.push("  for (const result of results) {");
+  lines.push("  for (let index = 0; index < results.length; index++) {");
+  lines.push("    const result = results[index];");
   if (needsInspection) lines.push("    if (result.inspection) result.inspection = inspectInvalidateRollback(result.inspection);");
-  lines.push("    if (result.error) for (const nodeId of transientNodeIds) result.error = result.error.split(nodeId).join('[rolled back node]');");
   lines.push("    if (result.status !== 'failed' && result.status !== 'skipped') {");
   lines.push("      result.rolledBack = true;");
   lines.push("      delete result.after;");
   lines.push("      delete result.newNodeId;");
   lines.push("      delete result.nodeId;");
   lines.push("    }");
+  lines.push("    results[index] = redactTransientIds(result, transientNodeIds);");
   lines.push("  }");
+  lines.push("  createdNodeIds.clear();");
   lines.push("  results.push({ type: \"rollback\", status: \"applied\" });");
   lines.push("} else if (executionOptions.rollbackOnError && documentWrites > 0) {");
   lines.push("  figma.commitUndo();");

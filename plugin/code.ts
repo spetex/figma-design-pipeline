@@ -1032,6 +1032,20 @@ type ActionResult = {
   error?: string;
 };
 
+function redactTransientIds(value: unknown, transientIds: ReadonlySet<string>): unknown {
+  if (typeof value === "string") {
+    let redacted = value;
+    for (const id of transientIds) redacted = redacted.split(id).join("[rolled back node]");
+    return redacted;
+  }
+  if (Array.isArray(value)) return value.map(item => redactTransientIds(item, transientIds));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+    redactTransientIds(key, transientIds) as string,
+    redactTransientIds(item, transientIds),
+  ]));
+}
+
 async function executeAction(
   action: Record<string, unknown>,
   markDocumentWrite: () => void,
@@ -2093,18 +2107,18 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
     figma.triggerUndo();
     rollbackApplied = true;
     const transientNodeIds = new Set(references.values());
-    for (const result of results) {
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index]!;
       if (result.inspection) result.inspection = invalidateInspectionAfterRollback(result.inspection);
-      if (result.error) {
-        for (const nodeId of transientNodeIds) result.error = result.error.split(nodeId).join("[rolled back node]");
-      }
       if (result.status === "applied") {
         result.rolledBack = true;
         delete result.after;
         delete result.newNodeId;
         delete result.nodeId;
       }
+      results[index] = redactTransientIds(result, transientNodeIds) as ActionResult;
     }
+    references.clear();
   } else if (batch.rollbackOnError && documentWrites > 0) {
     // Close the successful batch as its own undo unit.
     figma.commitUndo();
