@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type Server } from "node:http";
 import { randomUUID } from "node:crypto";
-import type { PluginReadRequest, PluginReadResponse } from "../shared/plugin-read.js";
+import type { PluginBatchInspection, PluginReadRequest, PluginReadResponse } from "../shared/plugin-read.js";
 
 export const DEFAULT_BRIDGE_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_BRIDGE_MAX_CHUNKED_RESULT_BYTES = 64 * 1024 * 1024;
@@ -63,10 +63,12 @@ export interface BatchResult {
     newNodeId?: string;
     before?: Record<string, unknown>;
     after?: Record<string, unknown>;
+    inspection?: PluginBatchInspection;
     error?: string;
   }>;
   nodeIdMap: Record<string, string>;
-  summary: { total: number; applied: number; failed: number; skipped: number };
+  summary: { total: number; applied: number; failed: number; skipped: number; mutations?: number };
+  rollbackApplied?: boolean;
   error?: string;
 }
 
@@ -89,6 +91,9 @@ export class BridgeServer {
   private chunkedResults = new Map<string, ChunkedBatchResult>();
   private pendingReads = new Map<string, PendingRead>();
   private chunkedReadResults = new Map<string, ChunkedBatchResult>();
+  private batchQueueTail: Promise<void> = Promise.resolve();
+  private queuedBatches = 0;
+  private connectionGeneration = 0;
   private pluginInfo: { pluginVersion?: string; pageName?: string; documentName?: string; fileKey?: string } = {};
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private lastHandshakeAt: string | null = null;
@@ -150,10 +155,12 @@ export class BridgeServer {
       wss.on("connection", (ws) => {
         // Replace existing connection
         if (this.plugin) {
+          this.connectionGeneration++;
           this.rejectAllPending("Plugin connection replaced");
           try { this.plugin.close(); } catch { /* ignore */ }
         }
         this.plugin = ws;
+        this.connectionGeneration++;
         console.error(`[bridge] Plugin connected on port ${port}`);
         this.startPingLoop();
 
@@ -173,6 +180,7 @@ export class BridgeServer {
         ws.on("close", () => {
           if (this.plugin === ws) {
             this.plugin = null;
+            this.connectionGeneration++;
             this.pluginInfo = {};
             this.lastHandshakeAt = null;
             this.lastPongAt = null;
@@ -496,10 +504,30 @@ export class BridgeServer {
   }
 
   async execute(batch: Omit<Batch, "type" | "batchId">, timeoutMs = 30000): Promise<BatchResult> {
-    if (!this.plugin || this.plugin.readyState !== WebSocket.OPEN) {
+    const plugin = this.plugin;
+    const generation = this.connectionGeneration;
+    if (!plugin || plugin.readyState !== WebSocket.OPEN) {
       throw new Error("Plugin not connected. Open the SPFR Design Pipeline plugin in Figma.");
     }
 
+    this.queuedBatches++;
+    const execution = this.batchQueueTail.then(async () => {
+      this.queuedBatches--;
+      if (this.plugin !== plugin || this.connectionGeneration !== generation || plugin.readyState !== WebSocket.OPEN) {
+        throw new Error("Plugin disconnected or was replaced before queued batch execution");
+      }
+      return this.executeNow(plugin, batch, timeoutMs);
+    });
+    // Keep the queue tail fulfilled so one rejection never poisons later work.
+    this.batchQueueTail = execution.then(() => undefined, () => undefined);
+    return execution;
+  }
+
+  private executeNow(
+    plugin: WebSocket,
+    batch: Omit<Batch, "type" | "batchId">,
+    timeoutMs: number,
+  ): Promise<BatchResult> {
     const batchId = randomUUID();
     const fullBatch: Batch = { type: "batch", batchId, ...batch };
 
@@ -511,7 +539,11 @@ export class BridgeServer {
       }, timeoutMs);
 
       this.pending.set(batchId, { resolve, reject, timer });
-      this.plugin!.send(JSON.stringify(fullBatch));
+      try {
+        plugin.send(JSON.stringify(fullBatch));
+      } catch (err) {
+        this.rejectPending(batchId, err instanceof Error ? err.message : String(err));
+      }
     });
   }
 
@@ -576,15 +608,18 @@ export class BridgeServer {
       ...this.pluginInfo,
       lastHandshakeAt: this.lastHandshakeAt ?? undefined,
       lastPongAt: this.lastPongAt ?? undefined,
-      pendingBatches: this.pending.size,
+      pendingBatches: this.pending.size + this.queuedBatches,
       pendingReads: this.pendingReads.size,
     };
   }
 
   async stop(): Promise<void> {
+    const plugin = this.plugin;
+    this.plugin = null;
+    this.connectionGeneration++;
     this.rejectAllPending("Bridge shutting down");
     this.stopPingLoop();
-    if (this.plugin) { try { this.plugin.close(); } catch { /* ignore */ } }
+    if (plugin) { try { plugin.close(); } catch { /* ignore */ } }
     if (this.wss) this.wss.close();
     if (this.httpServer) {
       await new Promise<void>((resolve) => this.httpServer!.close(() => resolve()));

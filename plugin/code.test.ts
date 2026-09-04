@@ -12,6 +12,7 @@ type PluginFigma = {
   ui: { onmessage?: (message: { type: string; data?: unknown }) => Promise<void>; postMessage: ReturnType<typeof vi.fn> };
   on: ReturnType<typeof vi.fn>;
   getNodeByIdAsync: (id: string) => Promise<unknown>;
+  commitUndo: ReturnType<typeof vi.fn>;
   triggerUndo: ReturnType<typeof vi.fn>;
   loadAllPagesAsync: ReturnType<typeof vi.fn>;
   loadFontAsync?: (font: { family: string; style: string }) => Promise<void>;
@@ -19,12 +20,12 @@ type PluginFigma = {
   createText?: ReturnType<typeof vi.fn>;
 };
 
-function batch(actions: Array<Record<string, unknown>>, preloadFonts = false) {
+function batch(actions: Array<Record<string, unknown>>, preloadFonts = false, batchId = "test-batch") {
   const compiled = compileBatch(actions.map((action) => actionSchema.parse(action)), {
     rollbackOnError: true,
   });
   return {
-    batchId: "test-batch",
+    batchId,
     ...compiled,
     requiredFonts: preloadFonts ? compiled.requiredFonts : [],
   };
@@ -64,6 +65,7 @@ function baseFigma(getNodeByIdAsync: PluginFigma["getNodeByIdAsync"]): PluginFig
     ui: { postMessage: vi.fn() },
     on: vi.fn(),
     getNodeByIdAsync,
+    commitUndo: vi.fn(),
     triggerUndo: vi.fn(),
     loadAllPagesAsync: vi.fn().mockResolvedValue(undefined),
   };
@@ -480,6 +482,48 @@ describe("connected plugin batch execution", () => {
     expect(operations.slice(0, 2)).toEqual(["createFrame", "fills"]);
   });
 
+  it("defines a variant axis on an existing component set", async () => {
+    const addComponentProperty = vi.fn().mockReturnValue("State#1");
+    const figma = baseFigma(async () => ({ id: "set", type: "COMPONENT_SET", addComponentProperty }));
+
+    const result = await runPlugin(figma, [{
+      type: "define_component_property", nodeId: "set", propertyName: "State", propertyType: "VARIANT", defaultValue: "Default",
+    }]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(addComponentProperty).toHaveBeenCalledWith("State", "VARIANT", "Default");
+  });
+
+  it.each(["LINEAR", "RADIAL", "ANGULAR"])("serializes %s gradients without leaking mixed symbols", async (gradientType) => {
+    const node = { id: "node", type: "RECTANGLE", parent: { id: "parent" }, fills: Symbol("mixed") };
+    const figma = baseFigma(async () => node);
+    const result = await runPlugin(figma, [{
+      type: "set_gradient_fill", nodeId: "node", gradientType,
+      stops: [
+        { position: 0, color: { r: 0, g: 0, b: 0, a: 1 } },
+        { position: 1, color: { r: 1, g: 1, b: 1, a: 1 } },
+      ],
+      angle: 30,
+    }]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(result.results[0].before.fills).toBe("mixed");
+    expect(() => JSON.stringify(result)).not.toThrow();
+  });
+
+  it("serializes mixed per-corner state and applies each explicit radius", async () => {
+    const node = {
+      id: "node", type: "RECTANGLE", parent: { id: "parent" }, cornerRadius: Symbol("mixed"),
+      topLeftRadius: 0, topRightRadius: 0, bottomRightRadius: 0, bottomLeftRadius: 0,
+    };
+    const figma = baseFigma(async () => node);
+    const result = await runPlugin(figma, [{ type: "set_corner_radius", nodeId: "node", radii: [1, 2, 3, 4] }]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(result.results[0].before.cornerRadius).toBe("mixed");
+    expect(node).toMatchObject({ topLeftRadius: 1, topRightRadius: 2, bottomRightRadius: 3, bottomLeftRadius: 4 });
+  });
+
   it("rejects delete_node for a page before calling remove", async () => {
     const remove = vi.fn();
     const figma = baseFigma(async () => ({ id: "page", type: "PAGE", parent: { id: "document" }, remove }));
@@ -527,6 +571,219 @@ describe("connected plugin batch execution", () => {
     expect(result.summary).toMatchObject({ applied: 0, failed: 1 });
     expect(result.rollbackApplied).toBe(true);
     expect(figma.triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves preexisting IDs and removes transient IDs from connected rollback results", async () => {
+    const parent = { id: "parent", type: "PAGE", appendChild: vi.fn() };
+    const existingParent = { id: "existing-parent" };
+    const existing: Record<string, unknown> = {
+      id: "existing-1", type: "INSTANCE", name: "$transient", parent: existingParent,
+      getMainComponentAsync: vi.fn(async () => ({ componentPropertyDefinitions: {} })),
+      setProperties: vi.fn(),
+    };
+    const transient: Record<string, unknown> = {
+      id: "transient-1", type: "FRAME", name: "", fills: [], x: 0, y: 0,
+      resize: vi.fn(),
+      appendChild: vi.fn((child: Record<string, unknown>) => { child.parent = transient; }),
+    };
+    const figma = baseFigma(async (id) => {
+      if (id === "parent") return parent;
+      if (id === "existing-1") return existing;
+      if (id === "transient-1") return transient;
+      return null;
+    });
+    figma.createFrame = vi.fn(() => transient);
+
+    const result = await runPlugin(figma, [
+      { type: "create_frame", parentId: "parent", name: "Transient", as: "transient" },
+      { type: "rename", nodeId: "$transient", name: "Renamed transient" },
+      { type: "rename", nodeId: "existing-1", name: "Renamed" },
+      { type: "move", nodeId: "existing-1", targetParentId: "$transient" },
+      { type: "set_component_properties", nodeId: "existing-1", properties: { "$transient": "Fails" } },
+    ]);
+
+    expect(result.results[0]).toMatchObject({ type: "create_frame", rolledBack: true });
+    expect(result.results[0]).not.toHaveProperty("nodeId");
+    expect(result.results[0]).not.toHaveProperty("newNodeId");
+    expect(result.results[1]).toMatchObject({
+      type: "rename",
+      before: { name: "Transient" },
+      rolledBack: true,
+    });
+    expect(result.results[1]).not.toHaveProperty("nodeId");
+    expect(result.results[2]).toMatchObject({
+      type: "rename",
+      nodeId: "existing-1",
+      before: { name: "$transient" },
+      rolledBack: true,
+    });
+    expect(result.results[3]).toMatchObject({
+      type: "move",
+      nodeId: "existing-1",
+      before: { parentId: "existing-parent" },
+      rolledBack: true,
+    });
+    expect(result.results[4]).toMatchObject({
+      type: "set_component_properties", status: "failed", error: "Component property not found: $transient",
+    });
+    expect(JSON.stringify(result)).not.toContain("transient-1");
+  });
+
+  it("isolates a failed second batch from a successful first batch", async () => {
+    let committedName = "Before";
+    let currentName = "Before";
+    const node = {
+      id: "node", type: "RECTANGLE", parent: { id: "parent" },
+      get name() { return currentName; },
+      set name(value: string) { currentName = value; },
+    };
+    const figma = baseFigma(async (id) => id === "node" ? node : null);
+    figma.commitUndo.mockImplementation(() => { committedName = currentName; });
+    figma.triggerUndo.mockImplementation(() => { currentName = committedName; });
+
+    vi.resetModules();
+    vi.stubGlobal("figma", figma);
+    vi.stubGlobal("__html__", "");
+    await import("./code.js");
+    await figma.ui.onmessage!({ type: "bridge_message", data: { type: "batch", ...batch([
+      { type: "rename", nodeId: "node", name: "Successful" },
+    ]) } });
+    await figma.ui.onmessage!({ type: "bridge_message", data: { type: "batch", ...batch([
+      { type: "rename", nodeId: "node", name: "Transient" },
+      { type: "rename", nodeId: "missing", name: "Fails" },
+    ]) } });
+
+    expect(currentName).toBe("Successful");
+    expect(figma.commitUndo).toHaveBeenCalledTimes(3);
+    expect(figma.triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("serializes overlapping rollback batches with batch-local aliases", async () => {
+    type MutableNode = { id: string; type: string; name: string; fills: unknown[]; x: number; y: number; resize: (width: number, height: number) => void };
+    const nodes = new Map<string, MutableNode>();
+    let nextNode = 0;
+    let committed: Array<[string, string]> = [];
+    let releaseFirstLookup!: () => void;
+    const firstLookup = new Promise<void>((resolve) => { releaseFirstLookup = resolve; });
+    let delayed = false;
+    const parent = {
+      id: "parent",
+      type: "PAGE",
+      appendChild: (node: MutableNode) => { nodes.set(node.id, node); },
+    };
+    const figma = baseFigma(async (id) => {
+      if (!delayed) {
+        delayed = true;
+        await firstLookup;
+      }
+      return id === "parent" ? parent : nodes.get(id) ?? null;
+    });
+    figma.createFrame = vi.fn(() => ({
+      id: `created-${nextNode++}`,
+      type: "FRAME",
+      name: "",
+      fills: [],
+      x: 0,
+      y: 0,
+      resize: vi.fn(),
+    }));
+    figma.commitUndo.mockImplementation(() => {
+      committed = [...nodes].map(([id, node]) => [id, node.name]);
+    });
+    figma.triggerUndo.mockImplementation(() => {
+      const retained = new Set(committed.map(([id]) => id));
+      for (const id of nodes.keys()) if (!retained.has(id)) nodes.delete(id);
+      for (const [id, name] of committed) nodes.get(id)!.name = name;
+    });
+
+    vi.resetModules();
+    vi.stubGlobal("figma", figma);
+    vi.stubGlobal("__html__", "");
+    await import("./code.js");
+    const first = figma.ui.onmessage!({ type: "bridge_message", data: { type: "batch", ...batch([
+      { type: "create_frame", parentId: "parent", name: "Prior", as: "item" },
+    ], false, "first") } });
+    const failing = figma.ui.onmessage!({ type: "bridge_message", data: { type: "batch", ...batch([
+      { type: "create_frame", parentId: "parent", name: "Transient", as: "item" },
+      { type: "rename", nodeId: "missing", name: "Fails" },
+    ], false, "failing") } });
+    const later = figma.ui.onmessage!({ type: "bridge_message", data: { type: "batch", ...batch([
+      { type: "create_frame", parentId: "parent", name: "Later", as: "item" },
+    ], false, "later") } });
+
+    await Promise.resolve();
+    expect(figma.ui.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ type: "batch_result" }),
+    }));
+    releaseFirstLookup();
+    await Promise.all([first, failing, later]);
+
+    const responses = figma.ui.postMessage.mock.calls
+      .map(([message]) => message.data)
+      .filter((data) => data?.type === "batch_result");
+    expect(responses.map((response) => response.batchId)).toEqual(["first", "failing", "later"]);
+    expect(responses[0].nodeIdMap.$item).toBe("created-0");
+    expect(responses[1]).toMatchObject({ rollbackApplied: true, nodeIdMap: {} });
+    expect(JSON.stringify(responses[1])).not.toContain("created-1");
+    expect(responses[2].nodeIdMap.$item).toBe("created-2");
+    expect([...nodes].map(([id, node]) => [id, node.name])).toEqual([
+      ["created-0", "Prior"],
+      ["created-2", "Later"],
+    ]);
+    expect(figma.triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads a name-resolved text style font before applying it", async () => {
+    const loaded = new Set<string>();
+    const setTextStyleIdAsync = vi.fn(async () => {
+      if (!loaded.has("Style Family|Regular")) throw new Error("style font was not loaded");
+    });
+    const figma = baseFigma(async () => ({ id: "text", type: "TEXT", parent: { id: "parent" }, setTextStyleIdAsync }));
+    figma.loadFontAsync = async (font) => { loaded.add(`${font.family}|${font.style}`); };
+    (figma as unknown as { getLocalTextStylesAsync: () => Promise<unknown[]> }).getLocalTextStylesAsync = async () => [{
+      id: "style", type: "TEXT", name: "Typography/Body", fontName: { family: "Style Family", style: "Regular" },
+    }];
+
+    const result = await runPlugin(figma, [{ type: "apply_style", nodeId: "text", styleName: "Typography/Body", property: "text" }]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(setTextStyleIdAsync).toHaveBeenCalledWith("style");
+  });
+
+  it("applies a text style before explicit create_text typography overrides", async () => {
+    const events: string[] = [];
+    const loaded = new Set<string>();
+    let currentFont = { family: "Inter", style: "Regular" };
+    const text = {
+      id: "created", type: "TEXT", parent: { id: "parent" }, name: "", textAutoResize: "HEIGHT",
+      get fontName() { return currentFont; },
+      set fontName(font: { family: string; style: string }) {
+        if (!loaded.has(`${font.family}|${font.style}`)) throw new Error("override font was not loaded");
+        currentFont = font;
+        events.push(`font:${font.family}|${font.style}`);
+      },
+      set characters(value: string) { events.push(`characters:${value}`); },
+      async setTextStyleIdAsync() {
+        if (!loaded.has("Style Family|Regular")) throw new Error("style font was not loaded");
+        currentFont = { family: "Style Family", style: "Regular" };
+        events.push("style");
+      },
+    };
+    const figma = baseFigma(async () => ({ id: "parent", appendChild: vi.fn() }));
+    figma.loadFontAsync = async (font) => { loaded.add(`${font.family}|${font.style}`); events.push(`load:${font.family}|${font.style}`); };
+    figma.createText = vi.fn(() => text);
+    (figma as unknown as { getLocalTextStylesAsync: () => Promise<unknown[]> }).getLocalTextStylesAsync = async () => [{
+      id: "style", type: "TEXT", name: "Typography/Body", fontName: { family: "Style Family", style: "Regular" },
+    }];
+
+    const result = await runPlugin(figma, [{
+      type: "create_text", parentId: "parent", characters: "Hello", textStyleName: "Typography/Body", fontWeight: 700,
+    }]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(events).toEqual([
+      "load:Style Family|Regular", "load:Style Family|Bold", "style", "font:Style Family|Bold", "characters:Hello",
+    ]);
   });
 
   it.each([
@@ -597,15 +854,17 @@ type ParityCase = {
 
 const PAINT = { type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3, a: 0.4 } };
 const EFFECT = { type: "DROP_SHADOW", visible: true, radius: 4, blendMode: "NORMAL", color: { r: 0, g: 0, b: 0, a: 0.5 }, offset: { x: 1, y: 2 } };
+const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 const BEHAVIORAL_PARITY_CASES: ParityCase[] = [
+  { type: "inspect", action: { type: "inspect", nodeId: "node", depth: 0, limit: 10, scanLimit: 10 } },
   { type: "rename", action: { type: "rename", nodeId: "node", name: "Renamed" } },
   { type: "move", action: { type: "move", nodeId: "node", targetParentId: "parent", insertIndex: 0 } },
-  { type: "create_text", action: { type: "create_text", parentId: "parent", characters: "Text", name: "Title", fontFamily: "Inter", fontWeight: 600, fontSize: 16, lineHeight: 20, letterSpacing: 1, fills: [PAINT], textCase: "UPPER", textAlignHorizontal: "CENTER", textAutoResize: "TRUNCATE", layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG", opacity: 0.5 } },
+  { type: "create_text", action: { type: "create_text", parentId: "parent", characters: "Text", name: "Title", fontFamily: "Inter", fontWeight: 600, fontSize: 16, lineHeight: 20, letterSpacing: 1, fills: [PAINT], textCase: "UPPER", textAlignHorizontal: "CENTER", textAutoResize: "TRUNCATE", layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG", opacity: 0.5, textTruncation: "ENDING", maxLines: 2 } },
   { type: "create_frame", action: { type: "create_frame", name: "Frame", parentId: "parent", x: 1, y: 2, width: 100, height: 50 } },
   { type: "delete_node", action: { type: "delete_node", nodeId: "node", confirmed: true } },
-  { type: "set_layout_mode", action: { type: "set_layout_mode", nodeId: "node", mode: "HORIZONTAL", primaryAxisSizingMode: "AUTO", counterAxisSizingMode: "FIXED" } },
-  { type: "set_spacing", action: { type: "set_spacing", nodeId: "node", itemSpacing: 8, paddingTop: 1, paddingRight: 2, paddingBottom: 3, paddingLeft: 4 } },
+  { type: "set_layout_mode", action: { type: "set_layout_mode", nodeId: "node", mode: "HORIZONTAL", primaryAxisSizingMode: "AUTO", counterAxisSizingMode: "FIXED", layoutWrap: "WRAP" } },
+  { type: "set_spacing", action: { type: "set_spacing", nodeId: "node", itemSpacing: 8, paddingTop: 1, paddingRight: 2, paddingBottom: 3, paddingLeft: 4, counterAxisSpacing: 12 } },
   { type: "resize", action: { type: "resize", nodeId: "node", width: 100, height: 50 } },
   { type: "create_component_from_node", action: { type: "create_component_from_node", nodeId: "source", name: "Component" } },
   { type: "create_component_set", action: { type: "create_component_set", componentIds: ["component"], name: "Variants" } },
@@ -621,9 +880,9 @@ const BEHAVIORAL_PARITY_CASES: ParityCase[] = [
   { type: "set_visible", action: { type: "set_visible", nodeId: "node", visible: false } },
   { type: "set_opacity", action: { type: "set_opacity", nodeId: "node", opacity: 0.5 } },
   { type: "set_strokes", action: { type: "set_strokes", nodeId: "node", strokes: [PAINT], strokeWeight: 2 } },
-  { type: "set_effects", action: { type: "set_effects", nodeId: "node", effects: [EFFECT] } },
+  { type: "set_effects", action: { type: "set_effects", nodeId: "node", effects: [EFFECT, { type: "BACKGROUND_BLUR", visible: true, radius: 12 }] } },
   { type: "set_alignment", action: { type: "set_alignment", nodeId: "node", primaryAxisAlignItems: "CENTER", counterAxisAlignItems: "BASELINE" } },
-  { type: "duplicate_node", action: { type: "duplicate_node", nodeId: "node" } },
+  { type: "duplicate_node", action: { type: "duplicate_node", nodeId: "node", targetParentId: "parent", insertIndex: 0, x: 4, y: 5 } },
   { type: "set_component_properties", action: { type: "set_component_properties", nodeId: "instance", properties: { Variant: "Primary", Disabled: true } } },
   { type: "create_paint_style", action: { type: "create_paint_style", name: "Color/Primary", paints: [PAINT] } },
   { type: "create_text_style", action: { type: "create_text_style", name: "Text/Body", fontFamily: "Inter", fontWeight: 500, fontSize: 16, lineHeight: 20, letterSpacing: 1 } },
@@ -634,14 +893,25 @@ const BEHAVIORAL_PARITY_CASES: ParityCase[] = [
   { type: "create_page", action: { type: "create_page", name: "Page" } },
   { type: "switch_page", action: { type: "switch_page", pageId: "page" } },
   { type: "set_gradient_fill", action: { type: "set_gradient_fill", nodeId: "node", gradientType: "LINEAR", stops: [{ position: 0, color: { r: 0, g: 0, b: 0, a: 1 } }, { position: 1, color: { r: 1, g: 1, b: 1, a: 1 } }], angle: 45 } },
-  { type: "set_image_fill", action: { type: "set_image_fill", nodeId: "node", imageBase64: "AQID", scaleMode: "CROP" } },
+  { type: "set_image_fill", action: { type: "set_image_fill", nodeId: "node", imageBase64: PNG_BASE64, scaleMode: "CROP" } },
   { type: "set_text_properties", action: { type: "set_text_properties", nodeId: "text", textAlignHorizontal: "CENTER", textAlignVertical: "BOTTOM", paragraphSpacing: 8, textCase: "TITLE", textDecoration: "UNDERLINE", textAutoResize: "HEIGHT" } },
-  { type: "apply_style", action: { type: "apply_style", nodeId: "node", styleId: "style", property: "effect" } },
+  { type: "apply_style", action: { type: "apply_style", nodeId: "node", styleName: "style", property: "effect" } },
   { type: "set_description", action: { type: "set_description", nodeId: "component", description: "Description" } },
   { type: "define_component_property", action: { type: "define_component_property", nodeId: "component", propertyName: "Label", propertyType: "TEXT", defaultValue: "Default" } },
   { type: "create_variable_collection", action: { type: "create_variable_collection", name: "Tokens", modes: ["Light", "Dark"] } },
   { type: "create_variable", action: { type: "create_variable", collectionId: "collection", name: "spacing/md", resolvedType: "FLOAT", value: 8, scopes: ["ALL_SCOPES"] } },
-  { type: "bind_variable", action: { type: "bind_variable", nodeId: "node", property: "fills", variableId: "variable", paintIndex: 0 } },
+  { type: "bind_variable", action: { type: "bind_variable", nodeId: "node", property: "topLeftRadius", variableName: "spacing/md", collectionName: "Collection", resolvedType: "FLOAT" } },
+  { type: "set_component_property_reference", action: { type: "set_component_property_reference", nodeId: "component-child", property: "characters", componentPropertyName: "Label" } },
+  { type: "set_instance_text", action: { type: "set_instance_text", instanceId: "instance", childPath: ["Label"], characters: "Nested" } },
+  { type: "set_instance_visibility", action: { type: "set_instance_visibility", instanceId: "instance", childPath: ["Icon"], visible: false } },
+  { type: "swap_nested_instance", action: { type: "swap_nested_instance", instanceId: "instance", childPath: ["Icon"], newComponentId: "component" } },
+  { type: "set_variable_value", action: { type: "set_variable_value", variableName: "spacing/md", collectionName: "Collection", resolvedType: "FLOAT", modeName: "Default", value: 12 } },
+  { type: "update_style", action: { type: "update_style", styleType: "TEXT", styleId: "text-target", copyFromStyleName: "Text/Source", name: "Text/Updated", fontFamily: "Inter", fontWeight: 700, fontSize: 18, lineHeight: 24, letterSpacing: 0.5 } },
+  { type: "create_from_svg", action: { type: "create_from_svg", parentId: "parent", svg: "<svg><path d=\"M0 0h1v1z\"/></svg>", name: "Glyph", x: 3, y: 4 } },
+  { type: "create_section", action: { type: "create_section", parentId: "page", name: "Flow", x: 1, y: 2, width: 300, height: 200 } },
+  { type: "resize_section", action: { type: "resize_section", sectionId: "section", width: 400, height: 300 } },
+  { type: "move_to_section", action: { type: "move_to_section", nodeId: "node", sectionId: "section", insertIndex: 0 } },
+  { type: "set_reaction", action: { type: "set_reaction", nodeId: "node", trigger: "ON_CLICK", destinationId: "destination", navigation: "NAVIGATE", mode: "append" } },
 ];
 
 function createBehavioralFigma() {
@@ -691,13 +961,38 @@ function createBehavioralFigma() {
       collection.modes.push({ modeId: `mode-${collection.modes.length}`, name });
     },
   };
-  const variable = { id: "variable" };
+  const variable = {
+    id: "variable",
+    name: "spacing/md",
+    resolvedType: "FLOAT",
+    variableCollectionId: "collection",
+    setValueForMode: (modeId: string, value: unknown) => recordCall("variable", "setValueForMode", modeId, value),
+  };
 
-  for (const [id, type] of [["node", "RECTANGLE"], ["text", "TEXT"], ["source", "RECTANGLE"], ["component", "COMPONENT"], ["instance", "INSTANCE"]] as const) {
+  for (const [id, type] of [["node", "RECTANGLE"], ["text", "TEXT"], ["source", "RECTANGLE"], ["component", "COMPONENT"], ["instance", "INSTANCE"], ["section", "SECTION"], ["destination", "FRAME"], ["component-child", "TEXT"]] as const) {
     const node = makeParityNode(id, type);
     node.parent = parent;
     nodes.set(id, node);
   }
+  const component = nodes.get("component")!;
+  component.componentPropertyDefinitions = {
+    Variant: { type: "VARIANT", defaultValue: "Primary" },
+    "Disabled#1": { type: "BOOLEAN", defaultValue: false },
+    "Label#2": { type: "TEXT", defaultValue: "Label" },
+    "Icon#3": { type: "INSTANCE_SWAP", defaultValue: "component" },
+  };
+  const label = makeParityNode("instance-label", "TEXT");
+  label.name = "Label";
+  label.parent = nodes.get("instance");
+  const icon = makeParityNode("instance-icon", "INSTANCE");
+  icon.name = "Icon";
+  icon.parent = nodes.get("instance");
+  icon.getMainComponentAsync = async () => component;
+  nodes.set("instance-label", label);
+  nodes.set("instance-icon", icon);
+  nodes.get("instance")!.children = [label, icon];
+  nodes.get("instance")!.getMainComponentAsync = async () => component;
+  nodes.get("component-child")!.parent = component;
   nodes.set("parent", parent);
   nodes.set("page", page);
 
@@ -714,10 +1009,16 @@ function createBehavioralFigma() {
       height: 10,
       visible: true,
       opacity: 1,
+      topLeftRadius: 0,
+      topRightRadius: 0,
+      bottomRightRadius: 0,
+      bottomLeftRadius: 0,
       fills: [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }],
       strokes: [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }],
       effects: [],
-      layoutMode: "NONE",
+      layoutMode: "HORIZONTAL",
+      layoutWrap: "WRAP",
+      counterAxisSpacing: 0,
       primaryAxisSizingMode: "FIXED",
       counterAxisSizingMode: "FIXED",
       primaryAxisAlignItems: "MIN",
@@ -737,11 +1038,19 @@ function createBehavioralFigma() {
       fontName: { family: "Inter", style: "Regular" },
       characters: "Text",
       constraints: { horizontal: "MIN", vertical: "MIN" },
+      children: [] as Record<string, unknown>[],
+      componentPropertyReferences: null as Record<string, string> | null,
+      reactions: [] as unknown[],
       appendChild: (child: unknown) => recordCall(id, "appendChild", child),
       insertChild: (index: number, child: unknown) => recordCall(id, "insertChild", index, child),
       remove: () => recordCall(id, "remove"),
       resize: (width: number, height: number) => recordCall(id, "resize", width, height),
-      clone: () => { recordCall(id, "clone"); return makeParityNode("clone", "RECTANGLE"); },
+      clone: () => {
+        recordCall(id, "clone");
+        const clone = makeParityNode("clone", "RECTANGLE");
+        nodes.set("clone", clone);
+        return clone;
+      },
       createInstance: () => { recordCall(id, "createInstance"); return makeParityNode("created-instance", "INSTANCE"); },
       swapComponent: (component: unknown) => recordCall(id, "swapComponent", component),
       setProperties: (properties: unknown) => recordCall(id, "setProperties", properties),
@@ -753,6 +1062,10 @@ function createBehavioralFigma() {
       setStrokeStyleIdAsync: async (...args: unknown[]) => recordCall(id, "setStrokeStyleIdAsync", ...args),
       setTextStyleIdAsync: async (...args: unknown[]) => recordCall(id, "setTextStyleIdAsync", ...args),
       setEffectStyleIdAsync: async (...args: unknown[]) => recordCall(id, "setEffectStyleIdAsync", ...args),
+      setReactionsAsync: async (...args: unknown[]) => {
+        recordCall(id, "setReactionsAsync", ...args);
+        node.reactions = args[0] as unknown[];
+      },
     };
     nodeSnapshots.set(id, node);
     return new Proxy(node, {
@@ -764,7 +1077,19 @@ function createBehavioralFigma() {
     }) as Record<string, unknown>;
   }
 
+  const paintTarget = makeParityNode("paint-target", "PAINT");
+  paintTarget.paints = [];
+  const effectStyle = makeParityNode("style", "EFFECT");
+  const textTarget = makeParityNode("text-target", "TEXT");
+  const textSource = makeParityNode("text-source", "TEXT");
+  textSource.name = "Text/Source";
+  textSource.fontSize = 14;
+  textSource.lineHeight = { value: 20, unit: "PIXELS" };
+  textSource.letterSpacing = { value: 0, unit: "PIXELS" };
+  const styles = new Map([["paint-target", paintTarget], ["style", effectStyle], ["text-target", textTarget], ["text-source", textSource]]);
+
   const figma = {
+    editorType: "figma",
     currentPage: page,
     root: { name: "Document" },
     showUI: vi.fn(),
@@ -774,13 +1099,20 @@ function createBehavioralFigma() {
     getNodeById: (id: string) => nodes.get(id),
     getNodeByIdAsync: async (id: string) => nodes.get(id) ?? null,
     loadFontAsync: async (...args: unknown[]) => recordCall("figma", "loadFontAsync", ...args),
-    createFrame: () => { recordCall("figma", "createFrame"); return makeParityNode("frame", "FRAME"); },
+    createFrame: () => {
+      recordCall("figma", "createFrame");
+      const frame = makeParityNode("frame", "FRAME");
+      nodes.set("frame", frame);
+      return frame;
+    },
     createText: () => { recordCall("figma", "createText"); return makeParityNode("created-text", "TEXT"); },
     createComponentFromNode: (...args: unknown[]) => { recordCall("figma", "createComponentFromNode", ...args); return makeParityNode("created-component", "COMPONENT"); },
     combineAsVariants: (...args: unknown[]) => { recordCall("figma", "combineAsVariants", ...args); return makeParityNode("component-set", "COMPONENT_SET"); },
     createPaintStyle: () => { recordCall("figma", "createPaintStyle"); return makeParityNode("paint-style", "PAINT_STYLE"); },
     createTextStyle: () => { recordCall("figma", "createTextStyle"); return makeParityNode("text-style", "TEXT_STYLE"); },
     createEffectStyle: () => { recordCall("figma", "createEffectStyle"); return makeParityNode("effect-style", "EFFECT_STYLE"); },
+    createNodeFromSvg: (...args: unknown[]) => { recordCall("figma", "createNodeFromSvg", ...args); return makeParityNode("svg-node", "FRAME"); },
+    createSection: () => { recordCall("figma", "createSection"); return makeParityNode("created-section", "SECTION"); },
     createPage: () => {
       recordCall("figma", "createPage");
       const created = makeParityNode("created-page", "PAGE");
@@ -791,10 +1123,19 @@ function createBehavioralFigma() {
     createImage: (...args: unknown[]) => { recordCall("figma", "createImage", ...args); return { hash: "image" }; },
     base64Decode: (...args: unknown[]) => { recordCall("figma", "base64Decode", ...args); return new Uint8Array([1]); },
     base64Encode: (...args: unknown[]) => { recordCall("figma", "base64Encode", ...args); return "AQ=="; },
+    commitUndo: vi.fn(),
     triggerUndo: vi.fn(),
+    getStyleByIdAsync: async (id: string) => styles.get(id) ?? null,
+    getLocalPaintStylesAsync: async () => [...styles.values()].filter((style) => style.type === "PAINT"),
+    getLocalTextStylesAsync: async () => [...styles.values()].filter((style) => style.type === "TEXT"),
+    getLocalEffectStylesAsync: async () => [...styles.values()].filter((style) => style.type === "EFFECT"),
     variables: {
       getVariableById: () => variable,
       getVariableCollectionById: () => collection,
+      getVariableByIdAsync: async () => variable,
+      getVariableCollectionByIdAsync: async () => collection,
+      getLocalVariablesAsync: async () => [variable],
+      getLocalVariableCollectionsAsync: async () => [collection],
       setBoundVariableForPaint: (...args: unknown[]) => {
         recordCall("variables", "setBoundVariableForPaint", ...args);
         return { ...(args[0] as Record<string, unknown>), boundVariable: variable.id };
@@ -837,17 +1178,80 @@ function createBehavioralFigma() {
   };
 }
 
+function createInspectableBehavioralFigma() {
+  const environment = createBehavioralFigma();
+  environment.figma.loadAllPagesAsync = vi.fn().mockResolvedValue(undefined);
+  const parent = environment.nodes.get("parent")!;
+  parent.children = [];
+  const attach = (container: Record<string, unknown>, child: Record<string, unknown>) => {
+    (container.children as Record<string, unknown>[]).push(child);
+    child.parent = container;
+  };
+  parent.appendChild = (child: Record<string, unknown>) => attach(parent, child);
+
+  const makeNode = (id: string, type: string, name: string, width: number, height: number) => {
+    const node: Record<string, unknown> = {
+      id, type, name, parent: undefined, children: [], visible: true, opacity: 1,
+      width, height, absoluteBoundingBox: { x: 0, y: 0, width, height },
+      fills: [{ type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3 }, opacity: 0.8 }],
+      strokes: [], effects: [], fillStyleId: "paint-style", boundVariables: {},
+      resize: (nextWidth: number, nextHeight: number) => {
+        node.width = nextWidth;
+        node.height = nextHeight;
+        node.absoluteBoundingBox = { x: 0, y: 0, width: nextWidth, height: nextHeight };
+      },
+      appendChild: (child: Record<string, unknown>) => attach(node, child),
+      getCSSAsync: async () => ({ background: "rgba(26, 51, 77, 0.8)", width: `${node.width}px` }),
+    };
+    environment.nodes.set(id, node);
+    return node;
+  };
+
+  environment.figma.createFrame = () => makeNode("created-card", "FRAME", "Frame", 100, 100);
+  environment.figma.createText = () => {
+    const text = makeNode("created-label", "TEXT", "Text", 80, 20);
+    text.fontName = { family: "Inter", style: "Regular" };
+    text.characters = "";
+    text.textAutoResize = "HEIGHT";
+    text.setTextStyleIdAsync = async () => {};
+    return text;
+  };
+  const component = environment.nodes.get("component")!;
+  component.componentPropertyDefinitions = {
+    Variant: { type: "VARIANT", defaultValue: "Primary" },
+    Disabled: { type: "BOOLEAN", defaultValue: false },
+  };
+  component.createInstance = () => {
+    const instance = makeNode("created-instance", "INSTANCE", "Button", 120, 40);
+    instance.componentProperties = {
+      Variant: { type: "VARIANT", value: "Primary" },
+      Disabled: { type: "BOOLEAN", value: false },
+    };
+    instance.getMainComponentAsync = async () => component;
+    instance.setProperties = (properties: Record<string, unknown>) => {
+      for (const [key, value] of Object.entries(properties)) {
+        (instance.componentProperties as Record<string, { type: string; value: unknown }>)[key].value = value;
+      }
+    };
+    return instance;
+  };
+  return environment;
+}
+
+function normalizeInspection(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeInspection);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).flatMap(([key, item]) => key === "responseBytes" ? [] : [[
+    key,
+    key === "classification" ? "normalized" : normalizeInspection(item),
+  ]]));
+}
+
 describe("all-action behavioral parity", () => {
   it("has a full-field behavior case for every action schema", () => {
     expect(BEHAVIORAL_PARITY_CASES.map(({ type }) => type).sort()).toEqual([...ACTION_TYPES].sort());
     for (const { action } of BEHAVIORAL_PARITY_CASES) {
-      const parsed = actionSchema.parse(action);
-      const schema = actionSchema.options.find((option) => {
-        const shape = (option as unknown as { shape: Record<string, unknown> }).shape;
-        return (shape.type as { value: string }).value === parsed.type;
-      });
-      const shape = (schema as unknown as { shape: Record<string, unknown> }).shape;
-      expect(Object.keys(action).sort()).toEqual(Object.keys(shape).sort());
+      expect(actionSchema.parse(action).type).toBe(action.type);
     }
   });
 
@@ -961,6 +1365,16 @@ describe("all-action behavioral parity", () => {
       configure: (nodes) => { nodes.get("component")!.type = "RECTANGLE"; },
     },
     {
+      label: "counter-axis spacing without wrapping",
+      action: { type: "set_spacing", nodeId: "node", itemSpacing: 8, counterAxisSpacing: 12 },
+      configure: (nodes) => { nodes.get("node")!.layoutWrap = "NO_WRAP"; },
+    },
+    {
+      label: "baseline alignment on vertical layout",
+      action: { type: "set_alignment", nodeId: "node", primaryAxisAlignItems: "CENTER", counterAxisAlignItems: "BASELINE" },
+      configure: (nodes) => { nodes.get("node")!.layoutMode = "VERTICAL"; },
+    },
+    {
       label: "a document page target",
       action: { type: "switch_page", pageId: "page" },
       configure: (nodes) => { nodes.get("page")!.type = "DOCUMENT"; },
@@ -971,26 +1385,15 @@ describe("all-action behavioral parity", () => {
       configure: (nodes) => { nodes.delete("page"); },
     },
     {
-      label: "an unresolved page reference",
-      action: { type: "switch_page", pageId: "$ref:node-0" },
-      configure: () => {},
-    },
-    {
       label: "a missing image-fill target",
-      action: { type: "set_image_fill", nodeId: "node", imageBase64: "AQID", scaleMode: "CROP" },
+      action: { type: "set_image_fill", nodeId: "node", imageBase64: PNG_BASE64, scaleMode: "CROP" },
       configure: (nodes) => { nodes.delete("node"); },
       forbidImageStoreMutation: true,
     },
     {
       label: "an image-fill target without fills",
-      action: { type: "set_image_fill", nodeId: "node", imageBase64: "AQID", scaleMode: "CROP" },
+      action: { type: "set_image_fill", nodeId: "node", imageBase64: PNG_BASE64, scaleMode: "CROP" },
       configure: (nodes) => { delete nodes.get("node")!.fills; },
-      forbidImageStoreMutation: true,
-    },
-    {
-      label: "an unresolved image-fill target reference",
-      action: { type: "set_image_fill", nodeId: "$ref:node-0", imageBase64: "AQID", scaleMode: "CROP" },
-      configure: () => {},
       forbidImageStoreMutation: true,
     },
   ];
@@ -1025,5 +1428,396 @@ describe("all-action behavioral parity", () => {
         expect(trace.some((entry) => entry.startsWith("call:figma.createImage:"))).toBe(false);
       }
     }
+  });
+});
+
+describe("stable named references", () => {
+  it("publishes aliases in nodeIdMap and resolves them in later connected actions", async () => {
+    const environment = createBehavioralFigma();
+    const result = await runPlugin(environment.figma as unknown as PluginFigma, [
+      { type: "create_frame", parentId: "parent", name: "Outer", as: "outer" },
+      { type: "duplicate_node", nodeId: "$outer", targetParentId: "parent", as: "copy" },
+      { type: "rename", nodeId: "$copy", name: "Copy" },
+    ]);
+
+    expect(result.summary).toMatchObject({ applied: 3, failed: 0 });
+    expect(result.nodeIdMap).toMatchObject({ "$ref:node-0": "frame", "$outer": "frame", "$ref:node-1": "clone", "$copy": "clone" });
+    expect(environment.trace).toContain('set:clone.name:"Copy"');
+  });
+});
+
+describe("same-batch inspect action", () => {
+  const actions = [
+    { type: "create_frame", parentId: "parent", name: "Card", width: 320, height: 180, as: "card" },
+    { type: "create_text", parentId: "$card", characters: "Hello", name: "Title", fontFamily: "Inter", fontWeight: 400, fills: [PAINT], as: "label" },
+    { type: "create_instance", componentId: "component", parentId: "$card", x: 8, y: 24, as: "button" },
+    { type: "set_component_properties", nodeId: "$button", properties: { Variant: "Secondary", Disabled: true } },
+    { type: "inspect", nodeId: "$card", depth: 2, limit: 20, scanLimit: 20 },
+  ];
+
+  it("returns ordered create-to-inspect data with connected/fallback contract parity", async () => {
+    const fallback = createInspectableBehavioralFigma();
+    const generated = await handleExecute(null, { actions, rollbackOnError: true });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<Array<Record<string, unknown>>>;
+    const fallbackResults = await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+
+    const connected = createInspectableBehavioralFigma();
+    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, actions, { preloadFonts: true });
+    const connectedInspection = pluginResult.results[4].inspection;
+    const fallbackInspection = fallbackResults[4].inspection;
+
+    expect(pluginResult.results.map((result: { type: string }) => result.type)).toEqual(actions.map((action) => action.type));
+    expect(fallbackResults.slice(0, actions.length).map((result) => result.type)).toEqual(actions.map((action) => action.type));
+    expect(pluginResult.summary).toMatchObject({ applied: 5, failed: 0, mutations: 4 });
+    expect(pluginResult.nodeIdMap).toMatchObject({ "$card": "created-card", "$label": "created-label", "$button": "created-instance" });
+    expect(connectedInspection.root).toMatchObject({
+      id: "created-card",
+      bounds: { width: 320, height: 180 },
+      css: { background: "rgba(26, 51, 77, 0.8)", width: "320px" },
+      children: [
+        { id: "created-label", textContent: "Hello", bounds: { width: 80, height: 20 }, fills: [{ color: { r: 0.1, g: 0.2, b: 0.3 } }] },
+        { id: "created-instance", componentId: "component", componentProperties: { Variant: { value: "Secondary" }, Disabled: { value: true } } },
+      ],
+    });
+    expect(normalizeInspection(fallbackInspection)).toEqual(normalizeInspection(connectedInspection));
+    expect(pluginResult.summary.mutations).toBe(actions.length - 1);
+    expect(connected.figma.triggerUndo).not.toHaveBeenCalled();
+    expect(fallback.figma.triggerUndo).not.toHaveBeenCalled();
+  });
+
+  it("enforces scalar, result, scan, and aggregate response bounds in both paths", async () => {
+    const inspectActions = [
+      { type: "inspect", nodeId: "node", depth: 1, limit: 50, scanLimit: 1_000 },
+      { type: "inspect", nodeId: "node", depth: 1, limit: 1_000, scanLimit: 50 },
+    ];
+    const configureLargeTree = (environment: ReturnType<typeof createInspectableBehavioralFigma>) => {
+      const root = environment.nodes.get("node")!;
+      root.characters = "😀".repeat(5_000);
+      root.absoluteBoundingBox = { x: 0, y: 0, width: 1000, height: 1000 };
+      root.children = Array.from({ length: 80 }, (_, index) => ({
+        id: `child-${index}`,
+        name: `Child ${index} ${"x".repeat(800)}`,
+        type: "FRAME",
+        visible: true,
+        absoluteBoundingBox: { x: 0, y: index * 10, width: 100, height: 10 },
+        children: [],
+        parent: root,
+      }));
+    };
+
+    const fallback = createInspectableBehavioralFigma();
+    configureLargeTree(fallback);
+    const generated = await handleExecute(null, { actions: inspectActions });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<Array<Record<string, unknown>>>;
+    const fallbackResults = await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+
+    const connected = createInspectableBehavioralFigma();
+    configureLargeTree(connected);
+    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, inspectActions);
+
+    for (const results of [fallbackResults, pluginResult.results]) {
+      const inspections = results.map((result: { inspection: { responseBytes: number; truncationReasons: string[]; root: { textContent: string; truncatedFields: Record<string, unknown> } } }) => result.inspection);
+      expect(inspections.reduce((bytes, inspection) => bytes + inspection.responseBytes, 0)).toBeLessThanOrEqual(80_000);
+      for (const inspection of inspections) {
+        expect(inspection.responseBytes).toBe(Buffer.byteLength(JSON.stringify(inspection), "utf8"));
+      }
+      expect(inspections.some((inspection) => inspection.truncationReasons.includes("response_byte_limit"))).toBe(true);
+      expect(inspections[0].truncationReasons).toContain("result_limit");
+      expect(inspections[1].truncationReasons).toContain("scan_limit");
+      expect(inspections[0].truncationReasons).toContain("scalar_field_limit");
+      expect(Buffer.byteLength(inspections[0].root.textContent, "utf8")).toBeLessThanOrEqual(4_000);
+      expect(inspections[0].root.truncatedFields).toHaveProperty("textContent");
+    }
+    expect(pluginResult.summary).toMatchObject({ applied: 2, failed: 0, mutations: 0 });
+  });
+
+  it("reports nonzero lower-bound omissions for result and scan truncation in both paths", async () => {
+    const inspectActions = [
+      { type: "inspect", nodeId: "node", depth: 1, limit: 2, scanLimit: 10 },
+      { type: "inspect", nodeId: "node", depth: 1, limit: 10, scanLimit: 2 },
+    ];
+    const configureThreeChildren = (environment: ReturnType<typeof createInspectableBehavioralFigma>) => {
+      const root = environment.nodes.get("node")!;
+      root.children = Array.from({ length: 3 }, (_, index) => ({
+        id: `child-${index}`,
+        name: `Child ${index}`,
+        type: "FRAME",
+        visible: true,
+        children: [],
+        parent: root,
+      }));
+    };
+    const fallback = createInspectableBehavioralFigma();
+    configureThreeChildren(fallback);
+    const generated = await handleExecute(null, { actions: inspectActions });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<Array<Record<string, unknown>>>;
+    const fallbackResults = await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+    const connected = createInspectableBehavioralFigma();
+    configureThreeChildren(connected);
+    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, inspectActions);
+
+    for (const results of [fallbackResults, pluginResult.results]) {
+      expect(results[0].inspection).toMatchObject({
+        returnedCount: 2,
+        omittedNodeCount: 2,
+        omittedNodeCountExact: false,
+        truncated: true,
+        truncationReasons: ["result_limit"],
+      });
+      expect(results[1].inspection).toMatchObject({
+        returnedCount: 2,
+        omittedNodeCount: 2,
+        omittedNodeCountExact: false,
+        truncated: true,
+        truncationReasons: ["scan_limit"],
+        scanLimitReached: true,
+      });
+    }
+  });
+
+  it("redacts transient inspection trees after rollback in both paths", async () => {
+    const rollbackActions = [
+      { type: "create_frame", parentId: "parent", name: "Card", as: "card" },
+      { type: "inspect", nodeId: "$card", depth: 1, limit: 10, scanLimit: 10 },
+      { type: "rename", nodeId: "missing", name: "Fails" },
+    ];
+    const fallback = createInspectableBehavioralFigma();
+    const generated = await handleExecute(null, { actions: rollbackActions, rollbackOnError: true });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<Array<Record<string, unknown>>>;
+    const fallbackResults = await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+    const connected = createInspectableBehavioralFigma();
+    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, rollbackActions);
+
+    for (const inspection of [fallbackResults[1].inspection, pluginResult.results[1].inspection]) {
+      expect(inspection).toMatchObject({ rolledBack: true, returnedCount: 0, truncated: true });
+      expect(inspection).not.toHaveProperty("root");
+    }
+    for (const results of [fallbackResults, pluginResult.results]) {
+      expect(results[0]).toMatchObject({ type: "create_frame", rolledBack: true });
+      expect(results[0]).not.toHaveProperty("nodeId");
+      expect(results[0]).not.toHaveProperty("newNodeId");
+      expect(results[0]).not.toHaveProperty("after");
+      expect(results[1]).toMatchObject({ type: "inspect", rolledBack: true });
+      expect(results[1]).not.toHaveProperty("nodeId");
+      expect(JSON.stringify(results)).not.toContain("created-card");
+    }
+    expect(fallbackResults.at(-1)).toEqual({ type: "rollback", status: "applied" });
+    expect(pluginResult).toMatchObject({ rollbackApplied: true, nodeIdMap: {}, summary: { applied: 2, failed: 1, mutations: 1 } });
+  });
+
+  it("recursively redacts a transient parent ID from move snapshots in both paths", async () => {
+    const rollbackActions = [
+      { type: "create_frame", parentId: "parent", name: "Outer", as: "outer" },
+      { type: "create_frame", parentId: "$outer", name: "Child", as: "child" },
+      { type: "move", nodeId: "$child", targetParentId: "parent" },
+      { type: "rename", nodeId: "missing", name: "Fails" },
+    ];
+    const configureTransientFrames = (environment: ReturnType<typeof createInspectableBehavioralFigma>) => {
+      let nextId = 0;
+      environment.figma.createFrame = () => {
+        const node: Record<string, unknown> = {
+          id: `transient-${nextId++}`, type: "FRAME", name: "", fills: [], x: 0, y: 0,
+          width: 100, height: 100, children: [], parent: undefined,
+          resize(width: number, height: number) { node.width = width; node.height = height; },
+          appendChild(child: Record<string, unknown>) {
+            (node.children as Record<string, unknown>[]).push(child);
+            child.parent = node;
+          },
+        };
+        environment.nodes.set(node.id as string, node);
+        return node;
+      };
+    };
+
+    const fallback = createInspectableBehavioralFigma();
+    configureTransientFrames(fallback);
+    const generated = await handleExecute(null, { actions: rollbackActions, rollbackOnError: true });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<Array<Record<string, unknown>>>;
+    const fallbackResults = await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+
+    const connected = createInspectableBehavioralFigma();
+    configureTransientFrames(connected);
+    const pluginResult = await runPlugin(connected.figma as unknown as PluginFigma, rollbackActions);
+
+    for (const results of [fallbackResults, pluginResult.results]) {
+      expect(results[2]).toMatchObject({
+        type: "move",
+        before: { parentId: "[rolled back node]" },
+        rolledBack: true,
+      });
+      expect(results[2]).not.toHaveProperty("after");
+      expect(results[3]).toMatchObject({ status: "failed", error: expect.any(String) });
+      expect(JSON.stringify(results)).not.toContain("transient-0");
+      expect(JSON.stringify(results)).not.toContain("transient-1");
+    }
+    expect(fallbackResults.at(-1)).toEqual({ type: "rollback", status: "applied" });
+    expect(pluginResult).toMatchObject({
+      rollbackApplied: true,
+      nodeIdMap: {},
+      summary: { total: 4, applied: 3, failed: 1, skipped: 0, mutations: 3 },
+    });
+  });
+});
+
+describe("deterministic write resolvers", () => {
+  it("preserves dollar-prefixed text properties while resolving INSTANCE_SWAP values", async () => {
+    const actions = [
+      { type: "duplicate_node", nodeId: "component", targetParentId: "parent", as: "icon" },
+      { type: "set_component_properties", nodeId: "instance", properties: { Label: "$price", Icon: "$icon" } },
+    ];
+    for (const mode of ["fallback", "connected"] as const) {
+      const environment = createBehavioralFigma();
+      environment.nodes.get("component")!.componentPropertyDefinitions = {
+        "Label#1": { type: "TEXT", defaultValue: "" },
+        "Icon#3": { type: "INSTANCE_SWAP", defaultValue: "component" },
+      };
+      environment.trace.length = 0;
+      if (mode === "fallback") {
+        const generated = await handleExecute(null, { actions });
+        const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+          ...args: string[]
+        ) => (figmaApi: typeof environment.figma) => Promise<unknown>;
+        await new AsyncFunction("figma", generated.fallbackJs!)(environment.figma);
+      } else {
+        const result = await runPlugin(environment.figma as unknown as PluginFigma, actions);
+        expect(result.summary).toMatchObject({ applied: 2, failed: 0 });
+      }
+      expect(environment.trace).toContain('call:instance.setProperties:[{"Label#1":"$price"}]');
+      expect(environment.trace).toContain('call:instance.setProperties:[{"Icon#3":"clone"}]');
+    }
+  });
+
+  it("applies layered linear and radial gradients with explicit transforms in both paths", async () => {
+    const action = {
+      type: "set_gradient_fill", nodeId: "node",
+      gradients: [
+        {
+          gradientType: "LINEAR", stops: [
+            { position: 0, color: { r: 0, g: 0, b: 0, a: 0.8 } },
+            { position: 1, color: { r: 0, g: 0, b: 0, a: 0 } },
+          ], gradientTransform: [[1, 0, 0], [0, 1, 0]],
+        },
+        {
+          gradientType: "RADIAL", stops: [
+            { position: 0, color: { r: 1, g: 1, b: 1, a: 0.4 } },
+            { position: 1, color: { r: 1, g: 1, b: 1, a: 0 } },
+          ], gradientTransform: [[0.5, 0, 0.25], [0, 0.5, 0.25]], opacity: 0.75,
+        },
+      ],
+    };
+    const fallback = createBehavioralFigma();
+    const generated = await handleExecute(null, { actions: [action] });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<unknown>;
+    await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+    const connected = createBehavioralFigma();
+    const result = await runPlugin(connected.figma as unknown as PluginFigma, [action]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(connected.nodes.get("node")!.fills).toEqual(fallback.nodes.get("node")!.fills);
+    expect(connected.nodes.get("node")!.fills).toMatchObject([
+      { type: "GRADIENT_LINEAR", gradientTransform: [[1, 0, 0], [0, 1, 0]] },
+      { type: "GRADIENT_RADIAL", gradientTransform: [[0.5, 0, 0.25], [0, 0.5, 0.25]], opacity: 0.75 },
+    ]);
+  });
+
+  it("normalizes effects to the installed Figma API contract in both paths", async () => {
+    const action = {
+      type: "set_effects", nodeId: "node", effects: [
+        { type: "DROP_SHADOW", radius: 8 },
+        { type: "BACKGROUND_BLUR", radius: 12 },
+      ],
+    };
+    const parsed = actionSchema.parse(action);
+    expect(parsed.effects).toEqual([
+      {
+        type: "DROP_SHADOW", radius: 8, visible: true, blendMode: "NORMAL",
+        color: { r: 0, g: 0, b: 0, a: 0.25 }, offset: { x: 0, y: 0 },
+        showShadowBehindNode: false,
+      },
+      { type: "BACKGROUND_BLUR", blurType: "NORMAL", radius: 12, visible: true },
+    ]);
+    expect(actionSchema.safeParse({ ...action, effects: [{ type: "DROP_SHADOW", radius: 8, showShadowOnly: true }] }).success).toBe(false);
+
+    const fallback = createBehavioralFigma();
+    const generated = await handleExecute(null, { actions: [action] });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof fallback.figma) => Promise<unknown>;
+    await new AsyncFunction("figma", generated.fallbackJs!)(fallback.figma);
+    const connected = createBehavioralFigma();
+    const result = await runPlugin(connected.figma as unknown as PluginFigma, [action]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(connected.nodes.get("node")!.effects).toEqual(fallback.nodes.get("node")!.effects);
+    expect(connected.nodes.get("node")!.effects).toEqual(parsed.effects);
+  });
+
+  it("rejects ambiguous childPath segments without changing either child", async () => {
+    const environment = createBehavioralFigma();
+    const first = environment.nodes.get("instance-label")!;
+    const second = { ...first, id: "second-label", visible: true };
+    environment.nodes.get("instance")!.children = [first, second];
+
+    const result = await runPlugin(environment.figma as unknown as PluginFigma, [{
+      type: "set_instance_visibility", instanceId: "instance", childPath: ["Label"], visible: false,
+    }]);
+
+    expect(result.summary).toMatchObject({ applied: 0, failed: 1 });
+    expect(first.visible).toBe(true);
+    expect(second.visible).toBe(true);
+  });
+
+  it("rejects detached instances and ambiguous component-property display names", async () => {
+    const detached = createBehavioralFigma();
+    detached.nodes.get("instance")!.getMainComponentAsync = async () => null;
+    const detachedResult = await runPlugin(detached.figma as unknown as PluginFigma, [{
+      type: "set_instance_text", instanceId: "instance", childPath: ["Label"], characters: "Nope",
+    }]);
+    expect(detachedResult.results[0].error).toContain("detached");
+
+    const ambiguous = createBehavioralFigma();
+    ambiguous.nodes.get("component")!.componentPropertyDefinitions = {
+      "Label#1": { type: "TEXT", defaultValue: "A" },
+      "Label#2": { type: "TEXT", defaultValue: "B" },
+    };
+    const result = await runPlugin(ambiguous.figma as unknown as PluginFigma, [{
+      type: "set_component_properties", nodeId: "instance", properties: { Label: "Nope" },
+    }]);
+    expect(result.results[0].error).toContain("ambiguous");
+    expect(ambiguous.trace.some((entry) => entry.includes("setProperties"))).toBe(false);
+  });
+
+  it("rejects ambiguous variable and style names before binding", async () => {
+    const variables = createBehavioralFigma();
+    const variable = await variables.figma.variables.getVariableByIdAsync();
+    variables.figma.variables.getLocalVariablesAsync = async () => [variable, { ...variable, id: "variable-2" }];
+    const variableResult = await runPlugin(variables.figma as unknown as PluginFigma, [{
+      type: "bind_variable", nodeId: "node", property: "topLeftRadius", variableName: "spacing/md", resolvedType: "FLOAT",
+    }]);
+    expect(variableResult.results[0].error).toContain("ambiguous");
+    expect(variables.trace.some((entry) => entry.includes("setBoundVariable"))).toBe(false);
+
+    const styles = createBehavioralFigma();
+    const duplicateStyle = { id: "style-2", type: "EFFECT", name: "Shadow" };
+    styles.figma.getLocalEffectStylesAsync = async () => [
+      { id: "style-1", type: "EFFECT", name: "Shadow" }, duplicateStyle,
+    ] as never;
+    const styleResult = await runPlugin(styles.figma as unknown as PluginFigma, [{
+      type: "apply_style", nodeId: "node", styleName: "Shadow", property: "effect",
+    }]);
+    expect(styleResult.results[0].error).toContain("ambiguous");
+    expect(styles.trace.some((entry) => entry.includes("setEffectStyleIdAsync"))).toBe(false);
   });
 });

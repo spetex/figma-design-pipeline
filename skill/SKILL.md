@@ -71,6 +71,14 @@ or inspection cache.
 
 **Do NOT call `use_figma` for write operations.** Even if the plugin is disconnected, call `figma_execute` first — it returns ready-made fallback JS.
 
+### Batch construction
+
+- Give node-producing actions an `as` alias and reference them later as `$alias`; legacy `$ref:node-N` remains supported. References must point backward, and the entire graph is checked before writes.
+- Resolve variables and styles by exact name when IDs are unavailable. Supply collection/type disambiguation for variables; ambiguity is an error.
+- Use `childPath: ["Exact parent", "Exact child"]` for nested instance text, visibility, and component swaps. Every segment must identify one direct child.
+- Image fills may use one bounded base64 payload, server-local path, or public HTTP(S) URL. Local paths require an explicit `FIGMA_ASSET_ROOTS` allowlist and cannot escape it through traversal or symlinks. SVG input must be inert. The server preprocesses assets before plugin transport.
+- Add `inspect: { nodeId: "$alias", depth?, limit?, scanLimit? }` after earlier actions for immediate bounded plugin-native read-back. It is read-only, shares an 80KB aggregate batch budget, and exposes truncation metadata. If rollback occurs, its tree is redacted and marked `rolledBack`.
+
 ## What This Skill Provides
 
 | Task | Tool |

@@ -6,12 +6,30 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 
 ### Added
 - `figma_get_tree`, `figma_find_nodes`, and `figma_get_components` now support bounded, token-free plugin inspection with exact file-key identity, node/current-page/selection roots, exact or regex name and type filtering, component-set discovery, correlated concurrent reads, and guarded chunked responses. `source: auto` prefers the matching plugin while preserving REST fallback; plugin reads never write or alter inspection caches.
+- Expanded `figma_execute` from 43 to 54 actions for design-system construction: component-property references, exact-path nested instance text/visibility/swap overrides, variable value updates, style updates/copies, safe SVG creation, sections, and bounded ON_CLICK prototype reactions.
+- Added stable `as` aliases (`$alias`) to every node-producing action while preserving `$ref:node-N`, plus whole-batch reference-graph preflight and alias entries in connected `nodeIdMap` results.
+- Added exact-name variable/style resolution with explicit collection/type disambiguation, per-corner and counter-axis variable binding, and server-side local-path/HTTP(S) image ingestion with explicit asset-root containment, complete PNG/JPEG/GIF validation, 4096×4096 limits, timeout, redirect, and private-network protections.
+- Added a 55th, read-only `inspect` batch action for immediate alias-addressed read-back after writes. Connected and fallback execution return the same bounded tree/property payload, including IDs, dimensions, text, visibility, paints, resolved CSS, style/variable bindings, and component state.
+
+### Changed
+- Extended targeted duplication with parent, insertion, and position controls; component-property definition to component sets; and text creation with style selection, truncation, and maximum-line controls.
+- Extended auto-layout with wrapping and counter-axis spacing and added explicit precondition checks for wrapping, counter-axis spacing, and baseline alignment.
 
 ### Fixed
 - Plugin inspection now uses deterministic serialization and visited-node budgets instead of full-tree pre-counts or unbounded sparse searches. Selection metadata is independently bounded and paged with truthful total/omitted counts, every Figma-origin scalar is UTF-8 bounded with explicit truncation metrics, and the UI enforces aggregate byte/chunk limits before transport. Both read paths share the pure-JavaScript linear-time RE2 engine, which safely handles overlapping repetitions and rejects backreferences/lookarounds. REST preserves an explicit `depth: 0`, and whole-file REST component truncation provides advancing `offset` / `nextOffset` pagination without changing explicit current-page roots into whole-file reads.
 - Audit note for the issue branch: `re2js` has no runtime dependencies and adds no advisory findings. The four pre-existing production findings in `fast-uri`, `hono`, `ip-address`, and `qs` are fixed separately by release-hardening commit `094d54a` and will be integrated after issues #30 and #31; their lockfile upgrades are intentionally not duplicated here.
 - Newly created frames now start with transparent fills in both connected-plugin execution and disconnected fallback JavaScript, avoiding unintended white surfaces on structural containers.
 - The dynamic-page plugin now loads all pages before registering its global document-change listener, preserving debounced cache invalidation while containing and logging initialization failures so bridge startup can continue.
+- Rollback batches now establish explicit Figma undo boundaries so a later failed batch cannot undo an earlier successful batch.
+- Name-resolved text styles load their fonts before application; `create_text` applies a style first and explicit typography overrides second in both execution paths.
+- Gradients support ordered multi-fill scrims and explicit invertible transforms. Effects now use current Plugin API fields and defaults (`blurType`, shadow color/offset, and `showShadowBehindNode`).
+- Image ingestion now rejects incomplete/corrupt/oversized content and unsupported WebP. Local paths require configured roots and cannot escape by traversal or symlink.
+- Component property strings are treated as symbolic references only for resolved `INSTANCE_SWAP` definitions, and section creation/resizing enforces the Plugin API’s `0.01` minimum dimension before mutation.
+- Gradient and per-corner-radius result snapshots no longer expose Figma mixed-value symbols through the bridge. Connected and fallback executors retain full schema/action behavior parity.
+- Same-batch inspection uses the approved plugin serializer's depth/result/scan/scalar limits and a shared 80KB aggregate batch budget. Inspection actions do not count as mutations or invalidate caches; rollback redacts transient inspection trees and marks them `rolledBack`.
+- Connected batches are FIFO-serialized at both bridge and plugin boundaries, use batch-local alias maps, and recover cleanly after batch errors, timeouts, disconnects, and reconnects so rollback cannot interfere with adjacent callers.
+- GIF and JPEG ingestion now performs bounded full decode validation with `modern-gif` and `jpeg-js`, rejecting empty LZW streams, malformed scan/table shells, corrupt/truncated content, excessive decoded frame data, and oversized dimensions. These exact runtime dependencies and their lockfile entries must be carried into the final release branch.
+- Same-batch inspection reports `omittedNodeCount` as an explicit lower bound with `omittedNodeCountExact: false` when result or scan budgets stop traversal; rollback now also scrubs transient action IDs, create maps, and post-mutation snapshots while preserving errors and summary accounting.
 
 ## [0.8.2] - 2026-08-02
 
@@ -77,7 +95,7 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 ## [0.7.3] - 2026-03-31
 
 ### Added
-- `set_effects` and `create_effect_style` now accept the full Figma effect payload (blendMode, offset, spread, showShadowOnly as well as drop/inner shadows and layer/background blurs) so plugin writes can reproduce Figma’s elite visual treatments.
+- `set_effects` and `create_effect_style` now accept detailed Figma effect payloads (blendMode, offset, spread, and drop/inner shadows plus layer/background blurs) so plugin writes can reproduce layered visual treatments.
 
 ### Fixed
 - Drop-shadow batches no longer fail validation because the MCP schema now mirrors what the plugin expects to send.

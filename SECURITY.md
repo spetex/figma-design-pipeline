@@ -112,3 +112,26 @@ messages to 16 MiB, and disables per-message compression. Messages above the
 limit are closed with WebSocket status 1009.
 
 The plugin runs inside Figma's sandboxed environment and can only access the current file's scene graph through the official Plugin API.
+
+### Same-batch inspection
+
+The read-only `inspect` action exposes an explicit allowlist of plugin-native node data; arbitrary property names or code are not accepted. It applies the plugin inspection caps (depth 20, 1,000 returned nodes, 10,000 scanned nodes, and 4KB per scalar/native property) plus an 80KB aggregate budget across all inspection payloads in a batch. Responses report byte, node, property, and scalar omission metadata. If a failed batch triggers rollback, transient trees captured before rollback are removed and marked `rolledBack` so they cannot be confused with committed document state.
+
+### Asset ingestion
+
+`set_image_fill` rejects local paths unless `FIGMA_ASSET_ROOTS` explicitly
+allowlists one or more directories (using the platform path delimiter). Both
+roots and candidate files are resolved with `realpath`; traversal and symlink
+escapes are rejected before reading. HTTP(S) ingestion pins
+each connection to DNS answers checked immediately beforehand and rejects
+loopback, private, link-local, multicast, and reserved addresses on the initial
+request and every redirect. Requests have a 10-second deadline and five-
+redirect maximum. Decoded PNG, JPEG, and GIF payloads are structurally
+validated, capped at 10 MiB and 4096×4096 pixels, and checked against declared
+HTTP content types before plugin transport. WebP is rejected because the
+installed Figma Plugin API contract only accepts PNG, JPEG, and GIF.
+
+`create_from_svg` accepts at most 1 MiB of UTF-8 markup and rejects document
+types/entities, scripts, event handlers, foreign content, CSS imports, and
+non-fragment resource references before the batch is sent. These checks are a
+bounded ingestion policy, not a general-purpose SVG sanitizer.

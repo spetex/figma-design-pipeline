@@ -25,6 +25,115 @@ describe("actionSchema (zod v4)", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it("enforces exclusive name/ID selectors and text truncation invariants", () => {
+    expect(actionSchema.safeParse({ type: "apply_style", nodeId: "1:2", property: "text", styleId: "S:1", styleName: "Body" }).success).toBe(false);
+    expect(actionSchema.safeParse({ type: "bind_variable", nodeId: "1:2", property: "opacity", variableId: "V:1", variableName: "opacity/muted" }).success).toBe(false);
+    expect(actionSchema.safeParse({ type: "create_text", parentId: "1:1", characters: "Long", maxLines: 2 }).success).toBe(false);
+    expect(actionSchema.safeParse({ type: "create_text", parentId: "1:1", characters: "Long", textTruncation: "ENDING", maxLines: 2 }).success).toBe(true);
+  });
+
+  it("enforces gradient transforms, API effect fields, and the section 0.01 boundary", () => {
+    const stops = [
+      { position: 0, color: { r: 0, g: 0, b: 0, a: 1 } },
+      { position: 1, color: { r: 1, g: 1, b: 1, a: 1 } },
+    ];
+    expect(actionSchema.safeParse({
+      type: "set_gradient_fill", nodeId: "node", stops, gradientTransform: [[1, 0, 0], [0, 1, 0]],
+    }).success).toBe(true);
+    expect(actionSchema.safeParse({
+      type: "set_gradient_fill", nodeId: "node", stops, gradientTransform: [[0, 0, 0], [0, 0, 0]],
+    }).success).toBe(false);
+    expect(actionSchema.safeParse({
+      type: "set_gradient_fill", nodeId: "node", stops, angle: 10, gradientTransform: [[1, 0, 0], [0, 1, 0]],
+    }).success).toBe(false);
+    expect(actionSchema.safeParse({ type: "set_effects", nodeId: "node", effects: [{ type: "BACKGROUND_BLUR", radius: 4 }] }).success).toBe(true);
+    expect(actionSchema.safeParse({ type: "set_effects", nodeId: "node", effects: [{ type: "BACKGROUND_BLUR", blurType: "PROGRESSIVE", radius: 4 }] }).success).toBe(false);
+    for (const type of ["create_section", "resize_section"] as const) {
+      const base = type === "create_section"
+        ? { type, parentId: "page", name: "Section" }
+        : { type, sectionId: "section" };
+      expect(actionSchema.safeParse({ ...base, width: 0.01, height: 0.01 }).success).toBe(true);
+      expect(actionSchema.safeParse({ ...base, width: 0.009, height: 1 }).success).toBe(false);
+      expect(actionSchema.safeParse({ ...base, width: 1, height: 0 }).success).toBe(false);
+    }
+  });
+
+  it("applies bounded inspect defaults and rejects values above plugin read limits", () => {
+    expect(actionSchema.parse({ type: "inspect", nodeId: "$card" })).toEqual({
+      type: "inspect", nodeId: "$card", depth: 2, limit: 100, scanLimit: 1_000,
+    });
+    expect(actionSchema.safeParse({ type: "inspect", nodeId: "node", depth: 21 }).success).toBe(false);
+    expect(actionSchema.safeParse({ type: "inspect", nodeId: "node", limit: 1_001 }).success).toBe(false);
+    expect(actionSchema.safeParse({ type: "inspect", nodeId: "node", scanLimit: 10_001 }).success).toBe(false);
+  });
+
+  it("rejects invalid gradients and section sizes before bridge mutation", async () => {
+    const execute = vi.fn();
+    const bridge = { isConnected: () => true, execute } as unknown as BridgeServer;
+    await expect(handleExecute(bridge, { actions: [{
+      type: "set_gradient_fill", nodeId: "node",
+      stops: [{ position: 0, color: { r: 0, g: 0, b: 0 } }, { position: 1, color: { r: 1, g: 1, b: 1 } }],
+      gradientTransform: [[0, 0, 0], [0, 0, 0]],
+    }] })).rejects.toThrow("gradientTransform");
+    await expect(handleExecute(bridge, { actions: [{
+      type: "create_section", parentId: "page", name: "Too small", width: 0.009, height: 1,
+    }] })).rejects.toThrow("Invalid action 0");
+    await expect(handleExecute(bridge, { actions: [{
+      type: "resize_section", sectionId: "section", width: 1, height: 0.009,
+    }] })).rejects.toThrow("Invalid action 0");
+    expect(execute).not.toHaveBeenCalled();
+  });
+});
+
+describe("symbolic reference preflight", () => {
+  it("does not classify ordinary component-property strings as aliases", () => {
+    const action = actionSchema.parse({
+      type: "set_component_properties", nodeId: "instance", properties: { Price: "$12.00", Empty: "" },
+    });
+    expect(() => compileBatch([action])).not.toThrow();
+  });
+
+  it.each([
+    ["duplicate", [
+      { type: "create_frame", parentId: "1:2", name: "A", as: "same" },
+      { type: "create_frame", parentId: "1:2", name: "B", as: "same" },
+    ], "duplicate alias"],
+    ["unknown", [{ type: "rename", nodeId: "$missing", name: "Nope" }], "unknown reference"],
+    ["self", [{ type: "duplicate_node", nodeId: "$copy", as: "copy" }], "self reference"],
+    ["forward", [
+      { type: "rename", nodeId: "$later", name: "Too early" },
+      { type: "create_frame", parentId: "1:2", name: "Later", as: "later" },
+    ], "forward reference"],
+    ["cyclic", [
+      { type: "duplicate_node", nodeId: "$b", as: "a" },
+      { type: "duplicate_node", nodeId: "$a", as: "b" },
+    ], "cyclic"],
+    ["legacy-forward", [
+      { type: "rename", nodeId: "$ref:node-0", name: "Too early" },
+      { type: "create_frame", parentId: "1:2", name: "Later" },
+    ], "forward reference"],
+    ["inspect-unknown", [
+      { type: "inspect", nodeId: "$missing" },
+    ], "unknown reference"],
+    ["inspect-forward", [
+      { type: "inspect", nodeId: "$later" },
+      { type: "create_frame", parentId: "1:2", name: "Later", as: "later" },
+    ], "forward reference"],
+  ])("rejects %s references before bridge execution", async (_label, actions, message) => {
+    const execute = vi.fn();
+    const bridge = { isConnected: () => true, execute } as unknown as BridgeServer;
+    await expect(handleExecute(bridge, { actions })).rejects.toThrow(message as string);
+    await expect(handleExecute(null, { actions })).rejects.toThrow(message as string);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed and reserved aliases during schema validation", async () => {
+    await expect(handleExecute(null, { actions: [{ type: "create_frame", parentId: "1:2", name: "Bad", as: "node-0" }] }))
+      .rejects.toThrow("reserved");
+    await expect(handleExecute(null, { actions: [{ type: "create_frame", parentId: "1:2", name: "Bad", as: "1bad" }] }))
+      .rejects.toThrow("Alias must start");
+  });
 });
 
 describe("handleExecute fallback generation", () => {
@@ -309,6 +418,7 @@ describe("handleExecute fallback generation", () => {
   });
 
   it("only rolls back fallback batches after document writes, including partial writes", async () => {
+    const commitUndo = vi.fn();
     const triggerUndo = vi.fn();
     const exported = {
       id: "exported",
@@ -327,6 +437,7 @@ describe("handleExecute fallback generation", () => {
     await new AsyncFunction("figma", exportFallback.fallbackJs!)({
       getNodeById: (id: string) => id === "exported" ? exported : undefined,
       base64Encode: () => "AQ==",
+      commitUndo,
       triggerUndo,
     });
     expect(triggerUndo).not.toHaveBeenCalled();
@@ -340,6 +451,7 @@ describe("handleExecute fallback generation", () => {
     });
     await new AsyncFunction("figma", noOpFallback.fallbackJs!)({
       getNodeById: (id: string) => id === "node" ? { id, x: 0, y: 0 } : undefined,
+      commitUndo,
       triggerUndo,
     });
     expect(triggerUndo).not.toHaveBeenCalled();
@@ -356,6 +468,7 @@ describe("handleExecute fallback generation", () => {
     });
     await new AsyncFunction("figma", partialFallback.fallbackJs!)({
       getNodeById: () => partiallyWritable,
+      commitUndo,
       triggerUndo,
     });
     expect(x).toBe(12);
@@ -363,10 +476,12 @@ describe("handleExecute fallback generation", () => {
   });
 
   it("rolls back a partial set_component_properties mutation", async () => {
+    const commitUndo = vi.fn();
     const triggerUndo = vi.fn();
     const applied: Array<Record<string, string | boolean>> = [];
     const node = {
       id: "instance",
+      type: "INSTANCE",
       setProperties: (properties: Record<string, string | boolean>) => {
         applied.push(properties);
         if ("Second" in properties) throw new Error("Second rejected");
@@ -382,10 +497,11 @@ describe("handleExecute fallback generation", () => {
     });
     const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
       ...args: string[]
-    ) => (figmaApi: { getNodeById: () => typeof node; triggerUndo: typeof triggerUndo }) => Promise<Array<Record<string, unknown>>>;
+    ) => (figmaApi: { getNodeById: () => typeof node; commitUndo: typeof commitUndo; triggerUndo: typeof triggerUndo }) => Promise<Array<Record<string, unknown>>>;
 
     const result = await new AsyncFunction("figma", fallback.fallbackJs!)({
       getNodeById: () => node,
+      commitUndo,
       triggerUndo,
     });
 
@@ -395,6 +511,85 @@ describe("handleExecute fallback generation", () => {
       { type: "rollback", status: "applied" },
     ]));
     expect(triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("isolates a failed fallback batch from a prior successful batch", async () => {
+    let committedName = "Before";
+    const node = { id: "node", name: "Before" };
+    const figma = {
+      getNodeById: (id: string) => id === "node" ? node : undefined,
+      commitUndo: vi.fn(() => { committedName = node.name; }),
+      triggerUndo: vi.fn(() => { node.name = committedName; }),
+    };
+    const first = await handleExecute(null, {
+      actions: [{ type: "rename", nodeId: "node", name: "Successful" }], rollbackOnError: true,
+    });
+    const second = await handleExecute(null, {
+      actions: [
+        { type: "rename", nodeId: "node", name: "Transient" },
+        { type: "rename", nodeId: "missing", name: "Fails" },
+      ], rollbackOnError: true,
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof figma) => Promise<Array<Record<string, unknown>>>;
+
+    await new AsyncFunction("figma", first.fallbackJs!)(figma);
+    await new AsyncFunction("figma", second.fallbackJs!)(figma);
+
+    expect(node.name).toBe("Successful");
+    expect(figma.commitUndo).toHaveBeenCalledTimes(3);
+    expect(figma.triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads resolved text-style fonts and applies explicit create overrides second", async () => {
+    const loaded = new Set<string>();
+    const events: string[] = [];
+    const style = { id: "style", type: "TEXT", name: "Typography/Body", fontName: { family: "Style Family", style: "Regular" } };
+    let currentFont = { family: "Inter", style: "Regular" };
+    const textNode = {
+      id: "text", type: "TEXT", name: "", textAutoResize: "HEIGHT",
+      get fontName() { return currentFont; },
+      set fontName(font: { family: string; style: string }) {
+        if (!loaded.has(`${font.family}|${font.style}`)) throw new Error("font was not loaded");
+        currentFont = font;
+        events.push(`font:${font.family}|${font.style}`);
+      },
+      set characters(value: string) { events.push(`characters:${value}`); },
+      async setTextStyleIdAsync() {
+        if (!loaded.has("Style Family|Regular")) throw new Error("style font was not loaded");
+        currentFont = style.fontName;
+        events.push("style");
+      },
+    };
+    const parent = { id: "parent", appendChild: vi.fn() };
+    const figma = {
+      getNodeById: (id: string) => id === "text" ? textNode : id === "parent" ? parent : undefined,
+      getLocalTextStylesAsync: async () => [style],
+      loadFontAsync: async (font: { family: string; style: string }) => {
+        loaded.add(`${font.family}|${font.style}`);
+        events.push(`load:${font.family}|${font.style}`);
+      },
+      createText: () => textNode,
+    };
+    const apply = await handleExecute(null, {
+      actions: [{ type: "apply_style", nodeId: "text", styleName: "Typography/Body", property: "text" }],
+    });
+    const create = await handleExecute(null, {
+      actions: [{ type: "create_text", parentId: "parent", characters: "Hello", textStyleName: "Typography/Body", fontWeight: 700 }],
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof figma) => Promise<Array<Record<string, unknown>>>;
+
+    await new AsyncFunction("figma", apply.fallbackJs!)(figma);
+    events.length = 0;
+    loaded.clear();
+    await new AsyncFunction("figma", create.fallbackJs!)(figma);
+
+    expect(events).toEqual([
+      "load:Style Family|Regular", "load:Style Family|Bold", "style", "font:Style Family|Bold", "characters:Hello",
+    ]);
   });
 
   it("implements dry-run, continuation, and rollback execution options", async () => {
@@ -410,6 +605,7 @@ describe("handleExecute fallback generation", () => {
     ]);
 
     const node = { id: "node", name: "Before" };
+    const commitUndo = vi.fn();
     const triggerUndo = vi.fn();
     const fallback = await handleExecute(null, {
       actions: [
@@ -421,21 +617,116 @@ describe("handleExecute fallback generation", () => {
     });
     expect(fallback.fallbackLimitations).toEqual([{
       option: "rollbackOnError",
-      condition: "figma.triggerUndo_unavailable",
+      condition: "figma.undo_api_unavailable",
       message: expect.stringContaining("figma.triggerUndo"),
     }]);
     const result = await new AsyncFunction("figma", fallback.fallbackJs!)({
       getNodeById: (id: string) => id === "node" ? node : undefined,
+      commitUndo,
       triggerUndo,
     });
 
     expect(node.name).toBe("Continues");
     expect(result).toEqual(expect.arrayContaining([
       expect.objectContaining({ actionIndex: 0, status: "failed" }),
-      expect.objectContaining({ type: "rename", nodeId: "node" }),
+      expect.objectContaining({ type: "rename", rolledBack: true }),
       { type: "rollback", status: "applied" },
     ]));
+    expect(result[1]).toHaveProperty("nodeId", "node");
     expect(triggerUndo).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves preexisting IDs and removes transient IDs from fallback rollback results", async () => {
+    const parent = { id: "parent", appendChild: vi.fn() };
+    const existingParent = { id: "existing-parent" };
+    const existing: Record<string, unknown> = {
+      id: "existing-1", type: "INSTANCE", name: "$transient", parent: existingParent,
+      getMainComponentAsync: vi.fn(async () => ({ componentPropertyDefinitions: {} })),
+      setProperties: vi.fn(),
+    };
+    const transient: Record<string, unknown> = {
+      id: "transient-1", name: "", fills: [], x: 0, y: 0,
+      resize: vi.fn(),
+      appendChild: vi.fn((child: Record<string, unknown>) => { child.parent = transient; }),
+    };
+    const commitUndo = vi.fn();
+    const triggerUndo = vi.fn();
+    const fallback = await handleExecute(null, {
+      actions: [
+        { type: "create_frame", parentId: "parent", name: "Transient", as: "transient" },
+        { type: "rename", nodeId: "$transient", name: "Renamed transient" },
+        { type: "rename", nodeId: "existing-1", name: "Renamed" },
+        { type: "move", nodeId: "existing-1", targetParentId: "$transient" },
+        { type: "set_component_properties", nodeId: "existing-1", properties: { "$transient": "Fails" } },
+      ],
+      rollbackOnError: true,
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>;
+
+    const result = await new AsyncFunction("figma", fallback.fallbackJs!)({
+      getNodeById: (id: string) => {
+        if (id === "parent") return parent;
+        if (id === "existing-1") return existing;
+        if (id === "transient-1") return transient;
+        return undefined;
+      },
+      createFrame: () => transient,
+      commitUndo,
+      triggerUndo,
+    });
+
+    expect(result[0]).toMatchObject({ type: "create_frame", rolledBack: true });
+    expect(result[0]).not.toHaveProperty("nodeId");
+    expect(result[1]).toMatchObject({ type: "rename", rolledBack: true });
+    expect(result[1]).not.toHaveProperty("nodeId");
+    expect(result[2]).toMatchObject({
+      type: "rename", nodeId: "existing-1", rolledBack: true,
+    });
+    expect(result[3]).toMatchObject({
+      type: "move",
+      nodeId: "existing-1",
+      before: { parentId: "existing-parent" },
+      rolledBack: true,
+    });
+    expect(result[4]).toMatchObject({
+      type: "set_component_properties", status: "failed", error: "Component property not found: $transient",
+    });
+    expect(JSON.stringify(result)).not.toContain("transient-1");
+  });
+
+  it("redacts the symbolic target in the exact create, rename, failure fallback rollback", async () => {
+    const parent = { id: "parent", appendChild: vi.fn() };
+    const transient: Record<string, unknown> = {
+      id: "transient-1", name: "", fills: [], x: 0, y: 0,
+      resize: vi.fn(),
+    };
+    const fallback = await handleExecute(null, {
+      actions: [
+        { type: "create_frame", parentId: "parent", name: "Transient", as: "transient" },
+        { type: "rename", nodeId: "$transient", name: "Renamed" },
+        { type: "rename", nodeId: "missing", name: "Fails" },
+      ],
+      rollbackOnError: true,
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>;
+
+    const result = await new AsyncFunction("figma", fallback.fallbackJs!)({
+      getNodeById: (id: string) => id === "parent" ? parent : id === "transient-1" ? transient : undefined,
+      createFrame: () => transient,
+      commitUndo: vi.fn(),
+      triggerUndo: vi.fn(),
+    });
+
+    expect(result).toEqual([
+      { type: "create_frame", rolledBack: true },
+      { type: "rename", rolledBack: true },
+      { actionIndex: 2, type: "rename", status: "failed", error: "Cannot set properties of undefined (setting 'name')" },
+      { type: "rollback", status: "applied" },
+    ]);
   });
 
   it("keeps a planned grouping wrapper absolute in plugin and fallback execution paths", async () => {
@@ -545,6 +836,8 @@ describe("handleExecute fallback generation", () => {
         resolvedType: "FLOAT",
         value: 16,
       },
+      { type: "create_from_svg", parentId: "1:2", svg: "<svg/>" },
+      { type: "create_section", parentId: "1:2", name: "Section" },
     ];
     const actions = [
       { type: "rename", nodeId: "1:1", name: "Before creates" },
@@ -749,5 +1042,24 @@ describe("inspection cache invalidation after execution", () => {
       expect(invalidateSnapshotsAfterExecute(snapshotCache, execution)).toBe(false);
       expect(snapshotCache.get("file/root", Number.POSITIVE_INFINITY)).not.toBeNull();
     }
+  });
+
+  it("does not invalidate for an applied inspect-only connected batch", () => {
+    const snapshotCache = new SnapshotCache();
+    snapshotCache.set("file/root", {} as EnrichedNode);
+    const cacheInvalidated = invalidateSnapshotsAfterExecute(snapshotCache, {
+      pluginConnected: true,
+      result: {
+        batchId: "batch-inspect",
+        dryRun: false,
+        success: true,
+        results: [],
+        nodeIdMap: {},
+        summary: { total: 1, applied: 1, failed: 0, skipped: 0, mutations: 0 },
+      },
+    });
+
+    expect(cacheInvalidated).toBe(false);
+    expect(snapshotCache.get("file/root", Number.POSITIVE_INFINITY)).not.toBeNull();
   });
 });

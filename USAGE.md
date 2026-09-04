@@ -176,18 +176,20 @@ Plans are reviewable: the agent inspects, edits, or filters before sending to `f
 
 `figma_execute` batches up to 500 validated actions into a single round-trip. With the plugin connected, the bridge runs them in-process; without it, you get fallback JS for `use_figma`.
 
-Fallback JavaScript preserves `dryRun`, `stopOnError`, and `rollbackOnError` semantics. Rollback requires the host runtime to expose `figma.triggerUndo`; when `rollbackOnError: true`, the tool returns a structured `fallbackLimitations` entry and the program fails closed before executing any action if that API is unavailable.
+Fallback JavaScript preserves `dryRun`, `stopOnError`, and `rollbackOnError` semantics. Rollback requires the host runtime to expose both `figma.commitUndo` and `figma.triggerUndo`; successful and failed batches use explicit undo boundaries so a failed batch cannot undo an earlier successful one. When `rollbackOnError: true`, the tool returns a structured `fallbackLimitations` entry and fails closed before executing any action if either API is unavailable.
 
-43 action types are available. Highlights:
+55 action types are available. Highlights:
 
-- **Nodes**: `create_frame`, `create_text`, `create_component`, `create_instance`, `clone_node`, `delete_node`
-- **Layout**: `set_auto_layout`, `set_child_layout_sizing` (FILL / HUG / FIXED), `set_constraints`, `move_node`, `resize_node`
-- **Paint**: `set_fills`, `set_strokes`, `set_gradient_fill`, `set_effects`
-- **Type**: `set_text_content`, `set_font`
-- **Styles**: `create_paint_style`, `create_text_style`, `create_effect_style`, `apply_style`
-- **Variables**: `create_variable_collection`, `create_variable`, `bind_variable`
+- **Nodes**: `create_frame`, `create_text`, `create_component_from_node`, `create_instance`, `duplicate_node`, `delete_node`
+- **Layout**: `set_layout_mode`, `set_child_layout_sizing` (FILL / HUG / FIXED), `set_constraints`, `move`, `resize`
+- **Paint/assets**: `set_fills`, `set_strokes`, `set_gradient_fill`, `set_effects`, `set_image_fill`, `create_from_svg`
+- **Type**: `set_text_content`, `set_text_style`, `set_text_properties`
+- **Styles**: `create_paint_style`, `create_text_style`, `create_effect_style`, name-resolved `apply_style`, `update_style`
+- **Variables**: `create_variable_collection`, `create_variable`, name-resolved `bind_variable`, `set_variable_value`
 - **Pages**: `create_page`, `switch_page`
-- **Components**: `set_component_properties`, `swap_instance`
+- **Components**: component-set properties/references, `set_component_properties`, and nested text/visibility/swap overrides
+- **Boards/prototypes**: `create_section`, `resize_section`, `move_to_section`, bounded `set_reaction`
+- **Read-back**: read-only `inspect` after earlier mutations, including nodes addressed through stable aliases
 
 `create_frame` creates a transparent frame (`fills: []`) by default, making it suitable for structural and auto-layout containers. Apply `set_fills` explicitly when the frame should render a background or other visual surface.
 
@@ -198,16 +200,27 @@ See the `figma://actions` MCP resource for the full schema.
 ```
 figma_execute({
   actions: [
-    { type: "create_page", name: "Dashboard" },
-    { type: "create_frame", name: "Sidebar", parentId: "$ref:node-0", width: 240, height: 800 },
-    { type: "create_text", parentId: "$ref:node-1", characters: "Analytics", fontSize: 24, name: "Sidebar/Title" }
+    { type: "create_page", name: "Dashboard", as: "dashboard" },
+    { type: "create_frame", name: "Sidebar", parentId: "$dashboard", width: 240, height: 800, as: "sidebar" },
+    { type: "create_text", parentId: "$sidebar", characters: "Analytics", fontSize: 24, name: "Sidebar/Title" },
+    { type: "inspect", nodeId: "$sidebar", depth: 2 }
   ],
   dryRun: false,
   stopOnError: true
 })
 ```
 
-`$ref:node-N` resolves to the Nth newly-created node within the same batch, so you can build trees in a single call.
+Aliases use `as: "name"` and `$name`, and are the recommended stable reference form. `$ref:node-N` remains supported for migration compatibility. Duplicate, malformed, reserved, unknown, self, forward, and cyclic references fail whole-batch preflight before mutation.
+
+Image fills accept exactly one of `imageBase64`, a server-local `path`, or a public HTTP(S) `url`. Local paths are disabled until `FIGMA_ASSET_ROOTS` explicitly lists allowed directories (platform-delimiter separated); roots and files are resolved through realpaths, so traversal and symlink escapes are rejected. The server fully validates PNG, JPEG, or GIF structure, checks the Figma API’s 4096×4096 dimension limit, and enforces a 10 MiB decoded limit before transport. WebP is rejected because the installed Plugin API contract does not support it. URL ingestion times out after 10 seconds, follows at most five redirects, and rejects private, loopback, link-local, and reserved destinations at every hop. SVG creation accepts at most 1 MiB of inert markup and rejects scripts, event handlers, and external resources.
+
+`set_gradient_fill` accepts the legacy single-gradient fields or an ordered `gradients` array for layered linear/radial/angular fills. Each gradient may supply either `angle` or an explicit invertible `gradientTransform`. Text styles are applied after loading the resolved style font; on `create_text`, the style is applied first and explicit typography fields override it second. Section width and height must each be at least `0.01`.
+
+Variable and style names are exact matches. Use `collectionName`/`collectionId` and `resolvedType` to disambiguate variables; duplicate matches are errors. Nested instance operations use `childPath`, where every segment must match exactly one direct child.
+
+Use `inspect: { nodeId, depth?, limit?, scanLimit? }` after writes when later logic needs the exact plugin-native state immediately. It returns a tree with child IDs, bounds/dimensions, text, visibility, paints, resolved CSS, style and variable bindings, component properties/definitions/references, and safe layout fields. Defaults are depth 2, 100 results, and 1,000 scanned nodes; hard caps match plugin inspection (depth 20, 1,000 results, 10,000 scanned nodes, 4KB per scalar/native property). All `inspect` results in one batch share an 80KB response budget and report `responseBytes`, omission counts, and truncation reasons.
+
+`inspect` is not a mutation: it increments `summary.applied` as a completed action but not `summary.mutations`, and an inspect-only batch does not invalidate inspection caches. With `rollbackOnError`, if a later failure rolls back earlier writes, every transient inspection tree is removed from the returned result and its metadata is marked `rolledBack: true`; this prevents pre-rollback state from being mistaken for committed state.
 
 ### dryRun
 

@@ -81,6 +81,18 @@ function readParams(name: string) {
   };
 }
 
+function batchResult(batch: Record<string, unknown>, success: boolean) {
+  return {
+    type: "batch_result",
+    batchId: batch.batchId,
+    dryRun: false,
+    success,
+    results: [],
+    nodeIdMap: {},
+    summary: { total: 1, applied: success ? 1 : 0, failed: success ? 0 : 1, skipped: 0 },
+  };
+}
+
 describe("BridgeServer plugin reads", () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -423,6 +435,120 @@ describe("BridgeServer WebSocket limits", () => {
       expect(bridge.isConnected()).toBe(true);
     } finally {
       client.terminate();
+      await bridge.stop();
+    }
+  });
+});
+
+describe("BridgeServer batch serialization", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("sends concurrent callers in FIFO order and continues after a failed batch", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const bridge = new BridgeServer();
+    const port = await getAvailablePort();
+    const client = await connectPlugin(bridge, port);
+    const received: Array<Record<string, unknown>> = [];
+    client.on("message", (raw) => {
+      const message = JSON.parse(raw.toString());
+      if (message.type === "batch") received.push(message);
+    });
+    const request = (name: string) => bridge.execute({
+      dryRun: false,
+      stopOnError: true,
+      rollbackOnError: true,
+      requiredFonts: [],
+      actions: [{ type: "rename", nodeId: "node", name }],
+    });
+
+    try {
+      const first = request("fails");
+      const second = request("persists");
+      await vi.waitFor(() => expect(received).toHaveLength(1));
+      expect(bridge.getStatus().pendingBatches).toBe(2);
+
+      client.send(JSON.stringify(batchResult(received[0]!, false)));
+      await expect(first).resolves.toMatchObject({ success: false });
+      await vi.waitFor(() => expect(received).toHaveLength(2));
+
+      client.send(JSON.stringify(batchResult(received[1]!, true)));
+      await expect(second).resolves.toMatchObject({ success: true });
+      expect(bridge.getStatus().pendingBatches).toBe(0);
+    } finally {
+      client.terminate();
+      await bridge.stop();
+    }
+  });
+
+  it("settles a timed-out head and allows the next queued batch to complete", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const bridge = new BridgeServer();
+    const port = await getAvailablePort();
+    const client = await connectPlugin(bridge, port);
+    const received: Array<Record<string, unknown>> = [];
+    client.on("message", (raw) => {
+      const message = JSON.parse(raw.toString());
+      if (message.type === "batch") received.push(message);
+    });
+    const payload = {
+      dryRun: false, stopOnError: true, rollbackOnError: true, requiredFonts: [], actions: [],
+    };
+
+    try {
+      const timedOut = bridge.execute(payload, 100);
+      const timedOutAssertion = expect(timedOut).rejects.toThrow("timed out after 100ms");
+      const later = bridge.execute(payload, 1_000);
+      await vi.waitFor(() => expect(received).toHaveLength(1));
+      await timedOutAssertion;
+      await vi.waitFor(() => expect(received).toHaveLength(2));
+      client.send(JSON.stringify(batchResult(received[1]!, true)));
+      await expect(later).resolves.toMatchObject({ success: true });
+      expect(bridge.getStatus().pendingBatches).toBe(0);
+    } finally {
+      client.terminate();
+      await bridge.stop();
+    }
+  });
+
+  it("rejects old queued work on disconnect and accepts fresh work after reconnect", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const bridge = new BridgeServer();
+    const port = await getAvailablePort();
+    const client = await connectPlugin(bridge, port);
+    const payload = {
+      dryRun: false, stopOnError: true, rollbackOnError: true, requiredFonts: [], actions: [],
+    };
+    let replacement: WebSocket | undefined;
+
+    try {
+      const active = bridge.execute(payload);
+      const activeAssertion = expect(active).rejects.toThrow("disconnected mid-batch");
+      const queued = bridge.execute(payload);
+      const queuedAssertion = expect(queued).rejects.toThrow("disconnected or was replaced");
+      await vi.waitFor(() => expect(bridge.getStatus().pendingBatches).toBe(2));
+      client.close();
+      await Promise.all([activeAssertion, queuedAssertion]);
+      expect(bridge.getStatus().pendingBatches).toBe(0);
+
+      replacement = new WebSocket(`ws://127.0.0.1:${port}/plugin`);
+      await new Promise<void>((resolve, reject) => {
+        replacement!.once("open", resolve);
+        replacement!.once("error", reject);
+      });
+      replacement.send(JSON.stringify({
+        type: "handshake", pluginVersion: "test-2", fileKey: "file-a", pageName: "Page 2", documentName: "Bridge test",
+      }));
+      await vi.waitFor(() => expect(bridge.getStatus().pluginVersion).toBe("test-2"));
+      const received = new Promise<Record<string, unknown>>((resolve) => {
+        replacement!.once("message", (raw) => resolve(JSON.parse(raw.toString())));
+      });
+      const fresh = bridge.execute(payload);
+      const freshBatch = await received;
+      replacement.send(JSON.stringify(batchResult(freshBatch, true)));
+      await expect(fresh).resolves.toMatchObject({ success: true });
+    } finally {
+      client.terminate();
+      replacement?.terminate();
       await bridge.stop();
     }
   });

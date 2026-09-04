@@ -43,7 +43,7 @@ AI Agent (Claude Code / Codex / Gemini)
     │
     ├─ This MCP Server ─────→ Design intelligence (analysis, planning, codegen)
     │       ↕ WebSocket (ports 4010-4014)
-    │   Figma plugin ─────→ Local inspection + batch executor (43 action types)
+    │   Figma plugin ─────→ Local inspection + batch executor (55 action types, 30-60x faster)
     │
     └─ Browser tools ───────→ Website capture & analysis
 ```
@@ -75,7 +75,7 @@ See [CHANGELOG.md](CHANGELOG.md) for prior releases.
 ### Write (high-performance batch execution)
 `figma_execute`, `figma_plugin_status`
 
-43 action types — frames, text, components, instances, paints, strokes, gradients, effects, auto-layout, constraints, variables, pages. See `figma://actions` MCP resource or [USAGE.md](USAGE.md) for the catalog.
+55 action types — stable named references, bounded same-batch `inspect` read-back, component properties and nested overrides, name-resolved variables/styles, safe image/SVG ingestion, sections, reactions, gradients, auto-layout, and text controls. See `figma://actions` MCP resource or [USAGE.md](USAGE.md) for the catalog.
 
 ## Documentation
 

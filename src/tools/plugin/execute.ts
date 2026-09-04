@@ -1,9 +1,11 @@
 import type { BridgeServer, BatchResult } from "../../plugin/bridge.js";
 import type { SnapshotCache } from "../../pipeline/snapshot.js";
 import { compileBatch } from "../../plugin/batch-compiler.js";
+import { preprocessActions } from "../../plugin/assets.js";
 import { actionSchema, type Action } from "../../shared/actions.js";
 import { assertActionInputCoverage, FORBIDDEN_DELETE_NODE_TYPES, isKnownActionType } from "../../shared/action-parity.js";
 import { weightToFontStyle } from "../../shared/font.js";
+import { MAX_PLUGIN_BATCH_INSPECTION_BYTES, MAX_PLUGIN_READ_SCALAR_BYTES } from "../../shared/plugin-read.js";
 
 interface ExecuteParams {
   actions: unknown[];
@@ -22,7 +24,7 @@ export interface ExecuteResult {
 
 export interface FallbackLimitation {
   option: "rollbackOnError";
-  condition: "figma.triggerUndo_unavailable";
+  condition: "figma.undo_api_unavailable";
   message: string;
 }
 
@@ -36,7 +38,8 @@ export function invalidateSnapshotsAfterExecute(
   execution: ExecuteResult
 ): boolean {
   const batch = execution.result;
-  if (!execution.pluginConnected || !batch || batch.dryRun || batch.summary.applied === 0) {
+  const mutations = batch?.summary.mutations ?? batch?.summary.applied ?? 0;
+  if (!execution.pluginConnected || !batch || batch.dryRun || mutations === 0) {
     return false;
   }
   snapshotCache.invalidateAll();
@@ -48,15 +51,17 @@ export async function handleExecute(
   params: ExecuteParams
 ): Promise<ExecuteResult> {
   // Validate actions
-  const validated: Action[] = [];
-  for (const raw of params.actions) {
+  const parsedActions: Action[] = [];
+  for (let index = 0; index < params.actions.length; index++) {
+    const raw = params.actions[index];
     const parsed = actionSchema.safeParse(raw);
     if (!parsed.success) {
-      throw new Error(`Invalid action: ${parsed.error.issues.map(i => i.message).join(", ")}`);
+      throw new Error(`Invalid action ${index}: ${parsed.error.issues.map(i => i.message).join(", ")}`);
     }
     assertActionInputCoverage(parsed.data);
-    validated.push(parsed.data);
+    parsedActions.push(parsed.data);
   }
+  const validated = await preprocessActions(parsedActions);
 
   // Compile batch
   const batch = compileBatch(validated, {
@@ -83,8 +88,8 @@ export async function handleExecute(
     ...(batch.rollbackOnError ? {
       fallbackLimitations: [{
         option: "rollbackOnError" as const,
-        condition: "figma.triggerUndo_unavailable" as const,
-        message: "Fallback rollback uses figma.triggerUndo. The generated program aborts instead of silently ignoring rollbackOnError when that API is unavailable.",
+        condition: "figma.undo_api_unavailable" as const,
+        message: "Fallback rollback uses figma.commitUndo and figma.triggerUndo. The generated program aborts instead of risking a cross-batch undo when either API is unavailable.",
       }],
     } : {}),
   };
@@ -98,16 +103,17 @@ function generateFallbackJs(
 ): string {
   const lines: string[] = [];
   const fontsNeeded = new Set<string>();
+  const j = JSON.stringify;
+  const needsInspection = actions.some((action) => action.type === "inspect");
 
   for (const action of actions) {
-    if (action.type === "create_text" || action.type === "create_text_style") {
+    if (action.type === "create_text_style" || (action.type === "create_text" && !action.textStyleId && !action.textStyleName)) {
       const weight = action.fontWeight ?? 400;
       const style = weightToStyle(weight);
-      fontsNeeded.add(`await loadFontOnce({ family: "${action.fontFamily}", style: "${style}" });`);
+      fontsNeeded.add(`await loadFontOnce({ family: ${j(action.fontFamily ?? "Inter")}, style: ${j(style)} });`);
     }
   }
 
-  const j = JSON.stringify;
   lines.push(`const executionOptions = ${j(options)};`);
   lines.push("if (executionOptions.dryRun) {");
   lines.push("  return [");
@@ -119,8 +125,8 @@ function generateFallbackJs(
   lines.push("  ];");
   lines.push("}");
   lines.push("");
-  lines.push("if (executionOptions.rollbackOnError && typeof figma.triggerUndo !== \"function\") {");
-  lines.push("  throw new Error(\"Fallback execution environment does not support rollback (figma.triggerUndo).\");");
+  lines.push("if (executionOptions.rollbackOnError && (typeof figma.commitUndo !== \"function\" || typeof figma.triggerUndo !== \"function\")) {");
+  lines.push("  throw new Error(\"Fallback execution environment does not support rollback isolation (figma.commitUndo and figma.triggerUndo are required).\");");
   lines.push("}");
   lines.push("");
   lines.push("const loadedFonts = new Set();");
@@ -141,17 +147,41 @@ function generateFallbackJs(
   lines.push("const results = [];");
   lines.push("let failed = false;");
   lines.push("let documentWrites = 0;");
+  if (needsInspection) lines.push("let inspectionBytes = 0;");
   lines.push("let stopProcessing = false;");
   lines.push("const createdNodeIds = new Map();");
-  lines.push("const recordCreatedNode = (ref, result) => {");
+  lines.push("const recordCreatedNode = (ref, result, aliasRef) => {");
   lines.push("  createdNodeIds.set(ref, result.nodeId);");
+  lines.push("  if (aliasRef) createdNodeIds.set(aliasRef, result.nodeId);");
   lines.push("  results.push(result);");
   lines.push("};");
   lines.push("const markDocumentWrite = () => { documentWrites++; };");
+  lines.push("const redactTransientIds = (value, transientIds) => { if (typeof value === 'string') { let redacted = value; for (const id of transientIds) redacted = redacted.split(id).join('[rolled back node]'); return redacted; } if (Array.isArray(value)) return value.map(item => redactTransientIds(item, transientIds)); if (!value || typeof value !== 'object') return value; return Object.fromEntries(Object.entries(value).map(([key, item]) => [redactTransientIds(key, transientIds), redactTransientIds(item, transientIds)])); };");
+  if (needsInspection) {
+  lines.push(`const MAX_BATCH_INSPECTION_BYTES = ${MAX_PLUGIN_BATCH_INSPECTION_BYTES};`);
+  lines.push(`const MAX_INSPECT_SCALAR_BYTES = ${MAX_PLUGIN_READ_SCALAR_BYTES};`);
+  lines.push("const inspectRead = (node, property) => { try { return node[property]; } catch { return undefined; } };");
+  lines.push("const inspectUtf8Bytes = (value) => { let bytes = 0; for (let i = 0; i < value.length; i++) { const first = value.charCodeAt(i); if (first <= 0x7f) bytes += 1; else if (first <= 0x7ff) bytes += 2; else if (first >= 0xd800 && first <= 0xdbff && i + 1 < value.length && value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) { bytes += 4; i++; } else bytes += 3; } return bytes; };");
+  lines.push("const inspectTruncate = (value) => { let bytes = 0; let returnedBytes = 0; let end = 0; let complete = true; for (let i = 0; i < value.length; i++) { const first = value.charCodeAt(i); let size; let charEnd = i + 1; if (first <= 0x7f) size = 1; else if (first <= 0x7ff) size = 2; else if (first >= 0xd800 && first <= 0xdbff && i + 1 < value.length && value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) { size = 4; charEnd = i + 2; i++; } else size = 3; bytes += size; if (complete && returnedBytes + size <= MAX_INSPECT_SCALAR_BYTES - 3) { returnedBytes += size; end = charEnd; } else complete = false; } return bytes <= MAX_INSPECT_SCALAR_BYTES ? { value, originalBytes: bytes, returnedBytes: bytes, truncated: false } : { value: value.slice(0, end) + '…', originalBytes: bytes, returnedBytes: returnedBytes + 3, truncated: true }; };");
+  lines.push("const inspectBoundString = (value, field, truncatedFields) => { const bounded = inspectTruncate(value); if (bounded.truncated) truncatedFields[field] = { originalBytes: bounded.originalBytes, returnedBytes: bounded.returnedBytes }; return bounded.value; };");
+  lines.push("const inspectSafeValue = (value) => { if (typeof value === 'symbol') return 'mixed'; try { return JSON.parse(JSON.stringify(value)); } catch { return 'mixed'; } };");
+  lines.push("const inspectNative = (node, property, truncatedFields, output) => { const raw = inspectRead(node, property); if (raw === undefined) return; const value = inspectSafeValue(raw); const originalBytes = inspectUtf8Bytes(JSON.stringify(value)); if (originalBytes > MAX_INSPECT_SCALAR_BYTES) { truncatedFields[property] = { originalBytes, returnedBytes: 0 }; return; } output[property] = value; };");
+  lines.push("const inspectNumber = (node, property, output) => { const value = inspectRead(node, property); if (typeof value === 'number' && Number.isFinite(value)) output[property] = value; };");
+  lines.push("const inspectString = (node, property, truncatedFields, output) => { const value = inspectRead(node, property); if (typeof value === 'string') output[property] = inspectBoundString(value, property, truncatedFields); };");
+  lines.push("const inspectBounds = (node) => { const box = inspectRead(node, 'absoluteBoundingBox'); if (!box || typeof box !== 'object' || !['x','y','width','height'].every((key) => typeof box[key] === 'number' && Number.isFinite(box[key]))) return undefined; return { x: box.x, y: box.y, width: box.width, height: box.height }; };");
+  lines.push("const inspectChildren = (node) => { const children = inspectRead(node, 'children'); return Array.isArray(children) ? children : []; };");
+  lines.push("const inspectSerializeNode = async (node, children, depth) => { const truncatedFields = {}; const type = typeof inspectRead(node, 'type') === 'string' ? inspectRead(node, 'type') : 'UNKNOWN'; const output = { id: inspectBoundString(typeof inspectRead(node, 'id') === 'string' ? inspectRead(node, 'id') : 'unknown', 'id', truncatedFields), name: inspectBoundString(typeof inspectRead(node, 'name') === 'string' ? inspectRead(node, 'name') : 'Unknown', 'name', truncatedFields), type: inspectBoundString(type, 'type', truncatedFields), classification: 'unknown', depth, childCount: inspectChildren(node).length, children }; const visible = inspectRead(node, 'visible'); if (typeof visible === 'boolean') output.visible = visible; const bounds = inspectBounds(node); if (bounds) output.bounds = bounds; const characters = inspectRead(node, 'characters'); if (typeof characters === 'string') output.textContent = inspectBoundString(characters, 'textContent', truncatedFields); if (type === 'INSTANCE' && typeof node.getMainComponentAsync === 'function') { try { const main = await node.getMainComponentAsync(); if (main && typeof main.id === 'string') output.componentId = inspectBoundString(main.id, 'componentId', truncatedFields); } catch {} } if ((type === 'COMPONENT' || type === 'COMPONENT_SET') && typeof inspectRead(node, 'key') === 'string') output.componentKey = inspectBoundString(inspectRead(node, 'key'), 'componentKey', truncatedFields); if ((type === 'COMPONENT' || type === 'COMPONENT_SET') && typeof inspectRead(node, 'description') === 'string') output.description = inspectBoundString(inspectRead(node, 'description'), 'description', truncatedFields); const parent = inspectRead(node, 'parent'); if (parent && parent.type === 'COMPONENT_SET') output.componentSetId = inspectBoundString(parent.id, 'componentSetId', truncatedFields); for (const property of ['itemSpacing','paddingLeft','paddingRight','paddingTop','paddingBottom','opacity','rotation','topLeftRadius','topRightRadius','bottomRightRadius','bottomLeftRadius']) inspectNumber(node, property, output); const cornerRadius = inspectRead(node, 'cornerRadius'); if (typeof cornerRadius === 'symbol') output.cornerRadius = 'mixed'; else if (typeof cornerRadius === 'number' && Number.isFinite(cornerRadius)) output.cornerRadius = cornerRadius; for (const property of ['layoutMode','layoutWrap','primaryAxisAlignItems','counterAxisAlignItems','layoutSizingHorizontal','layoutSizingVertical','fillStyleId','strokeStyleId','textStyleId','effectStyleId']) inspectString(node, property, truncatedFields, output); for (const property of ['fills','strokes','effects','componentProperties','componentPropertyDefinitions','componentPropertyReferences','boundVariables','resolvedVariableModes']) inspectNative(node, property, truncatedFields, output); if (typeof node.getCSSAsync === 'function') { try { const css = await node.getCSSAsync(); inspectNative({ css }, 'css', truncatedFields, output); } catch {} } if (Object.keys(truncatedFields).length) output.truncatedFields = truncatedFields; return output; };");
+  lines.push("const inspectTree = async (node, depth, budget, currentDepth = 0) => { if (budget.remaining <= 0) { budget.truncated = true; budget.omittedNodeCount++; return null; } budget.remaining--; budget.visited++; const children = []; if (depth > 0) { const sourceChildren = inspectChildren(node); for (let index = 0; index < sourceChildren.length; index++) { const serialized = await inspectTree(sourceChildren[index], depth - 1, budget, currentDepth + 1); if (!serialized) { budget.omittedNodeCount += sourceChildren.length - index - 1; break; } children.push(serialized); } } return inspectSerializeNode(node, children, currentDepth); };");
+  lines.push("const inspectCount = (root) => root ? 1 + root.children.reduce((count, child) => count + inspectCount(child), 0) : 0;");
+  lines.push("const inspectAtDepth = (node, depth) => ({ ...node, children: depth > 0 ? node.children.map((child) => inspectAtDepth(child, depth - 1)) : [] });");
+  lines.push("const inspectScalarSummary = (root) => { let truncatedFieldCount = 0; let omittedScalarBytes = 0; const visit = (node) => { for (const field of Object.values(node.truncatedFields || {})) { truncatedFieldCount++; omittedScalarBytes += field.originalBytes - field.returnedBytes; } node.children.forEach(visit); }; if (root) visit(root); return { truncatedFieldCount, omittedScalarBytes }; };");
+  lines.push("const inspectMeasure = (inspection) => { let responseBytes = 0; for (let attempt = 0; attempt < 8; attempt++) { const result = { ...inspection, responseBytes }; const measured = inspectUtf8Bytes(JSON.stringify(result)); if (measured === responseBytes) return result; responseBytes = measured; } return { ...inspection, responseBytes }; };");
+  lines.push("const inspectInvalidateRollback = (inspection) => { const { root, responseBytes, ...retained } = inspection; return inspectMeasure({ ...retained, returnedCount: 0, omittedNodeCount: inspection.omittedNodeCount + inspection.returnedCount, truncated: true, rolledBack: true }); };");
+  lines.push("const inspectBuild = async (node, action, maxResponseBytes) => { if (maxResponseBytes < 512) throw new Error('Batch inspection response limit of ' + MAX_BATCH_INSPECTION_BYTES + ' bytes exhausted'); const effectiveLimit = Math.min(action.limit, action.scanLimit); const budget = { remaining: effectiveLimit, visited: 0, truncated: false, omittedNodeCount: 0 }; const serialized = await inspectTree(node, action.depth, budget); if (!serialized) throw new Error('Inspect result limit exhausted before serializing the root node'); const limitReasons = budget.truncated ? [action.limit <= action.scanLimit ? 'result_limit' : 'scan_limit'] : []; const scanLimitReached = budget.truncated && action.scanLimit < action.limit; const originalReturnedCount = inspectCount(serialized); let omittedPropertyCount = 0; const candidate = (root, responseLimited) => { const returnedCount = inspectCount(root); const scalar = inspectScalarSummary(root); const reasons = Array.from(new Set([...limitReasons, ...(scalar.truncatedFieldCount ? ['scalar_field_limit'] : []), ...(responseLimited ? ['response_byte_limit'] : [])])); return inspectMeasure({ root, totalScanned: budget.visited, returnedCount, omittedNodeCount: budget.omittedNodeCount + originalReturnedCount - returnedCount, omittedNodeCountExact: !budget.truncated, truncated: reasons.length > 0, truncationReasons: reasons, traversalDepth: action.depth, resultLimit: action.limit, scanLimit: action.scanLimit, scanLimitReached, truncatedFieldCount: scalar.truncatedFieldCount, omittedScalarBytes: scalar.omittedScalarBytes, omittedPropertyCount }); }; let response = candidate(serialized, false); if (response.responseBytes <= maxResponseBytes) return response; for (let retainedDepth = Math.max(0, action.depth - 1); retainedDepth >= 0; retainedDepth--) { response = candidate(inspectAtDepth(serialized, retainedDepth), true); if (response.responseBytes <= maxResponseBytes) return response; } const root = inspectAtDepth(serialized, 0); for (const field of ['css','resolvedVariableModes','boundVariables','componentPropertyReferences','componentPropertyDefinitions','componentProperties','effects','strokes','fills','description','componentKey','componentId','componentSetId','textContent','fillStyleId','strokeStyleId','textStyleId','effectStyleId']) { if (root[field] === undefined) continue; delete root[field]; omittedPropertyCount++; response = candidate(root, true); if (response.responseBytes <= maxResponseBytes) return response; } throw new Error('Inspect root cannot fit within remaining batch response limit of ' + maxResponseBytes + ' bytes'); };");
+  }
   lines.push("const resolveRefId = (id) => {");
   lines.push("  if (typeof id !== \"string\") return id;");
-  lines.push("  const match = id.match(/^\\$ref:node-(\\d+)$/);");
-  lines.push("  if (!match) return id;");
+  lines.push("  if (!id.startsWith(\"$\")) return id;");
   lines.push("  const resolved = createdNodeIds.get(id);");
   lines.push("  if (!resolved) throw new Error(`Unable to resolve ${id}. Ensure referenced action ran first.`);");
   lines.push("  return resolved;");
@@ -187,16 +217,35 @@ function generateFallbackJs(
   lines.push("  return cleaned;");
   lines.push("});");
   lines.push("const parseVariableValue = (resolvedType, value) => {");
-  lines.push("  if (resolvedType !== \"COLOR\" || typeof value !== \"string\") return value;");
-  lines.push("  const cleaned = value.replace(\"#\", \"\");");
-  lines.push("  const expanded = cleaned.length === 3 ? cleaned.split(\"\").map((channel) => channel + channel).join(\"\") : cleaned;");
-  lines.push("  return {");
-  lines.push("    r: parseInt(expanded.substring(0, 2), 16) / 255,");
-  lines.push("    g: parseInt(expanded.substring(2, 4), 16) / 255,");
-  lines.push("    b: parseInt(expanded.substring(4, 6), 16) / 255,");
-  lines.push("    a: expanded.length === 8 ? parseInt(expanded.substring(6, 8), 16) / 255 : 1,");
-  lines.push("  };");
+  lines.push("  if (resolvedType === 'COLOR') {");
+  lines.push("    if (value && typeof value === 'object' && ['r','g','b'].every(key => typeof value[key] === 'number')) return value;");
+  lines.push("    if (typeof value !== 'string' || !/^#?(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value)) throw new Error('COLOR variable value must be valid hex or RGBA');");
+  lines.push("    const cleaned = value.replace('#', ''); const expanded = cleaned.length === 3 ? cleaned.split('').map(channel => channel + channel).join('') : cleaned;");
+  lines.push("    return { r: parseInt(expanded.slice(0,2),16)/255, g: parseInt(expanded.slice(2,4),16)/255, b: parseInt(expanded.slice(4,6),16)/255, a: expanded.length === 8 ? parseInt(expanded.slice(6,8),16)/255 : 1 };");
+  lines.push("  }");
+  lines.push("  if (resolvedType === 'FLOAT' && typeof value !== 'number') throw new Error('FLOAT variable value must be a number');");
+  lines.push("  if (resolvedType === 'STRING' && typeof value !== 'string') throw new Error('STRING variable value must be a string');");
+  lines.push("  if (resolvedType === 'BOOLEAN' && typeof value !== 'boolean') throw new Error('BOOLEAN variable value must be a boolean');");
+  lines.push("  return value;");
   lines.push("};");
+  lines.push("const propertyDisplayName = (key) => key.includes('#') ? key.slice(0, key.lastIndexOf('#')) : key;");
+  lines.push("const resolveComponentPropertyKey = (definitions, requested) => {");
+  lines.push("  if (Object.prototype.hasOwnProperty.call(definitions, requested)) return requested;");
+  lines.push("  const matches = Object.keys(definitions).filter(key => propertyDisplayName(key) === requested);");
+  lines.push("  if (!matches.length) throw new Error(`Component property not found: ${requested}`);");
+  lines.push("  if (matches.length > 1) throw new Error(`Component property name is ambiguous: ${requested}`);");
+  lines.push("  return matches[0];");
+  lines.push("};");
+  lines.push("const requireAttachedInstance = async (id) => { const node = requireNode(id); if (node.type !== 'INSTANCE') throw new Error(`Node ${id} is not an instance`); if (typeof node.getMainComponentAsync === 'function' && !(await node.getMainComponentAsync())) throw new Error(`Instance ${id} is detached or has no main component`); return node; };");
+  lines.push("const findInstanceChild = async (id, path) => { let current = await requireAttachedInstance(id); for (const segment of path) { if (!Array.isArray(current.children)) throw new Error(`Child path cannot descend through ${current.type}`); const matches = current.children.filter(child => child.name === segment); if (!matches.length) throw new Error(`Child path segment not found: ${segment}`); if (matches.length > 1) throw new Error(`Child path segment is ambiguous: ${segment}`); current = matches[0]; } return current; };");
+  lines.push("const localStyles = async (type) => type === 'PAINT' ? figma.getLocalPaintStylesAsync() : type === 'TEXT' ? figma.getLocalTextStylesAsync() : figma.getLocalEffectStylesAsync();");
+  lines.push("const resolveStyle = async (type, id, name) => { if (id) { const style = await figma.getStyleByIdAsync(resolveRefId(id)); if (!style) throw new Error(`Style not found: ${id}`); if (style.type !== type) throw new Error(`Style ${id} is ${style.type}, not ${type}`); return style; } const matches = (await localStyles(type)).filter(style => style.name === name); if (!matches.length) throw new Error(`Style not found: ${name}`); if (matches.length > 1) throw new Error(`Style name is ambiguous: ${name}`); return matches[0]; };");
+  lines.push("const gradientTransform = (gradient) => { if (gradient.gradientTransform) return gradient.gradientTransform; const angle = (gradient.angle || 0) * Math.PI / 180; return [[Math.cos(angle), Math.sin(angle), 0], [-Math.sin(angle), Math.cos(angle), 0]]; };");
+  lines.push("const gradientPaints = (action) => (action.gradients || [action]).map((gradient) => ({ type: `GRADIENT_${gradient.gradientType || 'LINEAR'}`, gradientStops: gradient.stops, gradientTransform: gradientTransform(gradient), ...(gradient.visible !== undefined ? { visible: gradient.visible } : {}), ...(gradient.opacity !== undefined ? { opacity: gradient.opacity } : {}), ...(gradient.blendMode !== undefined ? { blendMode: gradient.blendMode } : {}) }));");
+  lines.push("const resolveVariable = async (action) => { let variable; if (action.variableId) variable = figma.variables.getVariableByIdAsync ? await figma.variables.getVariableByIdAsync(resolveRefId(action.variableId)) : figma.variables.getVariableById(resolveRefId(action.variableId)); else { let candidates = (await figma.variables.getLocalVariablesAsync(action.resolvedType)).filter(item => item.name === action.variableName); if (action.collectionId || action.collectionName) { const collections = await figma.variables.getLocalVariableCollectionsAsync(); const matches = action.collectionId ? collections.filter(item => item.id === resolveRefId(action.collectionId)) : collections.filter(item => item.name === action.collectionName); if (!matches.length) throw new Error(`Variable collection not found: ${action.collectionId || action.collectionName}`); if (matches.length > 1) throw new Error(`Variable collection name is ambiguous: ${action.collectionName}`); candidates = candidates.filter(item => item.variableCollectionId === matches[0].id); } if (!candidates.length) throw new Error(`Variable not found: ${action.variableName}`); if (candidates.length > 1) throw new Error(`Variable name is ambiguous: ${action.variableName}`); variable = candidates[0]; } if (!variable) throw new Error(`Variable not found: ${action.variableId}`); if (action.resolvedType && variable.resolvedType !== action.resolvedType) throw new Error(`Variable ${variable.name} is ${variable.resolvedType}, not ${action.resolvedType}`); return variable; };");
+  lines.push("const validateVariableCollection = async (action, variable) => { if (!action.collectionId && !action.collectionName) return; let matches; if (action.collectionId) { const id = resolveRefId(action.collectionId); const collection = figma.variables.getVariableCollectionByIdAsync ? await figma.variables.getVariableCollectionByIdAsync(id) : figma.variables.getVariableCollectionById(id); matches = collection ? [collection] : []; } else matches = (await figma.variables.getLocalVariableCollectionsAsync()).filter(item => item.name === action.collectionName); if (!matches.length) throw new Error(`Variable collection not found: ${action.collectionId || action.collectionName}`); if (matches.length > 1) throw new Error(`Variable collection name is ambiguous: ${action.collectionName}`); if (variable.variableCollectionId !== matches[0].id) throw new Error(`Variable ${variable.name} is not in collection ${matches[0].name}`); };");
+  lines.push("");
+  lines.push("if (executionOptions.rollbackOnError) figma.commitUndo();");
   lines.push("");
 
   for (let i = 0; i < actions.length; i++) {
@@ -215,27 +264,32 @@ function generateFallbackJs(
     const g = (id: string) => `getNode(${j(id)})`;
     const r = (t: string, extra = "") => `results.push({ type: "${t}", nodeId: "${nid}"${extra} });`;
     const createRef = compiledActions[i]?._ref;
+    const aliasRef = compiledActions[i]?._aliasRef;
     const cr = (t: string, nodeId: string) => {
       if (typeof createRef !== "string") {
         throw new Error(`Missing compiled reference for create action ${i}: ${t}`);
       }
-      return `recordCreatedNode(${j(createRef)}, { type: "${t}", nodeId: ${nodeId} });`;
+      return `recordCreatedNode(${j(createRef)}, { type: "${t}", nodeId: ${nodeId} }${typeof aliasRef === "string" ? `, ${j(aliasRef)}` : ""});`;
     };
 
     switch (a.type) {
+      case "inspect":
+        lines.push(`{ const resolvedNodeId = resolveRefId(${j(nid)}); const inspection = await inspectBuild(requireNode(resolvedNodeId), ${j(a)}, MAX_BATCH_INSPECTION_BYTES - inspectionBytes); inspectionBytes += inspection.responseBytes; results.push({ type: "inspect", nodeId: resolvedNodeId, inspection }); }`);
+        break;
       case "rename":
         lines.push(`{ ${g(nid)}.name = ${j(a.name)}; markDocumentWrite(); ${r("rename")} }`);
         break;
       case "move":
-        lines.push(`{ const n = requireNode(${j(nid)}); const p = requireContainer(${j(a.targetParentId)}); ${a.insertIndex !== undefined ? `p.insertChild(${a.insertIndex}, n)` : "p.appendChild(n)"}; markDocumentWrite(); ${r("move")} }`);
+        lines.push(`{ const n = requireNode(${j(nid)}); const p = requireContainer(${j(a.targetParentId)}); const beforeParentId = n.parent && n.parent.id; ${a.insertIndex !== undefined ? `p.insertChild(${a.insertIndex}, n)` : "p.appendChild(n)"}; markDocumentWrite(); results.push({ type: "move", nodeId: n.id, before: { parentId: beforeParentId }, after: { parentId: p.id } }); }`);
         break;
       case "create_frame":
         lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const f = figma.createFrame(); f.fills = []; markDocumentWrite(); f.name = ${j(a.name)}; f.resize(${a.width}, ${a.height}); parent.appendChild(f); f.x = ${a.x}; f.y = ${a.y}; ${cr("create_frame", "f.id")} }`);
         break;
       case "create_text": {
-        const fam = a.fontFamily || "Inter";
-        const sty = weightToStyle(a.fontWeight || 400);
-        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); await loadFontOnce({ family: "${fam}", style: "${sty}" }); const t = figma.createText(); markDocumentWrite(); t.fontName = { family: "${fam}", style: "${sty}" }; t.characters = ${j(a.characters)}; ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} t.textAutoResize = "${a.textAutoResize || "HEIGHT"}"; ${a.name ? `t.name = ${j(a.name)};` : ""} parent.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} ${cr("create_text", "t.id")} }`);
+        const hasFontOverride = a.fontFamily !== undefined || a.fontWeight !== undefined;
+        const fallbackFamily = a.fontFamily ?? "Inter";
+        const fallbackStyle = a.fontWeight !== undefined ? weightToStyle(a.fontWeight) : "Regular";
+        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const textStyle = ${a.textStyleId || a.textStyleName ? `await resolveStyle("TEXT", ${j(a.textStyleId)}, ${j(a.textStyleName)})` : "null"}; if (textStyle) await loadFontOnce(textStyle.fontName); const family = ${a.fontFamily !== undefined ? j(a.fontFamily) : "textStyle ? textStyle.fontName.family : " + j(fallbackFamily)}; const fontStyle = ${a.fontWeight !== undefined ? j(weightToStyle(a.fontWeight)) : "textStyle ? textStyle.fontName.style : " + j(fallbackStyle)}; if (!textStyle || ${hasFontOverride}) await loadFontOnce({ family, style: fontStyle }); const t = figma.createText(); markDocumentWrite(); if (textStyle) await t.setTextStyleIdAsync(textStyle.id); if (!textStyle || ${hasFontOverride}) t.fontName = { family, style: fontStyle }; t.characters = ${j(a.characters)}; ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} t.textAutoResize = "${a.textAutoResize || "HEIGHT"}"; ${a.textTruncation ? `t.textTruncation = "${a.textTruncation}";` : ""} ${a.maxLines !== undefined ? `t.maxLines = ${j(a.maxLines)};` : ""} ${a.name ? `t.name = ${j(a.name)};` : ""} parent.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} ${cr("create_text", "t.id")} }`);
         break;
       }
       case "delete_node":
@@ -248,7 +302,7 @@ function generateFallbackJs(
         lines.push(`{ const n = ${g(nid)}; ${a.x !== undefined ? `if (n.x !== ${a.x}) { n.x = ${a.x}; markDocumentWrite(); }` : ""} ${a.y !== undefined ? `if (n.y !== ${a.y}) { n.y = ${a.y}; markDocumentWrite(); }` : ""} ${r("set_position")} }`);
         break;
       case "duplicate_node":
-        lines.push(`{ const c = ${g(nid)}.clone(); markDocumentWrite(); ${cr("duplicate_node", "c.id")} }`);
+        lines.push(`{ const source = requireSceneNode(${j(nid)}); const target = ${a.targetParentId ? `requireContainer(${j(a.targetParentId)})` : "null"}; ${a.insertIndex !== undefined ? `if (target && ${a.insertIndex} > target.children.length) throw new Error("insertIndex exceeds target child count");` : ""} const c = source.clone(); markDocumentWrite(); ${a.targetParentId ? (a.insertIndex !== undefined ? `target.insertChild(${a.insertIndex}, c);` : "target.appendChild(c);") : ""} ${a.x !== undefined ? `c.x = ${a.x};` : ""} ${a.y !== undefined ? `c.y = ${a.y};` : ""} ${cr("duplicate_node", "c.id")} }`);
         break;
       case "set_visible":
         lines.push(`{ ${g(nid)}.visible = ${a.visible}; markDocumentWrite(); ${r("set_visible")} }`);
@@ -257,16 +311,16 @@ function generateFallbackJs(
         lines.push(`{ ${g(nid)}.opacity = ${a.opacity}; markDocumentWrite(); ${r("set_opacity")} }`);
         break;
       case "set_layout_mode":
-        lines.push(`{ const n = ${g(nid)}; n.layoutMode = "${a.mode}"; markDocumentWrite(); ${a.primaryAxisSizingMode ? `n.primaryAxisSizingMode = "${a.primaryAxisSizingMode}"; markDocumentWrite();` : ""} ${a.counterAxisSizingMode ? `n.counterAxisSizingMode = "${a.counterAxisSizingMode}"; markDocumentWrite();` : ""} ${r("set_layout_mode")} }`);
+        lines.push(`{ const n = ${g(nid)}; ${a.layoutWrap && a.mode !== "HORIZONTAL" ? `throw new Error("layoutWrap requires HORIZONTAL auto layout");` : ""} n.layoutMode = "${a.mode}"; markDocumentWrite(); ${a.primaryAxisSizingMode ? `n.primaryAxisSizingMode = "${a.primaryAxisSizingMode}"; markDocumentWrite();` : ""} ${a.counterAxisSizingMode ? `n.counterAxisSizingMode = "${a.counterAxisSizingMode}"; markDocumentWrite();` : ""} ${a.layoutWrap ? `n.layoutWrap = "${a.layoutWrap}"; markDocumentWrite();` : ""} ${r("set_layout_mode")} }`);
         break;
       case "set_layout_positioning":
         lines.push(`{ ${g(nid)}.layoutPositioning = "${a.positioning}"; markDocumentWrite(); ${r("set_layout_positioning")} }`);
         break;
       case "set_alignment":
-        lines.push(`{ const n = ${g(nid)}; ${a.primaryAxisAlignItems ? `n.primaryAxisAlignItems = "${a.primaryAxisAlignItems}"; markDocumentWrite();` : ""} ${a.counterAxisAlignItems ? `n.counterAxisAlignItems = "${a.counterAxisAlignItems}"; markDocumentWrite();` : ""} ${r("set_alignment")} }`);
+        lines.push(`{ const n = ${g(nid)}; if (n.layoutMode === "NONE") throw new Error("Alignment requires auto layout"); ${a.counterAxisAlignItems === "BASELINE" ? `if (n.layoutMode !== "HORIZONTAL") throw new Error("BASELINE alignment requires HORIZONTAL auto layout");` : ""} ${a.primaryAxisAlignItems ? `n.primaryAxisAlignItems = "${a.primaryAxisAlignItems}"; markDocumentWrite();` : ""} ${a.counterAxisAlignItems ? `n.counterAxisAlignItems = "${a.counterAxisAlignItems}"; markDocumentWrite();` : ""} ${r("set_alignment")} }`);
         break;
       case "set_spacing":
-        lines.push(`{ const n = ${g(nid)}; ${a.itemSpacing !== undefined ? `n.itemSpacing = ${a.itemSpacing}; markDocumentWrite();` : ""} ${a.paddingTop !== undefined ? `n.paddingTop = ${a.paddingTop}; markDocumentWrite();` : ""} ${a.paddingRight !== undefined ? `n.paddingRight = ${a.paddingRight}; markDocumentWrite();` : ""} ${a.paddingBottom !== undefined ? `n.paddingBottom = ${a.paddingBottom}; markDocumentWrite();` : ""} ${a.paddingLeft !== undefined ? `n.paddingLeft = ${a.paddingLeft}; markDocumentWrite();` : ""} ${r("set_spacing")} }`);
+        lines.push(`{ const n = ${g(nid)}; if (n.layoutMode === "NONE") throw new Error("Spacing requires auto layout"); ${a.counterAxisSpacing !== undefined ? `if (n.layoutWrap !== "WRAP") throw new Error("counterAxisSpacing requires wrapping auto layout");` : ""} ${a.itemSpacing !== undefined ? `n.itemSpacing = ${a.itemSpacing}; markDocumentWrite();` : ""} ${a.paddingTop !== undefined ? `n.paddingTop = ${a.paddingTop}; markDocumentWrite();` : ""} ${a.paddingRight !== undefined ? `n.paddingRight = ${a.paddingRight}; markDocumentWrite();` : ""} ${a.paddingBottom !== undefined ? `n.paddingBottom = ${a.paddingBottom}; markDocumentWrite();` : ""} ${a.paddingLeft !== undefined ? `n.paddingLeft = ${a.paddingLeft}; markDocumentWrite();` : ""} ${a.counterAxisSpacing !== undefined ? `n.counterAxisSpacing = ${j(a.counterAxisSpacing)}; markDocumentWrite();` : ""} ${r("set_spacing")} }`);
         break;
       case "set_child_layout_sizing":
         lines.push(`{ const n = ${g(nid)}; ${a.layoutSizingHorizontal ? `n.layoutSizingHorizontal = "${a.layoutSizingHorizontal}"; markDocumentWrite();` : ""} ${a.layoutSizingVertical ? `n.layoutSizingVertical = "${a.layoutSizingVertical}"; markDocumentWrite();` : ""} ${r("set_child_layout_sizing")} }`);
@@ -281,10 +335,25 @@ function generateFallbackJs(
         lines.push(`{ ${g(nid)}.fills = sanitizePaints(${j(a.fills)}); markDocumentWrite(); ${r("set_fills")} }`);
         break;
       case "set_gradient_fill":
-        lines.push(`{ const n = ${g(nid)}; const angle = ${(a.angle ?? 0)} * Math.PI / 180; n.fills = [{ type: "GRADIENT_${a.gradientType}", gradientStops: ${j(a.stops)}, gradientTransform: [[Math.cos(angle), Math.sin(angle), 0], [-Math.sin(angle), Math.cos(angle), 0]] }]; markDocumentWrite(); ${r("set_gradient_fill")} }`);
+        lines.push(`{ const n = requireFills(${j(nid)}); n.fills = gradientPaints(${j(a)}); markDocumentWrite(); ${r("set_gradient_fill")} }`);
         break;
       case "set_image_fill":
         lines.push(`{ const n = requireFills(${j(nid)}); const img = figma.createImage(figma.base64Decode(${j(a.imageBase64)})); n.fills = [{ type: "IMAGE", imageHash: img.hash, scaleMode: "${a.scaleMode || "FILL"}" }]; markDocumentWrite(); ${r("set_image_fill")} }`);
+        break;
+      case "create_from_svg":
+        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const n = figma.createNodeFromSvg(${j(a.svg)}); markDocumentWrite(); ${a.name ? `n.name = ${j(a.name)};` : ""} parent.appendChild(n); n.x = ${a.x}; n.y = ${a.y}; ${cr("create_from_svg", "n.id")} }`);
+        break;
+      case "create_section":
+        lines.push(`{ if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design"); if (${a.width} < 0.01 || ${a.height} < 0.01) throw new Error("Section dimensions must be at least 0.01"); const parent = requireNode(${j(a.parentId)}); if (parent.type !== "PAGE") throw new Error("Sections must be created on a page"); const s = figma.createSection(); markDocumentWrite(); s.name = ${j(a.name)}; s.resize(${a.width}, ${a.height}); parent.appendChild(s); s.x = ${a.x}; s.y = ${a.y}; ${cr("create_section", "s.id")} }`);
+        break;
+      case "resize_section":
+        lines.push(`{ if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design"); if (${a.width} < 0.01 || ${a.height} < 0.01) throw new Error("Section dimensions must be at least 0.01"); const s = requireNode(${j(a.sectionId)}); if (s.type !== "SECTION") throw new Error("Node is not a section"); s.resize(${a.width}, ${a.height}); markDocumentWrite(); results.push({ type: "resize_section", nodeId: s.id }); }`);
+        break;
+      case "move_to_section":
+        lines.push(`{ if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design"); const n = requireSceneNode(${j(nid)}); const s = requireNode(${j(a.sectionId)}); if (s.type !== "SECTION") throw new Error("Node is not a section"); if (["SECTION", "PAGE", "DOCUMENT"].includes(n.type)) throw new Error(n.type + " nodes cannot be moved into sections"); ${a.insertIndex !== undefined ? `if (${a.insertIndex} > s.children.length) throw new Error("insertIndex exceeds section child count");` : ""} let ancestor = s; while (ancestor && ancestor.parent) { if (ancestor.id === n.id) throw new Error("Cannot move a node into its own descendant"); ancestor = ancestor.parent; } ${a.insertIndex !== undefined ? `s.insertChild(${a.insertIndex}, n);` : "s.appendChild(n);"} markDocumentWrite(); ${r("move_to_section")} }`);
+        break;
+      case "set_reaction":
+        lines.push(`{ if (figma.editorType !== "figma") throw new Error("Prototype reactions are only supported in Figma Design"); const n = requireSceneNode(${j(nid)}); const destination = requireSceneNode(${j(a.destinationId)}); if (typeof n.setReactionsAsync !== "function") throw new Error("Node does not support reactions"); const reaction = { trigger: { type: "ON_CLICK" }, actions: [{ type: "NODE", destinationId: destination.id, navigation: "${a.navigation}", transition: null }] }; const next = "${a.mode}" === "append" ? [...n.reactions, reaction] : [reaction]; await n.setReactionsAsync(next); markDocumentWrite(); ${r("set_reaction")} }`);
         break;
       case "set_strokes":
         lines.push(`{ const n = ${g(nid)}; n.strokes = sanitizePaints(${j(a.strokes)}); markDocumentWrite(); ${a.strokeWeight !== undefined ? `n.strokeWeight = ${a.strokeWeight}; markDocumentWrite();` : ""} ${r("set_strokes")} }`);
@@ -321,10 +390,22 @@ function generateFallbackJs(
         lines.push(`{ const instance = requireNode(${j(a.instanceId)}); if (instance.type !== "INSTANCE" || typeof instance.swapComponent !== "function") throw new Error("Node is not an instance"); const component = requireNode(${j(a.newComponentId)}); if (component.type !== "COMPONENT") throw new Error("Node is not a component"); instance.swapComponent(component); markDocumentWrite(); results.push({ type: "swap_instance" }); }`);
         break;
       case "set_component_properties":
-        lines.push(`{ const n = ${g(nid)}; for (const [property, value] of Object.entries(${j(a.properties)})) { n.setProperties({ [property]: value }); markDocumentWrite(); } ${r("set_component_properties")} }`);
+        lines.push(`{ const n = await requireAttachedInstance(${j(nid)}); const main = typeof n.getMainComponentAsync === "function" ? await n.getMainComponentAsync() : null; const properties = main ? Object.fromEntries(Object.entries(${j(a.properties)}).map(([key, value]) => { const resolvedKey = resolveComponentPropertyKey(main.componentPropertyDefinitions, key); const definition = main.componentPropertyDefinitions[resolvedKey]; return [resolvedKey, definition.type === "INSTANCE_SWAP" && typeof value === "string" && value.startsWith("$") ? resolveRefId(value) : value]; })) : ${j(a.properties)}; for (const [property, value] of Object.entries(properties)) { n.setProperties({ [property]: value }); markDocumentWrite(); } ${r("set_component_properties")} }`);
         break;
       case "define_component_property":
-        lines.push(`{ ${g(nid)}.addComponentProperty(${j(a.propertyName)}, "${a.propertyType}", ${j(a.defaultValue)}); markDocumentWrite(); ${r("define_component_property")} }`);
+        lines.push(`{ const n = requireNode(${j(nid)}); if (n.type !== "COMPONENT" && n.type !== "COMPONENT_SET") throw new Error("Node is not a component or component set"); ${a.propertyType === "VARIANT" ? `if (n.type !== "COMPONENT_SET") throw new Error("VARIANT properties require a component set");` : ""} const defaultValue = ${a.propertyType === "INSTANCE_SWAP" && typeof a.defaultValue === "string" ? `resolveRefId(${j(a.defaultValue)})` : j(a.defaultValue)}; n.addComponentProperty(${j(a.propertyName)}, "${a.propertyType}", defaultValue); markDocumentWrite(); ${r("define_component_property")} }`);
+        break;
+      case "set_component_property_reference":
+        lines.push(`{ const n = requireSceneNode(${j(nid)}); let owner = n.parent; while (owner && owner.type !== "COMPONENT" && owner.type !== "COMPONENT_SET") owner = owner.parent; if (!owner) throw new Error("Node is not inside a component or component set"); const key = resolveComponentPropertyKey(owner.componentPropertyDefinitions, ${j(a.componentPropertyName)}); const expected = ${j(a.property === "characters" ? "TEXT" : a.property === "visible" ? "BOOLEAN" : "INSTANCE_SWAP")}; if (owner.componentPropertyDefinitions[key].type !== expected) throw new Error("Component property type is incompatible"); ${a.property === "characters" ? `if (n.type !== "TEXT") throw new Error("characters references require a text node");` : ""} ${a.property === "mainComponent" ? `if (n.type !== "INSTANCE") throw new Error("mainComponent references require an instance node");` : ""} n.componentPropertyReferences = { ...(n.componentPropertyReferences || {}), ${j(a.property)}: key }; markDocumentWrite(); ${r("set_component_property_reference")} }`);
+        break;
+      case "set_instance_text":
+        lines.push(`{ const n = await findInstanceChild(${j(a.instanceId)}, ${j(a.childPath)}); if (n.type !== "TEXT") throw new Error("childPath does not resolve to a text node"); if (n.fontName === figma.mixed) { const fonts = new Map(); for (let i = 0; i < n.characters.length; i++) { const font = n.getRangeFontName(i, i + 1); fonts.set(font.family + "|" + font.style, font); } for (const font of fonts.values()) await loadFontOnce(font); } else await loadFontOnce(n.fontName); n.characters = ${j(a.characters)}; markDocumentWrite(); results.push({ type: "set_instance_text", nodeId: n.id }); }`);
+        break;
+      case "set_instance_visibility":
+        lines.push(`{ const n = await findInstanceChild(${j(a.instanceId)}, ${j(a.childPath)}); n.visible = ${a.visible}; markDocumentWrite(); results.push({ type: "set_instance_visibility", nodeId: n.id }); }`);
+        break;
+      case "swap_nested_instance":
+        lines.push(`{ const n = await findInstanceChild(${j(a.instanceId)}, ${j(a.childPath)}); if (n.type !== "INSTANCE") throw new Error("childPath does not resolve to an instance node"); const component = requireNode(${j(a.newComponentId)}); if (component.type !== "COMPONENT") throw new Error("Swap target is not a component"); n.swapComponent(component); markDocumentWrite(); results.push({ type: "swap_nested_instance", nodeId: n.id }); }`);
         break;
       case "create_paint_style":
         lines.push(`{ const s = figma.createPaintStyle(); markDocumentWrite(); s.name = ${j(a.name)}; s.paints = sanitizePaints(${j(a.paints)}); ${cr("create_paint_style", "s.id")} }`);
@@ -336,8 +417,14 @@ function generateFallbackJs(
         lines.push(`{ const s = figma.createEffectStyle(); markDocumentWrite(); s.name = ${j(a.name)}; s.effects = ${j(a.effects)}; ${cr("create_effect_style", "s.id")} }`);
         break;
       case "apply_style":
-        lines.push(`{ const n = ${g(nid)}; const styleId = resolveRefId(${j(a.styleId)}); ${a.property === "fill" ? "await n.setFillStyleIdAsync(styleId);" : a.property === "stroke" ? "await n.setStrokeStyleIdAsync(styleId);" : a.property === "text" ? "await n.setTextStyleIdAsync(styleId);" : "await n.setEffectStyleIdAsync(styleId);"} markDocumentWrite(); ${r("apply_style")} }`);
+        lines.push(`{ const n = ${g(nid)}; const style = await resolveStyle(${j(a.property === "text" ? "TEXT" : a.property === "effect" ? "EFFECT" : "PAINT")}, ${j(a.styleId)}, ${j(a.styleName)}); const styleId = style.id; ${a.property === "text" ? "await loadFontOnce(style.fontName);" : ""} ${a.property === "fill" ? "await n.setFillStyleIdAsync(styleId);" : a.property === "stroke" ? "await n.setStrokeStyleIdAsync(styleId);" : a.property === "text" ? "await n.setTextStyleIdAsync(styleId);" : "await n.setEffectStyleIdAsync(styleId);"} markDocumentWrite(); ${r("apply_style")} }`);
         break;
+      case "update_style": {
+        const textUpdates = a.fontFamily !== undefined || a.fontWeight !== undefined || a.fontSize !== undefined || a.lineHeight !== undefined || a.letterSpacing !== undefined;
+        const noUpdates = a.name === undefined && a.paints === undefined && a.effects === undefined && !textUpdates && !a.copyFromStyleId && !a.copyFromStyleName;
+        lines.push(`{ const style = await resolveStyle(${j(a.styleType)}, ${j(a.styleId)}, ${j(a.styleName)}); const source = ${a.copyFromStyleId || a.copyFromStyleName ? `await resolveStyle(${j(a.styleType)}, ${j(a.copyFromStyleId)}, ${j(a.copyFromStyleName)})` : "null"}; ${a.paints !== undefined && a.styleType !== "PAINT" || a.effects !== undefined && a.styleType !== "EFFECT" || textUpdates && a.styleType !== "TEXT" ? `throw new Error("Update fields do not match style type");` : ""} ${noUpdates ? `throw new Error("update_style has no updates");` : ""} ${a.styleType === "TEXT" ? `const current = source || style; const family = ${a.fontFamily !== undefined ? j(a.fontFamily) : "current.fontName.family"}; const fontStyle = ${a.fontWeight !== undefined ? j(weightToStyle(a.fontWeight)) : "current.fontName.style"}; await loadFontOnce({ family, style: fontStyle });` : ""} markDocumentWrite(); ${a.name !== undefined ? `style.name = ${j(a.name)};` : ""} ${a.styleType === "PAINT" && (a.paints !== undefined || a.copyFromStyleId || a.copyFromStyleName) ? `style.paints = sanitizePaints(${a.paints !== undefined ? j(a.paints) : "[...source.paints]"});` : ""} ${a.styleType === "EFFECT" && (a.effects !== undefined || a.copyFromStyleId || a.copyFromStyleName) ? `style.effects = ${a.effects !== undefined ? j(a.effects) : "[...source.effects]"};` : ""} ${a.styleType === "TEXT" ? `${a.copyFromStyleId || a.copyFromStyleName ? "style.textDecoration = source.textDecoration; style.leadingTrim = source.leadingTrim; style.paragraphIndent = source.paragraphIndent; style.paragraphSpacing = source.paragraphSpacing; style.listSpacing = source.listSpacing; style.hangingPunctuation = source.hangingPunctuation; style.hangingList = source.hangingList; style.textCase = source.textCase;" : ""} style.fontName = { family, style: fontStyle }; ${a.fontSize !== undefined ? `style.fontSize = ${a.fontSize};` : (a.copyFromStyleId || a.copyFromStyleName) ? "style.fontSize = source.fontSize;" : ""} ${a.lineHeight !== undefined ? `style.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : (a.copyFromStyleId || a.copyFromStyleName) ? "style.lineHeight = source.lineHeight;" : ""} ${a.letterSpacing !== undefined ? `style.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : (a.copyFromStyleId || a.copyFromStyleName) ? "style.letterSpacing = source.letterSpacing;" : ""}` : ""} results.push({ type: "update_style", nodeId: style.id }); }`);
+        break;
+      }
       case "set_description":
         lines.push(`{ ${g(nid)}.description = ${j(a.description)}; markDocumentWrite(); ${r("set_description")} }`);
         break;
@@ -351,10 +438,13 @@ function generateFallbackJs(
         lines.push(`{ const c = figma.variables.createVariableCollection(${j(a.name)}); markDocumentWrite(); const modes = ${j(a.modes)}; if (modes[0]) { c.renameMode(c.modes[0].modeId, modes[0]); markDocumentWrite(); } for (let modeIndex = 1; modeIndex < modes.length; modeIndex++) { c.addMode(modes[modeIndex]); markDocumentWrite(); } ${cr("create_variable_collection", "c.id")} }`);
         break;
       case "create_variable":
-        lines.push(`{ const c = figma.variables.getVariableCollectionById(resolveRefId(${j(a.collectionId)})); if (!c) throw new Error("Variable collection not found"); const v = figma.variables.createVariable(${j(a.name)}, c, "${a.resolvedType}"); markDocumentWrite(); ${a.scopes ? `v.scopes = ${j(a.scopes)};` : ""} const value = parseVariableValue("${a.resolvedType}", ${j(a.value)}); for (const mode of c.modes) v.setValueForMode(mode.modeId, value); ${cr("create_variable", "v.id")} }`);
+        lines.push(`{ const collectionId = resolveRefId(${j(a.collectionId)}); const c = figma.variables.getVariableCollectionByIdAsync ? await figma.variables.getVariableCollectionByIdAsync(collectionId) : figma.variables.getVariableCollectionById(collectionId); if (!c) throw new Error("Variable collection not found"); const value = parseVariableValue("${a.resolvedType}", ${j(a.value)}); const v = figma.variables.createVariable(${j(a.name)}, c, "${a.resolvedType}"); markDocumentWrite(); ${a.scopes ? `v.scopes = ${j(a.scopes)};` : ""} for (const mode of c.modes) v.setValueForMode(mode.modeId, value); ${cr("create_variable", "v.id")} }`);
         break;
       case "bind_variable":
-        lines.push(`{ const v = figma.variables.getVariableById(resolveRefId(${j(a.variableId)})); if (!v) throw new Error("Variable not found"); const n = ${g(nid)}; ${a.property === "fills" || a.property === "strokes" ? `const paints = [...n.${a.property}]; const paintIndex = ${a.paintIndex ?? 0}; const paint = paints[paintIndex]; if (!paint) throw new Error(\"Paint index \" + paintIndex + \" does not exist in ${a.property}\"); if (paint.type !== \"SOLID\") throw new Error(\"Paint index \" + paintIndex + \" in ${a.property} is not a solid paint\"); paints[paintIndex] = figma.variables.setBoundVariableForPaint(paint, "color", v); n.${a.property} = paints; markDocumentWrite();` : `n.setBoundVariable("${a.property}", v); markDocumentWrite();`} ${r("bind_variable")} }`);
+        lines.push(`{ const action = ${j(a)}; const v = await resolveVariable(action); await validateVariableCollection(action, v); const n = ${g(nid)}; ${a.property === "fills" || a.property === "strokes" ? `if (v.resolvedType && v.resolvedType !== "COLOR") throw new Error("${a.property} bindings require a COLOR variable"); const paints = [...n.${a.property}]; const paintIndex = ${a.paintIndex ?? 0}; const paint = paints[paintIndex]; if (!paint) throw new Error(\"Paint index \" + paintIndex + \" does not exist in ${a.property}\"); if (paint.type !== \"SOLID\") throw new Error(\"Paint index \" + paintIndex + \" in ${a.property} is not a solid paint\"); paints[paintIndex] = figma.variables.setBoundVariableForPaint(paint, "color", v); n.${a.property} = paints; markDocumentWrite();` : `if (v.resolvedType && v.resolvedType !== "FLOAT") throw new Error("${a.property} bindings require a FLOAT variable"); if (!("${a.property}" in n) || typeof n.setBoundVariable !== "function") throw new Error("Node does not support ${a.property} variable binding"); ${a.property === "counterAxisSpacing" ? `if (n.layoutWrap !== "WRAP") throw new Error("counterAxisSpacing bindings require wrapping auto layout");` : ""} n.setBoundVariable("${a.property}", v); markDocumentWrite();`} ${r("bind_variable")} }`);
+        break;
+      case "set_variable_value":
+        lines.push(`{ const action = ${j(a)}; const v = await resolveVariable(action); await validateVariableCollection(action, v); const c = await figma.variables.getVariableCollectionByIdAsync(v.variableCollectionId); if (!c) throw new Error("Variable collection not found"); const matches = action.modeId ? c.modes.filter(mode => mode.modeId === action.modeId) : c.modes.filter(mode => mode.name === action.modeName); if (!matches.length) throw new Error("Variable mode not found"); if (matches.length > 1) throw new Error("Variable mode name is ambiguous"); const value = parseVariableValue(v.resolvedType, action.value); v.setValueForMode(matches[0].modeId, value); markDocumentWrite(); results.push({ type: "set_variable_value", nodeId: v.id }); }`);
         break;
       case "export_node":
         lines.push(`{ const format = "${a.format}"; const scale = ${a.scale}; const bytes = await ${g(nid)}.exportAsync({ format, ...(format !== "SVG" ? { constraint: { type: "SCALE", value: scale } } : {}) }); results.push({ type: "export_node", nodeId: "${nid}", base64: figma.base64Encode(bytes) }); }`);
@@ -371,7 +461,23 @@ function generateFallbackJs(
 
   lines.push("if (executionOptions.rollbackOnError && failed && documentWrites > 0) {");
   lines.push("  figma.triggerUndo();");
+  lines.push("  const transientNodeIds = new Set(createdNodeIds.values());");
+  lines.push("  for (let index = 0; index < results.length; index++) {");
+  lines.push("    const result = results[index];");
+  if (needsInspection) lines.push("    if (result.inspection) result.inspection = inspectInvalidateRollback(result.inspection);");
+  lines.push("    if (result.status !== 'failed' && result.status !== 'skipped') {");
+  lines.push("      result.rolledBack = true;");
+  lines.push("      delete result.after;");
+  lines.push("      if (result.newNodeId && transientNodeIds.has(result.newNodeId)) delete result.newNodeId;");
+  lines.push("      const resolvedNodeId = typeof result.nodeId === 'string' && result.nodeId.startsWith('$') ? createdNodeIds.get(result.nodeId) : result.nodeId;");
+  lines.push("      if (resolvedNodeId && transientNodeIds.has(resolvedNodeId)) delete result.nodeId;");
+  lines.push("    }");
+  lines.push("    results[index] = redactTransientIds(result, transientNodeIds);");
+  lines.push("  }");
+  lines.push("  createdNodeIds.clear();");
   lines.push("  results.push({ type: \"rollback\", status: \"applied\" });");
+  lines.push("} else if (executionOptions.rollbackOnError && documentWrites > 0) {");
+  lines.push("  figma.commitUndo();");
   lines.push("}");
   lines.push("return results;");
   return lines.join("\n");
