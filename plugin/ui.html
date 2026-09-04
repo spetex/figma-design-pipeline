@@ -13,7 +13,9 @@ const RECONNECT_MS = 2000;
 const MAX_RECONNECT_MS = 30000;
 const PORT_CYCLE_AFTER = 3; // retry same port N times before cycling
 // Leave ample room for JSON escaping under the bridge's 16 MiB per-message limit.
-const BATCH_RESULT_CHUNK_SIZE = 1024 * 1024;
+const RESULT_CHUNK_SIZE = 1024 * 1024;
+const MAX_RESULT_ENCODED_BYTES = 16 * 1024 * 1024;
+const MAX_RESULT_CHUNKS = 16;
 
 let ws = null;
 let portIdx = 0;
@@ -38,7 +40,7 @@ function renderStatus(state) {
   if (state === "connected") {
     el.textContent = "Connected to bridge on port " + port;
     el.style.color = "#15803d";
-    hint.textContent = "Fast batched writes are enabled. Keep this plugin window open while working from Claude or Codex.";
+    hint.textContent = "Local inspection and fast batched writes are enabled. Keep this plugin window open while working from Claude or Codex.";
     return;
   }
 
@@ -109,29 +111,86 @@ function scheduleReconnect() {
   }, delay);
 }
 
+function utf8ByteLength(value) {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index++) {
+    const first = value.charCodeAt(index);
+    if (first <= 0x7f) bytes += 1;
+    else if (first <= 0x7ff) bytes += 2;
+    else if (first >= 0xd800 && first <= 0xdbff && index + 1 < value.length) {
+      const second = value.charCodeAt(index + 1);
+      if (second >= 0xdc00 && second <= 0xdfff) {
+        bytes += 4;
+        index++;
+      } else bytes += 3;
+    } else bytes += 3;
+  }
+  return bytes;
+}
+
+function sendTransportFailure(data, message) {
+  let failure = null;
+  if (data.type === "read_response" && typeof data.requestId === "string") {
+    failure = {
+      type: "read_response",
+      requestId: data.requestId,
+      operation: data.operation,
+      fileKey: data.fileKey,
+      success: false,
+      error: "Plugin read response transport rejected: " + message,
+    };
+  } else if (data.type === "batch_result" && typeof data.batchId === "string") {
+    failure = {
+      type: "batch_result",
+      batchId: data.batchId,
+      success: false,
+      error: "Plugin batch result transport rejected: " + message,
+      results: [],
+      nodeIdMap: {},
+      summary: { total: 0, applied: 0, failed: 0, skipped: 0 },
+    };
+  }
+  if (failure) ws.send(JSON.stringify(failure));
+  else console.error("[ui] Uncorrelated oversized bridge payload rejected:", message);
+}
+
 function sendToBridge(data) {
   if (!ws || ws.readyState !== 1) return;
 
   const serialized = JSON.stringify(data);
-  if (
-    data.type !== "batch_result"
-    || typeof data.batchId !== "string"
-    || serialized.length <= BATCH_RESULT_CHUNK_SIZE
-  ) {
+  const resultId = data.type === "batch_result" ? data.batchId
+    : data.type === "read_response" ? data.requestId
+    : null;
+  if (typeof resultId !== "string") {
     ws.send(serialized);
     return;
   }
 
-  const chunkCount = Math.ceil(serialized.length / BATCH_RESULT_CHUNK_SIZE);
+  const chunkCount = Math.ceil(serialized.length / RESULT_CHUNK_SIZE);
+  const encodedBytes = utf8ByteLength(serialized);
+  if (chunkCount > MAX_RESULT_CHUNKS) {
+    sendTransportFailure(data, "exceeds the " + MAX_RESULT_CHUNKS + "-chunk sender limit");
+    return;
+  }
+  if (encodedBytes > MAX_RESULT_ENCODED_BYTES) {
+    sendTransportFailure(data, "exceeds the " + MAX_RESULT_ENCODED_BYTES + "-byte sender limit");
+    return;
+  }
+  if (serialized.length <= RESULT_CHUNK_SIZE) {
+    ws.send(serialized);
+    return;
+  }
+
+  const chunkType = data.type === "batch_result" ? "batch_result_chunk" : "read_response_chunk";
   for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex++) {
     ws.send(JSON.stringify({
-      type: "batch_result_chunk",
-      batchId: data.batchId,
+      type: chunkType,
+      ...(data.type === "batch_result" ? { batchId: resultId } : { requestId: resultId }),
       chunkIndex: chunkIndex,
       chunkCount: chunkCount,
       data: serialized.slice(
-        chunkIndex * BATCH_RESULT_CHUNK_SIZE,
-        (chunkIndex + 1) * BATCH_RESULT_CHUNK_SIZE
+        chunkIndex * RESULT_CHUNK_SIZE,
+        (chunkIndex + 1) * RESULT_CHUNK_SIZE
       ),
     }));
   }

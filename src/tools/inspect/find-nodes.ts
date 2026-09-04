@@ -2,9 +2,22 @@ import type { ToolContext } from "../../shared/context.js";
 import type { EnrichedNode, NodeClassification } from "../../shared/types.js";
 import { handleGetTree } from "./get-tree.js";
 import type { SnapshotProvenance } from "../../pipeline/snapshot.js";
+import type {
+  InspectionSource,
+  PluginReadContextNode,
+  PluginReadNode,
+  PluginReadRoot,
+  PluginReadTruncationReason,
+  PluginSelectionMetadata,
+  PluginTruncatedFields,
+} from "../../shared/plugin-read.js";
+import type { InspectionContext } from "./source.js";
+import { requireRest, selectInspectionSource } from "./source.js";
+import { compileInspectionRegex } from "../../shared/safe-regex.js";
 
-interface FindNodesParams {
+export interface FindNodesParams {
   nodeId: string;
+  name?: string;
   namePattern?: string;
   type?: string;
   classification?: NodeClassification;
@@ -21,27 +34,49 @@ interface FindNodesParams {
   maxAgeMs?: number;
 }
 
-interface FoundNode {
+export interface FindNodesSourceParams extends Omit<FindNodesParams, "nodeId"> {
+  nodeId?: string;
+  fileKey: string;
+  source?: InspectionSource;
+  root?: PluginReadRoot;
+  timeoutMs?: number;
+  scanLimit?: number;
+  selectionMetadataOffset?: number;
+}
+
+export interface FoundNode {
   id: string;
   name: string;
   type: string;
   classification: NodeClassification;
   depth: number;
   childCount: number;
+  visible?: boolean;
   bounds?: { x: number; y: number; width: number; height: number };
   textContent?: string;
   componentId?: string;
+  truncatedFields?: PluginTruncatedFields;
   isComponent: boolean;
   isInstance: boolean;
 }
 
-interface FindNodesResult extends SnapshotProvenance {
+export interface FindNodesResult extends SnapshotProvenance {
   matches: FoundNode[];
   totalScanned: number;
   truncated: boolean;
   traversalDepth: number;
   matchLimit: number;
+  scanLimit?: number;
+  scanLimitReached?: boolean;
+  truncationReasons?: PluginReadTruncationReason[];
+  truncatedFieldCount?: number;
+  omittedScalarBytes?: number;
   fromCache: boolean;
+  source: "plugin" | "rest";
+  currentPage?: PluginReadContextNode;
+  selection?: PluginReadContextNode[];
+  selectionCount?: number;
+  selectionMetadata?: PluginSelectionMetadata;
 }
 
 /**
@@ -67,13 +102,14 @@ export async function handleFindNodes(
   let totalScanned = 0;
   let hasAdditionalMatch = false;
 
-  const nameRegex = params.namePattern ? new RegExp(params.namePattern, "i") : null;
-  const textRegex = params.textContent ? new RegExp(params.textContent, "i") : null;
+  const nameRegex = compileInspectionRegex(params.namePattern, "namePattern");
+  const textRegex = compileInspectionRegex(params.textContent, "textContent");
 
   walkTree(tree, (node) => {
     totalScanned++;
 
     // Apply filters — all must match
+    if (params.name !== undefined && node.name !== params.name) return true;
     if (nameRegex && !nameRegex.test(node.name)) return true;
     if (params.type && node.type.toUpperCase() !== params.type.toUpperCase()) return true;
     if (params.classification && node.classification !== params.classification) return true;
@@ -100,6 +136,7 @@ export async function handleFindNodes(
       classification: node.classification,
       depth: node.depth,
       childCount: node.childCount,
+      visible: node.visible,
       bounds: node.bounds,
       textContent: node.textContent,
       componentId: node.componentId,
@@ -116,8 +153,96 @@ export async function handleFindNodes(
     traversalDepth: depth,
     matchLimit: limit,
     fromCache,
+    source: "rest",
     snapshotAt,
     cacheAgeMs,
+  };
+}
+
+export async function handleFindNodesFromSource(
+  ctx: InspectionContext,
+  params: FindNodesSourceParams
+): Promise<FindNodesResult> {
+  const source = selectInspectionSource(ctx, params.source ?? "auto", params.fileKey);
+  const depth = params.depth ?? 10;
+  const limit = params.limit ?? 50;
+  const scanLimit = params.scanLimit ?? 1_000;
+  if ((params.selectionMetadataOffset ?? 0) !== 0 && params.root !== "selection") {
+    throw new Error("selectionMetadataOffset is supported only for selection reads");
+  }
+  compileInspectionRegex(params.namePattern, "namePattern");
+  compileInspectionRegex(params.textContent, "textContent");
+  if (source === "rest") {
+    if ((params.root ?? "node") !== "node") {
+      throw new Error(`${params.root} is available only with plugin inspection`);
+    }
+    if (!params.nodeId) throw new Error("nodeId is required for REST node search");
+    return handleFindNodes(
+      { rest: requireRest(ctx), snapshotCache: ctx.snapshotCache },
+      { ...params, nodeId: params.nodeId }
+    );
+  }
+
+  const response = await ctx.bridge.read({
+    operation: "find",
+    fileKey: params.fileKey,
+    root: params.root ?? "node",
+    ...(params.nodeId ? { nodeId: params.nodeId } : {}),
+    depth,
+    limit,
+    scanLimit,
+    selectionMetadataOffset: params.selectionMetadataOffset ?? 0,
+    filters: {
+      name: params.name,
+      namePattern: params.namePattern,
+      type: params.type,
+      classification: params.classification,
+      textContent: params.textContent,
+      componentId: params.componentId,
+      hasChildren: params.hasChildren,
+      minWidth: params.minWidth,
+      maxWidth: params.maxWidth,
+      minHeight: params.minHeight,
+      maxHeight: params.maxHeight,
+    },
+  }, params.timeoutMs);
+  return {
+    matches: response.matches.map(pluginFoundNode),
+    totalScanned: response.totalScanned,
+    truncated: response.truncated,
+    traversalDepth: response.traversalDepth,
+    matchLimit: response.resultLimit,
+    scanLimit: response.scanLimit,
+    scanLimitReached: response.scanLimitReached,
+    truncationReasons: response.truncationReasons,
+    truncatedFieldCount: response.truncatedFieldCount,
+    omittedScalarBytes: response.omittedScalarBytes,
+    fromCache: false,
+    source: "plugin",
+    snapshotAt: new Date().toISOString(),
+    cacheAgeMs: 0,
+    currentPage: response.currentPage,
+    selection: response.selection,
+    selectionCount: response.selectionCount,
+    selectionMetadata: response.selectionMetadata,
+  };
+}
+
+function pluginFoundNode(node: PluginReadNode): FoundNode {
+  return {
+    id: node.id,
+    name: node.name,
+    type: node.type,
+    classification: node.classification as NodeClassification,
+    depth: node.depth,
+    childCount: node.childCount,
+    visible: node.visible,
+    bounds: node.bounds,
+    textContent: node.textContent,
+    componentId: node.componentId,
+    truncatedFields: node.truncatedFields,
+    isComponent: node.type === "COMPONENT" || node.type === "COMPONENT_SET",
+    isInstance: node.type === "INSTANCE",
   };
 }
 

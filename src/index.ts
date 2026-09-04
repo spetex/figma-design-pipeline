@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { FigmaRestClient } from "./shared/figma-rest.js";
 import { SnapshotCache } from "./pipeline/snapshot.js";
 import { FigmaSession, type FileSelection } from "./shared/figma-session.js";
+import { parseFigmaUrl } from "./shared/figma-url.js";
 import type { ToolContext } from "./shared/context.js";
 import {
   getTreeInputSchema,
@@ -30,14 +31,14 @@ import {
 // ─── Inspect tools ───────────────────────────────────────────────────
 import {
   DEFAULT_MAX_RESPONSE_BYTES,
-  handleGetTree,
+  handleGetTreeFromSource,
   serializeGetTreeResponse,
 } from "./tools/inspect/get-tree.js";
 import { handleAudit } from "./tools/inspect/audit.js";
 import { handleExtractTokens } from "./tools/inspect/extract-tokens.js";
 import { handleExportImages } from "./tools/inspect/export-images.js";
-import { handleFindNodes } from "./tools/inspect/find-nodes.js";
-import { handleGetComponents } from "./tools/inspect/get-components.js";
+import { handleFindNodesFromSource } from "./tools/inspect/find-nodes.js";
+import { handleGetComponentsFromSource } from "./tools/inspect/get-components.js";
 import { handleGetStyles } from "./tools/inspect/get-styles.js";
 import { handleDiffTokens } from "./tools/inspect/diff-tokens.js";
 
@@ -62,6 +63,7 @@ import { handlePluginStatus } from "./tools/plugin/status.js";
 
 const FIGMA_ACCESS_TOKEN = process.env.FIGMA_ACCESS_TOKEN;
 const FIGMA_FILE_KEY = process.env.FIGMA_FILE_KEY; // Optional — can be provided via figmaUrl
+let activeFileKey = FIGMA_FILE_KEY;
 
 // Token is optional — all major CLIs (Claude Code, Codex, Gemini) support the official
 // Figma MCP via OAuth. The token is only needed for this server's REST API analysis tools.
@@ -88,20 +90,24 @@ function getContext(): ToolContext {
   return { rest, snapshotCache };
 }
 
+function getInspectionContext() {
+  return { rest, snapshotCache, bridge };
+}
+
 // ─── URL Resolution ─────────────────────────────────────────────────
 
 function activateFile(selection: FileSelection): void {
-  if (rest && selection.fileChanged) {
-    rest.defaultFileKey = selection.fileKey;
-    snapshotCache.invalidateAll();
-    console.error(`[mcp] Switched to Figma file: ${selection.fileKey}${selection.fileName ? ` (${selection.fileName})` : ""}`);
-  }
+  if (!selection.fileChanged) return;
+  activeFileKey = selection.fileKey;
+  if (rest) rest.defaultFileKey = selection.fileKey;
+  snapshotCache.invalidateAll();
+  console.error(`[mcp] Switched to Figma file: ${selection.fileKey}${selection.fileName ? ` (${selection.fileName})` : ""}`);
 }
 
 /** Update session file key if a new Figma URL is provided. No nodeId required. */
 function applyFileKey(params: { figmaUrl?: string }): void {
   if (!params.figmaUrl) return;
-  activateFile(figmaSession.applyFileKey(params.figmaUrl, rest?.defaultFileKey));
+  activateFile(figmaSession.applyFileKey(params.figmaUrl, activeFileKey));
 }
 
 /** Resolve figmaUrl + nodeId into a concrete nodeId. Throws if no nodeId can be determined. */
@@ -109,8 +115,22 @@ function resolveParams(params: { figmaUrl?: string; nodeId?: string }): { nodeId
   // Activate the URL's file before resolving so a missing node ID still leaves the
   // session on the requested file for a follow-up call with an explicit nodeId.
   applyFileKey(params);
-  const resolved = figmaSession.resolveParams(params, rest?.defaultFileKey);
+  const resolved = figmaSession.resolveParams(params, activeFileKey);
   return { nodeId: resolved.nodeId };
+}
+
+function resolveInspectionFile(params: { figmaUrl?: string }): string {
+  applyFileKey(params);
+  const pluginFileKey = bridge.getStatus().fileKey;
+  if (!activeFileKey && pluginFileKey) {
+    activeFileKey = pluginFileKey;
+    if (rest) rest.defaultFileKey = pluginFileKey;
+  }
+  const fileKey = activeFileKey;
+  if (!fileKey) {
+    throw new Error("No Figma file key is known. Pass figmaUrl or set FIGMA_FILE_KEY.");
+  }
+  return fileKey;
 }
 
 function jsonResponse(result: unknown) {
@@ -128,6 +148,12 @@ Use this path when the goal is understanding a design, not modifying it.
 - Use figma_find_nodes when you already know roughly what you are looking for.
 - Use figma_audit when you want a bounded list of structural problems.
 
+## Read Source
+- figma_get_tree, figma_find_nodes, and figma_get_components accept source: auto | plugin | rest.
+- auto prefers a connected plugin only when its exact figma.fileKey matches the requested file, then falls back to REST. plugin fails closed on disconnect or mismatch. rest always requires FIGMA_ACCESS_TOKEN.
+- Plugin reads need no FIGMA_ACCESS_TOKEN, never write to the document or inspection cache, and support node, current-page, and selection roots. They return the safe structural subset rather than REST style/token detail; current-page and selection require the plugin path.
+- Plugin traversal is deterministically bounded by depth, result limit, and a visited-node scan limit for searches. Responses distinguish result_limit from scan_limit; tree results retain the existing complete-response 80KB safeguard.
+
 ## Recommended Order
 1. figma_get_tree
 2. figma_audit
@@ -139,7 +165,8 @@ Use this path when the goal is understanding a design, not modifying it.
 - Any vector compaction, size pruning, or oversized scalar compaction is explicit through truncated and truncationReasons. Scalar compaction reports truncatedFieldCount, omittedScalarBytes, and per-node truncatedFields.
 - Follow directChildren.nextOffset using childOffset for another wide-root page; every emitted nextOffset is strictly greater than the current offset.
 - childCount is the source total; returnedChildCount is the number of real direct children present. Follow continuation nodeIds with focused figma_get_tree calls.
-- figma_find_nodes echoes traversalDepth and matchLimit, and marks truncated only after detecting a match beyond the limit.
+- figma_find_nodes supports exact name, linear-time case-insensitive RE2 namePattern regex, and type filters (plus its existing filters). It echoes traversalDepth, matchLimit, and plugin scan-limit metadata.
+- Omit both root and nodeId from figma_get_components for its legacy whole-file REST listing, then follow nextOffset with offset. Explicit current-page/selection roots remain plugin-only and never become whole-file fallbacks.
 - figma_extract_tokens is the detailed style view. Do not request it unless token detail is actually needed.
 - For very large files, keep drilling into specific nodeIds instead of repeating root fetches.
 `;
@@ -298,20 +325,21 @@ server.resource(
   })
 );
 
-// ─── Inspect tools (read-only, via REST API) ────────────────────────
+// ─── Inspect tools (read-only, via plugin or REST API) ──────────────
 
 server.tool(
   "figma_get_tree",
-  "Fetch an enriched Figma node tree while preserving requested-root children whenever the 80KB complete serialized-response cap permits. responseBytes is the UTF-8 size of the exact pretty-printed text. childCount is the source total and returnedChildCount is the number returned. nodeCount retains the serialized-node count (including synthetic markers), while returnedNodeCount counts real returned nodes. Vector compaction, node pruning, and oversized name/textContent compaction set truncated and report machine-readable reasons plus exact node/field omission metrics. Pass directChildren.nextOffset as childOffset for the next wide-root page; nextOffset always advances. Inspection snapshots are keyed by file, node, depth, and style inclusion.",
+  "Fetch a bounded Figma node tree from source auto|plugin|rest. auto uses the connected plugin only for an exact file-key match and otherwise falls back to REST; plugin needs no FIGMA_ACCESS_TOKEN and supports node/current-page/selection roots. Results include IDs, names, types, bounds, visibility, children, source, and truncation metadata. The complete serialized response retains the 80KB safeguard; REST snapshots remain keyed by file, node, depth, and style inclusion, while plugin reads never populate or invalidate them.",
   getTreeInputSchema.shape,
   async (params) => {
-    const { nodeId } = resolveParams(params);
-    const ctx = getContext();
-    const result = await handleGetTree(ctx, { ...params, nodeId });
+    const fileKey = resolveInspectionFile(params);
+    const root = params.root;
+    const nodeId = root === "node" ? resolveParams(params).nodeId : params.nodeId;
+    const result = await handleGetTreeFromSource(getInspectionContext(), { ...params, fileKey, nodeId });
 
     // Track the successful root read together with its file for session continuity.
-    if (ctx.rest.defaultFileKey) {
-      figmaSession.rememberRoot({ fileKey: ctx.rest.defaultFileKey, nodeId });
+    if (root === "node" && nodeId) {
+      figmaSession.rememberRoot({ fileKey, nodeId });
     }
 
     const response = serializeGetTreeResponse(result, {
@@ -363,22 +391,30 @@ server.tool(
 
 server.tool(
   "figma_find_nodes",
-  "Search/filter nodes by name pattern, type, classification, text content, or size. traversalDepth echoes the requested REST depth relative to the root, matchLimit echoes the result cap, and truncated is true only when a match beyond that cap is detected. Responses also report fromCache, snapshotAt, and cacheAgeMs.",
+  "Search bounded descendants through source auto|plugin|rest by exact name, linear-time case-insensitive RE2 regex, type, classification, text content, component ID, children, or size. auto prefers an exact-file connected plugin and falls back to REST. Plugin reads need no token and support node/current-page/selection roots. traversalDepth, matchLimit, scanLimit, truncationReasons, and scanLimitReached expose the traversal bounds.",
   findNodesInputSchema.shape,
   async (params) => {
-    const { nodeId } = resolveParams(params);
-    const result = await handleFindNodes(getContext(), { ...params, nodeId });
+    const fileKey = resolveInspectionFile(params);
+    const nodeId = params.root === "node" ? resolveParams(params).nodeId : params.nodeId;
+    const result = await handleFindNodesFromSource(getInspectionContext(), { ...params, fileKey, nodeId });
     return jsonResponse(result);
   }
 );
 
 server.tool(
   "figma_get_components",
-  "List all components in a Figma file with names, descriptions, and node IDs. Uses REST API.",
+  "Discover COMPONENT and COMPONENT_SET names and node IDs under a bounded node/current-page/selection root through source auto|plugin|rest. auto prefers an exact-file connected plugin without requiring FIGMA_ACCESS_TOKEN. Omit both root and nodeId for the paginated whole-file REST listing and follow nextOffset with offset; explicit current-page/selection roots remain plugin-only.",
   getComponentsInputSchema.shape,
   async (params) => {
-    applyFileKey(params);
-    const result = await handleGetComponents(getContext());
+    const fileKey = resolveInspectionFile(params);
+    const urlNodeId = params.figmaUrl ? parseFigmaUrl(params.figmaUrl).nodeId : undefined;
+    const requestedNodeId = params.nodeId ?? urlNodeId;
+    const root = params.root ?? (requestedNodeId ? "node" as const : undefined);
+    const nodeId = root === "node" ? resolveParams(params).nodeId : requestedNodeId;
+    const result = await handleGetComponentsFromSource(
+      getInspectionContext(),
+      { ...params, root, fileKey, nodeId }
+    );
     return jsonResponse(result);
   }
 );
@@ -518,7 +554,7 @@ server.tool(
 
 server.tool(
   "figma_plugin_status",
-  "Check if the Figma plugin is connected. Returns connection status, plugin version, current page, and pending batches.",
+  "Check if the Figma plugin is connected. Returns exact file key, plugin version, current page, pending batches, and pending reads.",
   pluginStatusInputSchema.shape,
   async () => {
     return jsonResponse(handlePluginStatus(bridge));

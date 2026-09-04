@@ -46,7 +46,7 @@ export class FigmaRestClient {
   async getFile(opts?: { depth?: number; fileKey?: string }): Promise<unknown> {
     const fk = this.resolveFileKey(opts?.fileKey);
     const p: Record<string, string> = {};
-    if (opts?.depth) p.depth = String(opts.depth);
+    if (opts?.depth !== undefined) p.depth = String(opts.depth);
     return this.request(`/files/${fk}`, p);
   }
 
@@ -56,7 +56,7 @@ export class FigmaRestClient {
   ): Promise<unknown> {
     const fk = this.resolveFileKey(opts?.fileKey);
     const p: Record<string, string> = { ids: nodeIds.join(",") };
-    if (opts?.depth) p.depth = String(opts.depth);
+    if (opts?.depth !== undefined) p.depth = String(opts.depth);
     return this.request(`/files/${fk}/nodes`, p);
   }
 

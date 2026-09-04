@@ -19,6 +19,176 @@ async function getAvailablePort(): Promise<number> {
   return port;
 }
 
+async function connectPlugin(bridge: BridgeServer, port: number, fileKey = "file-a"): Promise<WebSocket> {
+  await bridge.start(port);
+  const client = new WebSocket(`ws://127.0.0.1:${port}/plugin`);
+  await new Promise<void>((resolve, reject) => {
+    client.once("open", resolve);
+    client.once("error", reject);
+  });
+  client.send(JSON.stringify({
+    type: "handshake",
+    pluginVersion: "test",
+    fileKey,
+    pageName: "Page 1",
+    documentName: "Bridge test",
+  }));
+  await vi.waitFor(() => expect(bridge.getStatus().fileKey).toBe(fileKey));
+  return client;
+}
+
+function readResponse(request: Record<string, unknown>, name: string) {
+  return {
+    type: "read_response",
+    requestId: request.requestId,
+    operation: request.operation,
+    fileKey: request.fileKey,
+    success: true,
+    roots: [],
+    matches: [{
+      id: name,
+      name,
+      type: "FRAME",
+      classification: "container",
+      depth: 0,
+      childCount: 0,
+      children: [],
+    }],
+    components: [],
+    totalScanned: 1,
+    returnedCount: 1,
+    truncated: false,
+    truncationReasons: [],
+    traversalDepth: request.depth,
+    resultLimit: request.limit,
+    scanLimit: request.scanLimit,
+    scanLimitReached: false,
+    currentPage: { id: "page", name: "Page 1" },
+    selection: [],
+    selectionCount: 0,
+  };
+}
+
+function readParams(name: string) {
+  return {
+    operation: "find" as const,
+    fileKey: "file-a",
+    root: "node" as const,
+    nodeId: name,
+    depth: 2,
+    limit: 10,
+    scanLimit: 1000,
+  };
+}
+
+describe("BridgeServer plugin reads", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("correlates concurrent out-of-order responses independently from batches", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const bridge = new BridgeServer();
+    const port = await getAvailablePort();
+    const client = await connectPlugin(bridge, port);
+    const received: Array<Record<string, unknown>> = [];
+    client.on("message", (raw) => received.push(JSON.parse(raw.toString())));
+    try {
+      const first = bridge.read(readParams("first"));
+      const second = bridge.read(readParams("second"));
+      await vi.waitFor(() => expect(received).toHaveLength(2));
+      client.send(JSON.stringify(readResponse(received[1]!, "second")));
+      client.send(JSON.stringify(readResponse(received[0]!, "first")));
+
+      await expect(Promise.all([first, second])).resolves.toMatchObject([
+        { matches: [{ id: "first" }] },
+        { matches: [{ id: "second" }] },
+      ]);
+      expect(bridge.getStatus()).toMatchObject({ pendingReads: 0, pendingBatches: 0 });
+    } finally {
+      client.terminate();
+      await bridge.stop();
+    }
+  });
+
+  it("rejects file mismatches before sending a read request", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const bridge = new BridgeServer();
+    const port = await getAvailablePort();
+    const client = await connectPlugin(bridge, port, "open-file");
+    const messages = vi.fn();
+    client.on("message", messages);
+    try {
+      await expect(bridge.read({ ...readParams("root"), fileKey: "other-file" }))
+        .rejects.toThrow("Plugin file mismatch");
+      expect(messages).not.toHaveBeenCalled();
+    } finally {
+      client.terminate();
+      await bridge.stop();
+    }
+  });
+
+  it("cleans up reads on timeout and disconnect", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const bridge = new BridgeServer();
+    const port = await getAvailablePort();
+    const client = await connectPlugin(bridge, port);
+    try {
+      await expect(bridge.read(readParams("timeout"), 5)).rejects.toThrow("timed out after 5ms");
+      expect(bridge.getStatus().pendingReads).toBe(0);
+
+      const pending = bridge.read(readParams("disconnect"));
+      await vi.waitFor(() => expect(bridge.getStatus().pendingReads).toBe(1));
+      client.close();
+      await expect(pending).rejects.toThrow("Plugin disconnected mid-read");
+      expect(bridge.getStatus().pendingReads).toBe(0);
+    } finally {
+      client.terminate();
+      await bridge.stop();
+    }
+  });
+
+  it("reassembles out-of-order large read responses and enforces chunk count limits", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const bridge = new BridgeServer({ maxPayloadBytes: 1024, maxChunkedResultChunks: 16 });
+    const port = await getAvailablePort();
+    const client = await connectPlugin(bridge, port);
+    const requests: Array<Record<string, unknown>> = [];
+    client.on("message", (raw) => requests.push(JSON.parse(raw.toString())));
+    try {
+      const read = bridge.read(readParams("large"));
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
+      const response = readResponse(requests[0]!, "x".repeat(2500));
+      const serialized = JSON.stringify(response);
+      const chunks = Array.from({ length: Math.ceil(serialized.length / 500) }, (_, index) =>
+        serialized.slice(index * 500, (index + 1) * 500));
+      for (let index = chunks.length - 1; index >= 0; index--) {
+        client.send(JSON.stringify({
+          type: "read_response_chunk",
+          requestId: requests[0]!.requestId,
+          chunkIndex: index,
+          chunkCount: chunks.length,
+          data: chunks[index],
+        }));
+      }
+      await expect(read).resolves.toMatchObject({ matches: [{ id: "x".repeat(2500) }] });
+
+      const rejected = bridge.read(readParams("too-many"));
+      await vi.waitFor(() => expect(requests).toHaveLength(2));
+      client.send(JSON.stringify({
+        type: "read_response_chunk",
+        requestId: requests[1]!.requestId,
+        chunkIndex: 0,
+        chunkCount: 17,
+        data: "{}",
+      }));
+      await expect(rejected).rejects.toThrow("exceeds the 16-chunk limit");
+      expect(bridge.isConnected()).toBe(true);
+    } finally {
+      client.terminate();
+      await bridge.stop();
+    }
+  });
+});
+
 describe("BridgeServer WebSocket limits", () => {
   afterEach(() => {
     vi.restoreAllMocks();

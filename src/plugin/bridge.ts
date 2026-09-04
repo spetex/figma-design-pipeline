@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer, type Server } from "node:http";
 import { randomUUID } from "node:crypto";
+import type { PluginReadRequest, PluginReadResponse } from "../shared/plugin-read.js";
 
 export const DEFAULT_BRIDGE_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_BRIDGE_MAX_CHUNKED_RESULT_BYTES = 64 * 1024 * 1024;
@@ -20,18 +21,28 @@ export interface BridgeStatus {
   pluginVersion?: string;
   pageName?: string;
   documentName?: string;
+  fileKey?: string;
   fallbackAvailable: boolean;
   message: string;
   recommendedAction?: string;
   lastHandshakeAt?: string;
   lastPongAt?: string;
   pendingBatches: number;
+  pendingReads: number;
 }
 
 interface PendingBatch {
   resolve: (result: BatchResult) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface PendingRead {
+  resolve: (result: PluginReadResponse) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+  fileKey: string;
+  operation: PluginReadRequest["operation"];
 }
 
 interface ChunkedBatchResult {
@@ -76,7 +87,9 @@ export class BridgeServer {
   private boundPort: number | null = null;
   private pending = new Map<string, PendingBatch>();
   private chunkedResults = new Map<string, ChunkedBatchResult>();
-  private pluginInfo: { pluginVersion?: string; pageName?: string; documentName?: string } = {};
+  private pendingReads = new Map<string, PendingRead>();
+  private chunkedReadResults = new Map<string, ChunkedBatchResult>();
+  private pluginInfo: { pluginVersion?: string; pageName?: string; documentName?: string; fileKey?: string } = {};
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private lastHandshakeAt: string | null = null;
   private lastPongAt: string | null = null;
@@ -137,6 +150,7 @@ export class BridgeServer {
       wss.on("connection", (ws) => {
         // Replace existing connection
         if (this.plugin) {
+          this.rejectAllPending("Plugin connection replaced");
           try { this.plugin.close(); } catch { /* ignore */ }
         }
         this.plugin = ws;
@@ -165,11 +179,18 @@ export class BridgeServer {
             this.stopPingLoop();
             // Snapshot and clear before rejecting to avoid double-rejection race with timeouts
             const inFlight = new Map(this.pending);
+            const inFlightReads = new Map(this.pendingReads);
             this.pending.clear();
+            this.pendingReads.clear();
             this.chunkedResults.clear();
+            this.chunkedReadResults.clear();
             for (const [, p] of inFlight) {
               clearTimeout(p.timer);
               p.reject(new Error("Plugin disconnected mid-batch"));
+            }
+            for (const [, p] of inFlightReads) {
+              clearTimeout(p.timer);
+              p.reject(new Error("Plugin disconnected mid-read"));
             }
             console.error("[bridge] Plugin disconnected");
           }
@@ -191,6 +212,7 @@ export class BridgeServer {
         pluginVersion: data.pluginVersion as string,
         pageName: data.pageName as string,
         documentName: data.documentName as string,
+        fileKey: typeof data.fileKey === "string" ? data.fileKey : undefined,
       };
       this.lastHandshakeAt = new Date().toISOString();
       console.error(`[bridge] Handshake: ${this.pluginInfo.documentName} / ${this.pluginInfo.pageName} (plugin v${this.pluginInfo.pluginVersion})`);
@@ -214,6 +236,32 @@ export class BridgeServer {
       return;
     }
 
+    if (data.type === "read_response") {
+      const requestId = data.requestId;
+      if (typeof requestId !== "string") return;
+      const pending = this.pendingReads.get(requestId);
+      if (!pending) return;
+      if (data.fileKey !== pending.fileKey || data.operation !== pending.operation) {
+        this.rejectPendingRead(requestId, "Plugin sent a mismatched read response");
+        return;
+      }
+      clearTimeout(pending.timer);
+      this.pendingReads.delete(requestId);
+      this.chunkedReadResults.delete(requestId);
+      const response = data as unknown as PluginReadResponse;
+      if (!response.success) {
+        pending.reject(new Error(response.error || "Plugin read failed"));
+      } else {
+        pending.resolve(response);
+      }
+      return;
+    }
+
+    if (data.type === "read_response_chunk") {
+      this.handleReadResultChunk(data);
+      return;
+    }
+
     if (data.type === "document_changed") {
       // Figma's documentchange event covers edits made outside this bridge too.
       // A whole-cache invalidation is deliberately conservative: a change can
@@ -229,8 +277,77 @@ export class BridgeServer {
     if (data.type === "pong") {
       this.pluginInfo.pageName = data.pageName as string;
       this.pluginInfo.documentName = (data.documentName as string) || this.pluginInfo.documentName;
+      if (typeof data.fileKey === "string") this.pluginInfo.fileKey = data.fileKey;
       this.lastPongAt = new Date().toISOString();
       return;
+    }
+  }
+
+  private handleReadResultChunk(data: Record<string, unknown>): void {
+    const requestId = data.requestId;
+    const chunkIndex = data.chunkIndex;
+    const chunkCount = data.chunkCount;
+    const chunk = data.data;
+    if (
+      typeof requestId !== "string"
+      || !Number.isSafeInteger(chunkIndex)
+      || (chunkIndex as number) < 0
+      || !Number.isSafeInteger(chunkCount)
+      || (chunkCount as number) <= 0
+      || (chunkIndex as number) >= (chunkCount as number)
+      || typeof chunk !== "string"
+    ) {
+      if (typeof requestId === "string") {
+        this.rejectPendingRead(requestId, "Plugin sent malformed read response chunk metadata");
+      }
+      return;
+    }
+    if (!this.pendingReads.has(requestId)) return;
+    const expectedChunkCount = chunkCount as number;
+    if (expectedChunkCount > this.maxChunkedResultChunks) {
+      this.rejectPendingRead(requestId, `Plugin read response exceeds the ${this.maxChunkedResultChunks}-chunk limit`);
+      return;
+    }
+    let assembly = this.chunkedReadResults.get(requestId);
+    if (!assembly) {
+      assembly = { chunkCount: expectedChunkCount, chunks: new Map(), totalBytes: 0 };
+      this.chunkedReadResults.set(requestId, assembly);
+    } else if (assembly.chunkCount !== expectedChunkCount) {
+      this.rejectPendingRead(requestId, "Plugin sent inconsistent read response chunk metadata");
+      return;
+    }
+    const index = chunkIndex as number;
+    const existing = assembly.chunks.get(index);
+    if (existing !== undefined && existing !== chunk) {
+      this.rejectPendingRead(requestId, `Plugin sent conflicting data for read response chunk ${index}`);
+      return;
+    }
+    if (existing === undefined) {
+      const chunkBytes = Buffer.byteLength(chunk);
+      if (chunkBytes > this.maxChunkedResultBytes - assembly.totalBytes) {
+        this.rejectPendingRead(requestId, `Plugin read response exceeds the ${this.maxChunkedResultBytes}-byte limit`);
+        return;
+      }
+      assembly.chunks.set(index, chunk);
+      assembly.totalBytes += chunkBytes;
+    }
+    if (assembly.chunks.size !== assembly.chunkCount) return;
+    const chunks: string[] = [];
+    for (let i = 0; i < assembly.chunkCount; i++) {
+      const part = assembly.chunks.get(i);
+      if (part === undefined) return;
+      chunks.push(part);
+    }
+    this.chunkedReadResults.delete(requestId);
+    try {
+      const result = JSON.parse(chunks.join("")) as Record<string, unknown>;
+      if (result.type !== "read_response" || result.requestId !== requestId) {
+        this.rejectPendingRead(requestId, "Plugin sent a mismatched chunked read response");
+        return;
+      }
+      this.handleMessage(result);
+    } catch {
+      this.rejectPendingRead(requestId, "Plugin sent an invalid chunked read response");
     }
   }
 
@@ -333,6 +450,30 @@ export class BridgeServer {
     pending.reject(new Error(message));
   }
 
+  private rejectPendingRead(requestId: string, message: string): void {
+    const pending = this.pendingReads.get(requestId);
+    this.chunkedReadResults.delete(requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingReads.delete(requestId);
+    pending.reject(new Error(message));
+  }
+
+  private rejectAllPending(message: string): void {
+    for (const [, pending] of this.pending) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(message));
+    }
+    for (const [, pending] of this.pendingReads) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(message));
+    }
+    this.pending.clear();
+    this.pendingReads.clear();
+    this.chunkedResults.clear();
+    this.chunkedReadResults.clear();
+  }
+
   private startPingLoop(): void {
     this.stopPingLoop();
     this.pingTimer = setInterval(() => {
@@ -374,6 +515,45 @@ export class BridgeServer {
     });
   }
 
+  async read(
+    request: Omit<PluginReadRequest, "type" | "requestId">,
+    timeoutMs = 30000
+  ): Promise<PluginReadResponse> {
+    if (!this.plugin || this.plugin.readyState !== WebSocket.OPEN) {
+      throw new Error("Plugin not connected. Open the SPFR Design Pipeline plugin in Figma.");
+    }
+    if (!this.pluginInfo.fileKey || this.pluginInfo.fileKey !== request.fileKey) {
+      throw new Error(
+        `Plugin file mismatch: requested ${request.fileKey}, open ${this.pluginInfo.fileKey || "unknown"}`
+      );
+    }
+    const requestId = randomUUID();
+    const fullRequest: PluginReadRequest = { type: "read_request", requestId, ...request };
+    return new Promise<PluginReadResponse>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingReads.delete(requestId);
+        this.chunkedReadResults.delete(requestId);
+        reject(new Error(`Read ${requestId} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pendingReads.set(requestId, {
+        resolve,
+        reject,
+        timer,
+        fileKey: request.fileKey,
+        operation: request.operation,
+      });
+      try {
+        this.plugin!.send(JSON.stringify(fullRequest));
+      } catch (err) {
+        this.rejectPendingRead(requestId, err instanceof Error ? err.message : String(err));
+      }
+    });
+  }
+
+  canReadFile(fileKey: string): boolean {
+    return this.isConnected() && this.pluginInfo.fileKey === fileKey;
+  }
+
   isConnected(): boolean {
     return this.plugin !== null && this.plugin.readyState === WebSocket.OPEN;
   }
@@ -382,7 +562,7 @@ export class BridgeServer {
     const connected = this.isConnected();
     const message = connected
       ? `Plugin connected on port ${this.boundPort}${this.pluginInfo.documentName ? ` for ${this.pluginInfo.documentName}` : ""}${this.pluginInfo.pageName ? ` / ${this.pluginInfo.pageName}` : ""}.`
-      : "Plugin bridge is not connected. figma_execute will return fallback use_figma JavaScript.";
+      : "Plugin bridge is not connected. Inspection auto mode can use REST and figma_execute will return fallback use_figma JavaScript.";
 
     return {
       connected,
@@ -391,22 +571,18 @@ export class BridgeServer {
       fallbackAvailable: true,
       message,
       recommendedAction: connected
-        ? "Use figma_execute for batched writes."
-        : "Open the SPFR Design Pipeline plugin in Figma Desktop to enable fast batched writes.",
+        ? "Use auto inspection for local reads and figma_execute for batched writes."
+        : "Open the SPFR Design Pipeline plugin in Figma Desktop to enable local reads and fast batched writes.",
       ...this.pluginInfo,
       lastHandshakeAt: this.lastHandshakeAt ?? undefined,
       lastPongAt: this.lastPongAt ?? undefined,
       pendingBatches: this.pending.size,
+      pendingReads: this.pendingReads.size,
     };
   }
 
   async stop(): Promise<void> {
-    for (const [, p] of this.pending) {
-      clearTimeout(p.timer);
-      p.reject(new Error("Bridge shutting down"));
-    }
-    this.pending.clear();
-    this.chunkedResults.clear();
+    this.rejectAllPending("Bridge shutting down");
     this.stopPingLoop();
     if (this.plugin) { try { this.plugin.close(); } catch { /* ignore */ } }
     if (this.wss) this.wss.close();

@@ -28,7 +28,8 @@ The skill picks the right tools. Read on if you want to drive specific tools you
 | You want to… | Tool | Server |
 |---|---|---|
 | Create / modify / style any node | `figma_execute` | this package |
-| Read-only JS queries (Figma plugin API) | `use_figma` | official Figma MCP |
+| Bounded node/tree/component inspection | `figma_get_tree`, `figma_find_nodes`, `figma_get_components` | this package |
+| Other read-only JS queries | `use_figma` | official Figma MCP |
 | Create a new Figma file | `create_new_file` | official Figma MCP |
 | Take a screenshot | `get_screenshot` | official Figma MCP |
 | Inspect / audit / extract tokens | `figma_get_tree`, `figma_audit`, etc. | this package |
@@ -37,9 +38,31 @@ The skill picks the right tools. Read on if you want to drive specific tools you
 
 Always call `figma_plugin_status` first when starting a write-heavy task. It tells you whether the plugin bridge is live (30-60x faster) or whether the agent should plan around fallback JS.
 
-## Inspect (read-only, no plugin needed)
+## Inspect (read-only, plugin-first where supported)
 
-These all hit the Figma REST API. They need `FIGMA_ACCESS_TOKEN` set in your MCP server env (see [INSTALL.md](INSTALL.md)).
+`figma_get_tree`, `figma_find_nodes`, and `figma_get_components` accept
+`source: "auto" | "plugin" | "rest"` (default `auto`). `auto` uses the
+connected plugin only when its exact `figma.fileKey` matches the requested
+file, then falls back to REST. `plugin` fails closed when disconnected or when
+the file differs; `rest` always selects REST. Plugin inspection needs no
+`FIGMA_ACCESS_TOKEN`. Other inspection tools still use REST and need the token
+configured (see [INSTALL.md](INSTALL.md)).
+
+Plugin-backed tools accept `root: "node" | "current-page" | "selection"`.
+Traversal is bounded by `depth` and `limit`; searches and component discovery
+also stop at `scanLimit` (default 1,000 nodes) even when matches are sparse or
+absent. Responses distinguish `result_limit` from `scan_limit`. Current-page
+context is included in plugin responses; selection metadata is collected only
+for selection-root reads and is deterministically paged. Follow
+`selectionMetadata.nextOffset` with `selectionMetadataOffset`; `total`,
+`returned`, and `omitted` remain truthful even for a 50,000-node selection.
+`figma_find_nodes` supports both an exact, case-sensitive `name` and a
+case-insensitive RE2 `namePattern`. The pure-JavaScript matcher guarantees
+linear-time work for nested and overlapping repetitions. Backreferences,
+lookarounds, unsupported RE2 constructs, and patterns over 256 characters fail
+closed with a validation error. Plugin trees return
+the safe structural subset; choose `source: "rest"` when style/token enrichment
+from `includeStyles` is required.
 
 | Tool | What it does | When to use |
 |---|---|---|
@@ -47,14 +70,14 @@ These all hit the Figma REST API. They need `FIGMA_ACCESS_TOKEN` set in your MCP
 | `figma_audit` | Structural audit: naming, layout, components, tokens, accessibility. | Bounded list of issues before a cleanup pass. |
 | `figma_extract_tokens` | Colors, fonts, spacing, radius, layered shadows, and opacity — with Tailwind mapping. | Token sync, theming, brand audits. |
 | `figma_find_nodes` | Filter nodes by name / type / classification / text / size, with explicit limit and depth metadata. | "Where is the button styled like X?" |
-| `figma_get_components` | List published components. | Before mapping to your code components. |
+| `figma_get_components` | Discover components and component sets under a root; omitting both root and node retains the paginated published-component REST listing. | Before mapping to your code components. |
 | `figma_get_styles` | List published color/text/effect styles. | Token drift check. |
 | `figma_diff_tokens` | Compare Figma styles vs your code tokens. | Sync workflow. Accepts style data directly — no REST call. |
 | `figma_export_images` | Render nodes to PNG/JPG/SVG via REST. | Snapshots, before/after, docs. |
 
 ### Inspection freshness and cache provenance
 
-`figma_get_tree` and `figma_find_nodes` cache REST inspection snapshots by
+The REST paths for `figma_get_tree` and `figma_find_nodes` cache inspection snapshots by
 Figma file, root node ID, requested depth, and whether styles are included.
 Every response reports `fromCache`, `snapshotAt` (ISO timestamp), and
 `cacheAgeMs`, so callers can tell whether they received a reused snapshot and
@@ -66,9 +89,10 @@ how old it is.
   milliseconds. `maxAgeMs: 0` is equivalent to `refresh: true`.
 - Without either option, snapshots can be reused for up to 15 minutes.
 
-These inspection tools use the Figma REST API, not the plugin bridge. A refresh
-guarantees a new REST request, but cannot guarantee that Figma REST has already
-observed a just-made plugin or editor mutation. Connected `figma_execute`
+Plugin reads always inspect live plugin state: they neither read nor populate
+the REST snapshot cache, and a read never invalidates it. On the REST path, a
+refresh guarantees a new REST request, but cannot guarantee that Figma REST has
+already observed a just-made plugin or editor mutation. Connected `figma_execute`
 batches that apply changes, and plugin `documentchange` notifications, clear
 the local inspection cache conservatively. If the plugin is disconnected while
 someone else edits the file, request `refresh: true` or `maxAgeMs: 0` when the
@@ -97,9 +121,9 @@ after descendant pruning is paginated. In that case, pass
 Every emitted `nextOffset` is strictly greater than the request's `childOffset`;
 a response without `nextOffset` is terminal.
 
-If an individual `name` or `textContent` value would prevent even one direct
-child from fitting, the value is UTF-8-byte bounded while the node ID and node
-record remain present and retrievable. The response includes
+Every Figma-origin scalar in plugin inspection (including IDs, names, text,
+component keys/descriptions, and page/selection context) is capped at 4,000
+UTF-8 bytes. The response includes
 `scalar_field_limit`, `truncatedFieldCount`, `omittedScalarBytes`, and per-node
 `truncatedFields` byte counts. Scalar compaction does not change node counts or
 `omittedNodeCount`.
@@ -107,13 +131,25 @@ record remain present and retrievable. The response includes
 For compatibility, `nodeCount` continues to count every serialized tree entry,
 including synthetic `COLLAPSED` and `TRUNCATED` markers. Use
 `returnedNodeCount` for the number of real source nodes present and
-`totalNodeCount` for the real source-node total before omissions. Size-limited
-responses retain the legacy `note` field alongside the structured metadata.
+`totalNodeCount` for the real source-node total before omissions. A
+result-limited plugin tree cannot count the remaining tree without defeating
+its work bound, so its node and omission counts are lower bounds with
+`totalNodeCountExact: false` and `omittedNodeCountExact: false`;
+selection responses separately include `selectionCount` and bounded
+`selectionMetadata`. Size-limited responses retain the legacy `note` field
+alongside the structured metadata.
 
-`figma_find_nodes` echoes the requested relative REST depth as `traversalDepth`
-(the requested root is depth 0) and its match cap as `matchLimit`. Its
-`truncated` flag is true only after the traversal detects at least one matching
-node beyond the cap, so an exact-limit complete result is not mislabeled.
+`figma_find_nodes` echoes the requested relative traversal depth as `traversalDepth`
+(the requested root is depth 0), its match cap as `matchLimit`, and plugin work
+caps as `scanLimit` / `scanLimitReached`. Its `truncated` flag is true after an
+additional match or an incomplete scan; `truncationReasons` says which bound
+stopped the read. An exact-limit complete result is not mislabeled.
+
+For the legacy whole-file published-component REST listing, omit both `root`
+and `nodeId`. Follow `nextOffset` by passing it back as `offset`; a response
+without `nextOffset` is terminal. Explicit `current-page` and `selection` roots
+never fall back to this whole-file listing and therefore require a matching
+plugin. An explicit `depth: 0` is preserved on REST node requests.
 
 ### Pattern: explore a file
 

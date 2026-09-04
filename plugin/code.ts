@@ -1,6 +1,22 @@
 /// <reference types="@figma/plugin-typings" />
 
 import { assertActionInputCoverage, isForbiddenDeleteNodeType, isKnownActionType } from "../src/shared/action-parity";
+import { classifyNode } from "../src/analysis/node-classifier";
+import {
+  MAX_PLUGIN_READ_DEPTH,
+  MAX_PLUGIN_READ_RESULTS,
+  MAX_PLUGIN_READ_SCALAR_BYTES,
+  MAX_PLUGIN_READ_VISITS,
+  MAX_PLUGIN_SELECTION_METADATA,
+  type PluginComponentNode,
+  type PluginReadFilters,
+  type PluginReadNode,
+  type PluginReadRequest,
+  type PluginReadResponse,
+  type PluginReadContextNode,
+  type PluginTruncatedFields,
+} from "../src/shared/plugin-read";
+import { compileInspectionRegex, type InspectionRegex } from "../src/shared/safe-regex";
 
 // ─── SPFR Design Pipeline Plugin v2 ──────────────────────────────
 // High-performance batch executor with font caching, symbolic refs,
@@ -118,6 +134,494 @@ function captureSnapshot(node: SceneNode): Record<string, unknown> {
     snap.cornerRadius = typeof cr === "symbol" ? "mixed" : cr;
   }
   return snap;
+}
+
+// ─── Read-only inspection ──────────────────────────────────────
+
+function readChildren(node: BaseNode): readonly BaseNode[] {
+  const value = readProperty(node, "children");
+  return Array.isArray(value) ? value as BaseNode[] : [];
+}
+
+function readProperty(node: BaseNode, property: string): unknown {
+  try {
+    return (node as unknown as Record<string, unknown>)[property];
+  } catch {
+    return undefined;
+  }
+}
+
+function safeString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function truncateFigmaString(value: string): {
+  value: string;
+  originalBytes: number;
+  returnedBytes: number;
+  truncated: boolean;
+} {
+  let originalBytes = 0;
+  let returnedContentBytes = 0;
+  let returnedEnd = 0;
+  const contentBudget = MAX_PLUGIN_READ_SCALAR_BYTES - 3; // UTF-8 ellipsis
+  let prefixComplete = true;
+
+  for (let index = 0; index < value.length; index++) {
+    const first = value.charCodeAt(index);
+    let characterBytes: number;
+    let characterEnd = index + 1;
+    if (first <= 0x7f) {
+      characterBytes = 1;
+    } else if (first <= 0x7ff) {
+      characterBytes = 2;
+    } else if (first >= 0xd800 && first <= 0xdbff && index + 1 < value.length) {
+      const second = value.charCodeAt(index + 1);
+      if (second >= 0xdc00 && second <= 0xdfff) {
+        characterBytes = 4;
+        characterEnd = index + 2;
+        index++;
+      } else {
+        characterBytes = 3;
+      }
+    } else {
+      // BMP code points and unpaired surrogates both encode to at most 3 bytes.
+      characterBytes = 3;
+    }
+    originalBytes += characterBytes;
+    if (prefixComplete && returnedContentBytes + characterBytes <= contentBudget) {
+      returnedContentBytes += characterBytes;
+      returnedEnd = characterEnd;
+    } else {
+      prefixComplete = false;
+    }
+  }
+
+  if (originalBytes <= MAX_PLUGIN_READ_SCALAR_BYTES) {
+    return { value, originalBytes, returnedBytes: originalBytes, truncated: false };
+  }
+  return {
+    value: `${value.slice(0, returnedEnd)}…`,
+    originalBytes,
+    returnedBytes: returnedContentBytes + 3,
+    truncated: true,
+  };
+}
+
+function boundedFigmaString(
+  value: string,
+  field: string,
+  truncatedFields: PluginTruncatedFields
+): string {
+  const bounded = truncateFigmaString(value);
+  if (bounded.truncated) {
+    truncatedFields[field] = {
+      originalBytes: bounded.originalBytes,
+      returnedBytes: bounded.returnedBytes,
+    };
+  }
+  return bounded.value;
+}
+
+function boundedOptionalFigmaString(
+  value: unknown,
+  field: string,
+  truncatedFields: PluginTruncatedFields
+): string | undefined {
+  return typeof value === "string" ? boundedFigmaString(value, field, truncatedFields) : undefined;
+}
+
+function safeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function safeBounds(node: BaseNode): PluginReadNode["bounds"] {
+  const value = readProperty(node, "absoluteBoundingBox");
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const x = safeNumber(raw.x);
+  const y = safeNumber(raw.y);
+  const width = safeNumber(raw.width);
+  const height = safeNumber(raw.height);
+  return x === undefined || y === undefined || width === undefined || height === undefined
+    ? undefined
+    : { x, y, width, height };
+}
+
+async function componentMetadata(node: BaseNode): Promise<Pick<PluginReadNode,
+  "componentId" | "componentKey" | "description" | "componentSetId">> {
+  let componentId: string | undefined;
+  if (node.type === "INSTANCE") {
+    try {
+      const component = await (node as InstanceNode).getMainComponentAsync();
+      componentId = component?.id;
+    } catch {
+      // A missing or inaccessible library component must not make the node unsafe to inspect.
+    }
+  }
+  const parent = readProperty(node, "parent") as BaseNode | undefined;
+  const componentKey = safeString(readProperty(node, "key"));
+  const description = safeString(readProperty(node, "description"));
+  return {
+    ...(componentId ? { componentId } : {}),
+    ...((node.type === "COMPONENT" || node.type === "COMPONENT_SET")
+      && componentKey
+      ? { componentKey }
+      : {}),
+    ...((node.type === "COMPONENT" || node.type === "COMPONENT_SET")
+      && description
+      ? { description }
+      : {}),
+    ...(parent?.type === "COMPONENT_SET" ? { componentSetId: parent.id } : {}),
+  };
+}
+
+async function serializeReadNode(node: BaseNode, children: PluginReadNode[], depth: number): Promise<PluginReadNode> {
+  const truncatedFields: PluginTruncatedFields = {};
+  const bounds = safeBounds(node);
+  const visible = readProperty(node, "visible");
+  const rawCharacters = safeString(readProperty(node, "characters"));
+  const layoutMode = safeString(readProperty(node, "layoutMode"));
+  const rawMetadata = await componentMetadata(node);
+  const textContent = boundedOptionalFigmaString(rawCharacters, "textContent", truncatedFields);
+  const componentId = boundedOptionalFigmaString(rawMetadata.componentId, "componentId", truncatedFields);
+  const componentKey = boundedOptionalFigmaString(rawMetadata.componentKey, "componentKey", truncatedFields);
+  const description = boundedOptionalFigmaString(rawMetadata.description, "description", truncatedFields);
+  const componentSetId = boundedOptionalFigmaString(rawMetadata.componentSetId, "componentSetId", truncatedFields);
+  const sourceChildren = readChildren(node);
+  const classificationChildren = sourceChildren.slice(0, 20).map((child) => ({
+    id: child.id,
+    name: child.name,
+    type: child.type,
+    absoluteBoundingBox: safeBounds(child),
+  }));
+  return {
+    id: boundedFigmaString(node.id, "id", truncatedFields),
+    name: boundedFigmaString(node.name, "name", truncatedFields),
+    type: boundedFigmaString(safeString(readProperty(node, "type")) ?? "UNKNOWN", "type", truncatedFields),
+    classification: classifyNode({
+      id: node.id,
+      name: node.name,
+      type: node.type,
+      absoluteBoundingBox: bounds,
+      characters: rawCharacters,
+      children: classificationChildren,
+    }),
+    depth,
+    ...(typeof visible === "boolean" ? { visible } : {}),
+    ...(bounds ? { bounds } : {}),
+    ...(textContent !== undefined ? { textContent } : {}),
+    ...(componentId !== undefined ? { componentId } : {}),
+    ...(componentKey !== undefined ? { componentKey } : {}),
+    ...(description !== undefined ? { description } : {}),
+    ...(componentSetId !== undefined ? { componentSetId } : {}),
+    ...(layoutMode === "HORIZONTAL" || layoutMode === "VERTICAL" || layoutMode === "GRID" || layoutMode === "NONE"
+      ? { layoutMode }
+      : {}),
+    ...numberProperty(node, "itemSpacing"),
+    ...numberProperty(node, "paddingLeft"),
+    ...numberProperty(node, "paddingRight"),
+    ...numberProperty(node, "paddingTop"),
+    ...numberProperty(node, "paddingBottom"),
+    childCount: sourceChildren.length,
+    ...(Object.keys(truncatedFields).length > 0 ? { truncatedFields } : {}),
+    children,
+  };
+}
+
+function numberProperty(node: BaseNode, property: string): Record<string, number> {
+  const value = safeNumber(readProperty(node, property));
+  return value === undefined ? {} : { [property]: value };
+}
+
+async function serializeTree(
+  node: BaseNode,
+  depth: number,
+  budget: { remaining: number; visited: number; truncated: boolean },
+  currentDepth = 0
+): Promise<PluginReadNode | null> {
+  if (budget.remaining <= 0) {
+    budget.truncated = true;
+    return null;
+  }
+  budget.remaining--;
+  budget.visited++;
+  const children: PluginReadNode[] = [];
+  if (depth > 0) {
+    for (const child of readChildren(node)) {
+      const serialized = await serializeTree(child, depth - 1, budget, currentDepth + 1);
+      if (!serialized) break;
+      children.push(serialized);
+    }
+  }
+  return serializeReadNode(node, children, currentDepth);
+}
+
+async function resolveReadRoots(request: PluginReadRequest): Promise<readonly BaseNode[]> {
+  if (request.root === "current-page") return [figma.currentPage];
+  if (request.root === "selection") return figma.currentPage.selection;
+  if (!request.nodeId) throw new Error("nodeId is required when root is 'node'");
+  const node = await figma.getNodeByIdAsync(request.nodeId);
+  if (!node) throw new Error(`Node not found: ${request.nodeId}`);
+  return [node];
+}
+
+function compileReadRegex(pattern: string | undefined, label: string): InspectionRegex | undefined {
+  return compileInspectionRegex(pattern, label);
+}
+
+function nodeMatches(
+  source: BaseNode,
+  node: PluginReadNode,
+  filters: PluginReadFilters,
+  nameRegex?: InspectionRegex,
+  textRegex?: InspectionRegex
+): boolean {
+  const sourceName = safeString(readProperty(source, "name")) ?? "";
+  const sourceText = safeString(readProperty(source, "characters"));
+  const sourceType = safeString(readProperty(source, "type")) ?? "";
+  if (filters.name !== undefined && sourceName !== filters.name) return false;
+  if (nameRegex && !nameRegex.test(sourceName)) return false;
+  if (filters.type && sourceType.toUpperCase() !== filters.type.toUpperCase()) return false;
+  if (filters.classification && node.classification !== filters.classification) return false;
+  if (textRegex && (!sourceText || !textRegex.test(sourceText))) return false;
+  if (filters.componentId && node.componentId !== filters.componentId) return false;
+  if (filters.hasChildren !== undefined && (node.childCount > 0) !== filters.hasChildren) return false;
+  if (filters.minWidth !== undefined && (!node.bounds || node.bounds.width < filters.minWidth)) return false;
+  if (filters.maxWidth !== undefined && (!node.bounds || node.bounds.width > filters.maxWidth)) return false;
+  if (filters.minHeight !== undefined && (!node.bounds || node.bounds.height < filters.minHeight)) return false;
+  if (filters.maxHeight !== undefined && (!node.bounds || node.bounds.height > filters.maxHeight)) return false;
+  return true;
+}
+
+async function walkReadNodes(
+  roots: readonly BaseNode[],
+  depth: number,
+  budget: { limit: number; visited: number; limitReached: boolean },
+  visit: (node: BaseNode, depth: number) => Promise<boolean>
+): Promise<boolean> {
+  const walk = async (node: BaseNode, remainingDepth: number, currentDepth: number): Promise<boolean> => {
+    if (budget.visited >= budget.limit) {
+      budget.limitReached = true;
+      return false;
+    }
+    budget.visited++;
+    if (!await visit(node, currentDepth)) return false;
+    if (remainingDepth <= 0) return true;
+    for (const child of readChildren(node)) {
+      if (!await walk(child, remainingDepth - 1, currentDepth + 1)) return false;
+    }
+    return true;
+  };
+  for (const root of roots) {
+    if (!await walk(root, depth, 0)) return false;
+  }
+  return true;
+}
+
+function serializeContextNode(node: BaseNode): PluginReadContextNode {
+  const truncatedFields: PluginTruncatedFields = {};
+  return {
+    id: boundedFigmaString(safeString(readProperty(node, "id")) ?? "unknown", "id", truncatedFields),
+    name: boundedFigmaString(safeString(readProperty(node, "name")) ?? "Unknown", "name", truncatedFields),
+    type: boundedFigmaString(safeString(readProperty(node, "type")) ?? "UNKNOWN", "type", truncatedFields),
+    ...(Object.keys(truncatedFields).length > 0 ? { truncatedFields } : {}),
+  };
+}
+
+function readResponseBase(request: PluginReadRequest) {
+  const currentPage = serializeContextNode(figma.currentPage);
+  const selectionContext = request.root === "selection"
+    ? serializeSelectionMetadata(request)
+    : undefined;
+  return {
+    type: "read_response",
+    requestId: request.requestId,
+    operation: request.operation,
+    fileKey: figma.fileKey!,
+    traversalDepth: request.depth,
+    resultLimit: request.limit,
+    scanLimit: request.scanLimit,
+    currentPage,
+    ...(selectionContext ?? {}),
+  } as const;
+}
+
+function serializeSelectionMetadata(request: PluginReadRequest): Pick<PluginReadResponse,
+  "selection" | "selectionCount" | "selectionMetadata"> {
+  const source = figma.currentPage.selection;
+  const requestedOffset = request.selectionMetadataOffset ?? 0;
+  const offset = Number.isInteger(requestedOffset) && requestedOffset >= 0 && requestedOffset <= source.length
+    ? requestedOffset
+    : 0;
+  const requestedLimit = Number.isInteger(request.limit) && request.limit > 0 ? request.limit : 1;
+  const end = Math.min(source.length, offset + Math.min(requestedLimit, MAX_PLUGIN_SELECTION_METADATA));
+  const selection: PluginReadContextNode[] = [];
+  for (let index = offset; index < end; index++) {
+    selection.push(serializeContextNode(source[index]!));
+  }
+  return {
+    selection,
+    selectionCount: source.length,
+    selectionMetadata: {
+      offset,
+      returned: selection.length,
+      total: source.length,
+      omitted: source.length - selection.length,
+      ...(end < source.length ? { nextOffset: end } : {}),
+    },
+  };
+}
+
+function finalizeReadResponse(
+  response: Omit<PluginReadResponse, "truncatedFieldCount" | "omittedScalarBytes">
+): PluginReadResponse {
+  let truncatedFieldCount = 0;
+  let omittedScalarBytes = 0;
+  const add = (fields: PluginTruncatedFields | undefined): void => {
+    for (const field of Object.values(fields ?? {})) {
+      truncatedFieldCount++;
+      omittedScalarBytes += field.originalBytes - field.returnedBytes;
+    }
+  };
+  const visitNode = (node: PluginReadNode): void => {
+    add(node.truncatedFields);
+    node.children.forEach(visitNode);
+  };
+  add(response.currentPage.truncatedFields);
+  response.selection?.forEach((node) => add(node.truncatedFields));
+  response.roots.forEach(visitNode);
+  response.matches.forEach(visitNode);
+  response.components.forEach((component) => add(component.truncatedFields));
+  const scalarLimited = truncatedFieldCount > 0;
+  return {
+    ...response,
+    truncated: response.truncated || scalarLimited,
+    truncationReasons: Array.from(new Set([
+      ...response.truncationReasons,
+      ...(scalarLimited ? ["scalar_field_limit" as const] : []),
+    ])),
+    truncatedFieldCount,
+    omittedScalarBytes,
+  };
+}
+
+async function processReadRequest(request: PluginReadRequest): Promise<PluginReadResponse> {
+  if (!figma.fileKey || request.fileKey !== figma.fileKey) {
+    throw new Error(`Plugin file mismatch: requested ${request.fileKey}, open ${figma.fileKey || "unknown"}`);
+  }
+  if (!Number.isInteger(request.depth) || request.depth < 0 || request.depth > MAX_PLUGIN_READ_DEPTH) {
+    throw new Error(`Read depth must be between 0 and ${MAX_PLUGIN_READ_DEPTH}`);
+  }
+  if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > MAX_PLUGIN_READ_RESULTS) {
+    throw new Error(`Read limit must be between 1 and ${MAX_PLUGIN_READ_RESULTS}`);
+  }
+  if (!Number.isInteger(request.scanLimit) || request.scanLimit < 1 || request.scanLimit > MAX_PLUGIN_READ_VISITS) {
+    throw new Error(`Read scan limit must be between 1 and ${MAX_PLUGIN_READ_VISITS}`);
+  }
+  if (request.operation !== "tree" && request.operation !== "find" && request.operation !== "components") {
+    throw new Error(`Unsupported read operation: ${String(request.operation)}`);
+  }
+  if (request.root !== "node" && request.root !== "current-page" && request.root !== "selection") {
+    throw new Error(`Unsupported read root: ${String(request.root)}`);
+  }
+  if (!Number.isInteger(request.selectionMetadataOffset ?? 0) || (request.selectionMetadataOffset ?? 0) < 0) {
+    throw new Error("Selection metadata offset must be a non-negative integer");
+  }
+  if (request.root !== "selection" && (request.selectionMetadataOffset ?? 0) !== 0) {
+    throw new Error("Selection metadata offset is supported only for selection reads");
+  }
+  if (request.root === "selection" && (request.selectionMetadataOffset ?? 0) > figma.currentPage.selection.length) {
+    throw new Error(`Selection metadata offset exceeds the ${figma.currentPage.selection.length}-node selection`);
+  }
+
+  const roots = await resolveReadRoots(request);
+  const base = readResponseBase(request);
+  if (request.operation === "tree") {
+    const budget = { remaining: request.limit, visited: 0, truncated: false };
+    const serializedRoots: PluginReadNode[] = [];
+    for (const root of roots) {
+      const serialized = await serializeTree(root, request.depth, budget);
+      if (!serialized) break;
+      serializedRoots.push(serialized);
+    }
+    const returnedCount = request.limit - budget.remaining;
+    return finalizeReadResponse({
+      ...base,
+      success: true,
+      roots: serializedRoots,
+      matches: [],
+      components: [],
+      totalScanned: budget.visited,
+      returnedCount,
+      ...(!budget.truncated ? { totalNodeCount: returnedCount } : {}),
+      truncated: budget.truncated,
+      truncationReasons: budget.truncated ? ["result_limit"] : [],
+      scanLimitReached: false,
+    });
+  }
+
+  const matches: PluginReadNode[] = [];
+  const components: PluginComponentNode[] = [];
+  let resultLimitReached = false;
+  const scanBudget = { limit: request.scanLimit, visited: 0, limitReached: false };
+  const filters = request.filters ?? {};
+  const nameRegex = compileReadRegex(filters.namePattern, "namePattern");
+  const textRegex = compileReadRegex(filters.textContent, "textContent");
+  await walkReadNodes(roots, request.depth, scanBudget, async (node, nodeDepth) => {
+    const serialized = await serializeReadNode(node, [], nodeDepth);
+    if (request.operation === "find" && nodeMatches(node, serialized, filters, nameRegex, textRegex)) {
+      if (matches.length >= request.limit) {
+        resultLimitReached = true;
+        return false;
+      }
+      matches.push(serialized);
+    }
+    if (request.operation === "components" && (node.type === "COMPONENT" || node.type === "COMPONENT_SET")) {
+      if (components.length >= request.limit) {
+        resultLimitReached = true;
+        return false;
+      }
+      const truncatedFields: PluginTruncatedFields = {};
+      for (const [sourceField, targetField] of [
+        ["id", "id"],
+        ["name", "name"],
+        ["type", "type"],
+        ["componentKey", "key"],
+        ["description", "description"],
+        ["componentSetId", "componentSetId"],
+      ] as const) {
+        const truncation = serialized.truncatedFields?.[sourceField];
+        if (truncation) truncatedFields[targetField] = truncation;
+      }
+      components.push({
+        id: serialized.id,
+        name: serialized.name,
+        type: serialized.type,
+        ...(serialized.componentKey ? { key: serialized.componentKey } : {}),
+        ...(serialized.description ? { description: serialized.description } : {}),
+        ...(serialized.componentSetId ? { componentSetId: serialized.componentSetId } : {}),
+        ...(Object.keys(truncatedFields).length > 0 ? { truncatedFields } : {}),
+      } as PluginComponentNode);
+    }
+    return true;
+  });
+
+  return finalizeReadResponse({
+    ...base,
+    success: true,
+    roots: [],
+    matches,
+    components,
+    totalScanned: scanBudget.visited,
+    returnedCount: request.operation === "find" ? matches.length : components.length,
+    truncated: resultLimitReached || scanBudget.limitReached,
+    truncationReasons: [
+      ...(resultLimitReached ? ["result_limit" as const] : []),
+      ...(scanBudget.limitReached ? ["scan_limit" as const] : []),
+    ],
+    scanLimitReached: scanBudget.limitReached,
+  });
 }
 
 // ─── Paint Sanitizer (strip 'a' from color — Figma uses paint-level opacity) ──
@@ -972,6 +1476,7 @@ figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
       data: {
         type: "handshake",
         pluginVersion: "2.1.0",
+        fileKey: figma.fileKey,
         pageId: figma.currentPage.id,
         pageName: figma.currentPage.name,
         documentName: figma.root.name,
@@ -1017,10 +1522,38 @@ figma.ui.onmessage = async (msg: { type: string; data?: unknown }) => {
           data: { type: "batch_result", batchId: batch.batchId, success: false, error: message, results: [], nodeIdMap: {}, summary: { total: 0, applied: 0, failed: 0, skipped: 0 } },
         });
       }
+    } else if (data.type === "read_request") {
+      const request = data as unknown as PluginReadRequest;
+      if (!request.requestId || !request.operation || !request.fileKey) {
+        console.error("[plugin] Malformed read request, ignoring");
+        return;
+      }
+      try {
+        const result = await processReadRequest(request);
+        figma.ui.postMessage({ type: "send_to_bridge", data: result });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        figma.ui.postMessage({
+          type: "send_to_bridge",
+          data: finalizeReadResponse({
+            ...readResponseBase(request),
+            success: false,
+            roots: [],
+            matches: [],
+            components: [],
+            totalScanned: 0,
+            returnedCount: 0,
+            truncated: false,
+            truncationReasons: [],
+            scanLimitReached: false,
+            error: message,
+          }),
+        });
+      }
     } else if (data.type === "ping") {
       figma.ui.postMessage({
         type: "send_to_bridge",
-        data: { type: "pong", pageId: figma.currentPage.id, pageName: figma.currentPage.name },
+        data: { type: "pong", fileKey: figma.fileKey, pageId: figma.currentPage.id, pageName: figma.currentPage.name },
       });
     }
   }
