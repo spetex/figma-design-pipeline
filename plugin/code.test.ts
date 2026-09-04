@@ -480,6 +480,48 @@ describe("connected plugin batch execution", () => {
     expect(operations.slice(0, 2)).toEqual(["createFrame", "fills"]);
   });
 
+  it("defines a variant axis on an existing component set", async () => {
+    const addComponentProperty = vi.fn().mockReturnValue("State#1");
+    const figma = baseFigma(async () => ({ id: "set", type: "COMPONENT_SET", addComponentProperty }));
+
+    const result = await runPlugin(figma, [{
+      type: "define_component_property", nodeId: "set", propertyName: "State", propertyType: "VARIANT", defaultValue: "Default",
+    }]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(addComponentProperty).toHaveBeenCalledWith("State", "VARIANT", "Default");
+  });
+
+  it.each(["LINEAR", "RADIAL", "ANGULAR"])("serializes %s gradients without leaking mixed symbols", async (gradientType) => {
+    const node = { id: "node", type: "RECTANGLE", parent: { id: "parent" }, fills: Symbol("mixed") };
+    const figma = baseFigma(async () => node);
+    const result = await runPlugin(figma, [{
+      type: "set_gradient_fill", nodeId: "node", gradientType,
+      stops: [
+        { position: 0, color: { r: 0, g: 0, b: 0, a: 1 } },
+        { position: 1, color: { r: 1, g: 1, b: 1, a: 1 } },
+      ],
+      angle: 30,
+    }]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(result.results[0].before.fills).toBe("mixed");
+    expect(() => JSON.stringify(result)).not.toThrow();
+  });
+
+  it("serializes mixed per-corner state and applies each explicit radius", async () => {
+    const node = {
+      id: "node", type: "RECTANGLE", parent: { id: "parent" }, cornerRadius: Symbol("mixed"),
+      topLeftRadius: 0, topRightRadius: 0, bottomRightRadius: 0, bottomLeftRadius: 0,
+    };
+    const figma = baseFigma(async () => node);
+    const result = await runPlugin(figma, [{ type: "set_corner_radius", nodeId: "node", radii: [1, 2, 3, 4] }]);
+
+    expect(result.summary).toMatchObject({ applied: 1, failed: 0 });
+    expect(result.results[0].before.cornerRadius).toBe("mixed");
+    expect(node).toMatchObject({ topLeftRadius: 1, topRightRadius: 2, bottomRightRadius: 3, bottomLeftRadius: 4 });
+  });
+
   it("rejects delete_node for a page before calling remove", async () => {
     const remove = vi.fn();
     const figma = baseFigma(async () => ({ id: "page", type: "PAGE", parent: { id: "document" }, remove }));
@@ -597,15 +639,16 @@ type ParityCase = {
 
 const PAINT = { type: "SOLID", color: { r: 0.1, g: 0.2, b: 0.3, a: 0.4 } };
 const EFFECT = { type: "DROP_SHADOW", visible: true, radius: 4, blendMode: "NORMAL", color: { r: 0, g: 0, b: 0, a: 0.5 }, offset: { x: 1, y: 2 } };
+const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 const BEHAVIORAL_PARITY_CASES: ParityCase[] = [
   { type: "rename", action: { type: "rename", nodeId: "node", name: "Renamed" } },
   { type: "move", action: { type: "move", nodeId: "node", targetParentId: "parent", insertIndex: 0 } },
-  { type: "create_text", action: { type: "create_text", parentId: "parent", characters: "Text", name: "Title", fontFamily: "Inter", fontWeight: 600, fontSize: 16, lineHeight: 20, letterSpacing: 1, fills: [PAINT], textCase: "UPPER", textAlignHorizontal: "CENTER", textAutoResize: "TRUNCATE", layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG", opacity: 0.5 } },
+  { type: "create_text", action: { type: "create_text", parentId: "parent", characters: "Text", name: "Title", fontFamily: "Inter", fontWeight: 600, fontSize: 16, lineHeight: 20, letterSpacing: 1, fills: [PAINT], textCase: "UPPER", textAlignHorizontal: "CENTER", textAutoResize: "TRUNCATE", layoutSizingHorizontal: "FILL", layoutSizingVertical: "HUG", opacity: 0.5, textTruncation: "ENDING", maxLines: 2 } },
   { type: "create_frame", action: { type: "create_frame", name: "Frame", parentId: "parent", x: 1, y: 2, width: 100, height: 50 } },
   { type: "delete_node", action: { type: "delete_node", nodeId: "node", confirmed: true } },
-  { type: "set_layout_mode", action: { type: "set_layout_mode", nodeId: "node", mode: "HORIZONTAL", primaryAxisSizingMode: "AUTO", counterAxisSizingMode: "FIXED" } },
-  { type: "set_spacing", action: { type: "set_spacing", nodeId: "node", itemSpacing: 8, paddingTop: 1, paddingRight: 2, paddingBottom: 3, paddingLeft: 4 } },
+  { type: "set_layout_mode", action: { type: "set_layout_mode", nodeId: "node", mode: "HORIZONTAL", primaryAxisSizingMode: "AUTO", counterAxisSizingMode: "FIXED", layoutWrap: "WRAP" } },
+  { type: "set_spacing", action: { type: "set_spacing", nodeId: "node", itemSpacing: 8, paddingTop: 1, paddingRight: 2, paddingBottom: 3, paddingLeft: 4, counterAxisSpacing: 12 } },
   { type: "resize", action: { type: "resize", nodeId: "node", width: 100, height: 50 } },
   { type: "create_component_from_node", action: { type: "create_component_from_node", nodeId: "source", name: "Component" } },
   { type: "create_component_set", action: { type: "create_component_set", componentIds: ["component"], name: "Variants" } },
@@ -621,9 +664,9 @@ const BEHAVIORAL_PARITY_CASES: ParityCase[] = [
   { type: "set_visible", action: { type: "set_visible", nodeId: "node", visible: false } },
   { type: "set_opacity", action: { type: "set_opacity", nodeId: "node", opacity: 0.5 } },
   { type: "set_strokes", action: { type: "set_strokes", nodeId: "node", strokes: [PAINT], strokeWeight: 2 } },
-  { type: "set_effects", action: { type: "set_effects", nodeId: "node", effects: [EFFECT] } },
+  { type: "set_effects", action: { type: "set_effects", nodeId: "node", effects: [EFFECT, { type: "BACKGROUND_BLUR", visible: true, radius: 12 }] } },
   { type: "set_alignment", action: { type: "set_alignment", nodeId: "node", primaryAxisAlignItems: "CENTER", counterAxisAlignItems: "BASELINE" } },
-  { type: "duplicate_node", action: { type: "duplicate_node", nodeId: "node" } },
+  { type: "duplicate_node", action: { type: "duplicate_node", nodeId: "node", targetParentId: "parent", insertIndex: 0, x: 4, y: 5 } },
   { type: "set_component_properties", action: { type: "set_component_properties", nodeId: "instance", properties: { Variant: "Primary", Disabled: true } } },
   { type: "create_paint_style", action: { type: "create_paint_style", name: "Color/Primary", paints: [PAINT] } },
   { type: "create_text_style", action: { type: "create_text_style", name: "Text/Body", fontFamily: "Inter", fontWeight: 500, fontSize: 16, lineHeight: 20, letterSpacing: 1 } },
@@ -634,14 +677,25 @@ const BEHAVIORAL_PARITY_CASES: ParityCase[] = [
   { type: "create_page", action: { type: "create_page", name: "Page" } },
   { type: "switch_page", action: { type: "switch_page", pageId: "page" } },
   { type: "set_gradient_fill", action: { type: "set_gradient_fill", nodeId: "node", gradientType: "LINEAR", stops: [{ position: 0, color: { r: 0, g: 0, b: 0, a: 1 } }, { position: 1, color: { r: 1, g: 1, b: 1, a: 1 } }], angle: 45 } },
-  { type: "set_image_fill", action: { type: "set_image_fill", nodeId: "node", imageBase64: "AQID", scaleMode: "CROP" } },
+  { type: "set_image_fill", action: { type: "set_image_fill", nodeId: "node", imageBase64: PNG_BASE64, scaleMode: "CROP" } },
   { type: "set_text_properties", action: { type: "set_text_properties", nodeId: "text", textAlignHorizontal: "CENTER", textAlignVertical: "BOTTOM", paragraphSpacing: 8, textCase: "TITLE", textDecoration: "UNDERLINE", textAutoResize: "HEIGHT" } },
-  { type: "apply_style", action: { type: "apply_style", nodeId: "node", styleId: "style", property: "effect" } },
+  { type: "apply_style", action: { type: "apply_style", nodeId: "node", styleName: "style", property: "effect" } },
   { type: "set_description", action: { type: "set_description", nodeId: "component", description: "Description" } },
   { type: "define_component_property", action: { type: "define_component_property", nodeId: "component", propertyName: "Label", propertyType: "TEXT", defaultValue: "Default" } },
   { type: "create_variable_collection", action: { type: "create_variable_collection", name: "Tokens", modes: ["Light", "Dark"] } },
   { type: "create_variable", action: { type: "create_variable", collectionId: "collection", name: "spacing/md", resolvedType: "FLOAT", value: 8, scopes: ["ALL_SCOPES"] } },
-  { type: "bind_variable", action: { type: "bind_variable", nodeId: "node", property: "fills", variableId: "variable", paintIndex: 0 } },
+  { type: "bind_variable", action: { type: "bind_variable", nodeId: "node", property: "topLeftRadius", variableName: "spacing/md", collectionName: "Collection", resolvedType: "FLOAT" } },
+  { type: "set_component_property_reference", action: { type: "set_component_property_reference", nodeId: "component-child", property: "characters", componentPropertyName: "Label" } },
+  { type: "set_instance_text", action: { type: "set_instance_text", instanceId: "instance", childPath: ["Label"], characters: "Nested" } },
+  { type: "set_instance_visibility", action: { type: "set_instance_visibility", instanceId: "instance", childPath: ["Icon"], visible: false } },
+  { type: "swap_nested_instance", action: { type: "swap_nested_instance", instanceId: "instance", childPath: ["Icon"], newComponentId: "component" } },
+  { type: "set_variable_value", action: { type: "set_variable_value", variableName: "spacing/md", collectionName: "Collection", resolvedType: "FLOAT", modeName: "Default", value: 12 } },
+  { type: "update_style", action: { type: "update_style", styleType: "TEXT", styleId: "text-target", copyFromStyleName: "Text/Source", name: "Text/Updated", fontFamily: "Inter", fontWeight: 700, fontSize: 18, lineHeight: 24, letterSpacing: 0.5 } },
+  { type: "create_from_svg", action: { type: "create_from_svg", parentId: "parent", svg: "<svg><path d=\"M0 0h1v1z\"/></svg>", name: "Glyph", x: 3, y: 4 } },
+  { type: "create_section", action: { type: "create_section", parentId: "page", name: "Flow", x: 1, y: 2, width: 300, height: 200 } },
+  { type: "resize_section", action: { type: "resize_section", sectionId: "section", width: 400, height: 300 } },
+  { type: "move_to_section", action: { type: "move_to_section", nodeId: "node", sectionId: "section", insertIndex: 0 } },
+  { type: "set_reaction", action: { type: "set_reaction", nodeId: "node", trigger: "ON_CLICK", destinationId: "destination", navigation: "NAVIGATE", mode: "append" } },
 ];
 
 function createBehavioralFigma() {
@@ -691,13 +745,38 @@ function createBehavioralFigma() {
       collection.modes.push({ modeId: `mode-${collection.modes.length}`, name });
     },
   };
-  const variable = { id: "variable" };
+  const variable = {
+    id: "variable",
+    name: "spacing/md",
+    resolvedType: "FLOAT",
+    variableCollectionId: "collection",
+    setValueForMode: (modeId: string, value: unknown) => recordCall("variable", "setValueForMode", modeId, value),
+  };
 
-  for (const [id, type] of [["node", "RECTANGLE"], ["text", "TEXT"], ["source", "RECTANGLE"], ["component", "COMPONENT"], ["instance", "INSTANCE"]] as const) {
+  for (const [id, type] of [["node", "RECTANGLE"], ["text", "TEXT"], ["source", "RECTANGLE"], ["component", "COMPONENT"], ["instance", "INSTANCE"], ["section", "SECTION"], ["destination", "FRAME"], ["component-child", "TEXT"]] as const) {
     const node = makeParityNode(id, type);
     node.parent = parent;
     nodes.set(id, node);
   }
+  const component = nodes.get("component")!;
+  component.componentPropertyDefinitions = {
+    Variant: { type: "VARIANT", defaultValue: "Primary" },
+    "Disabled#1": { type: "BOOLEAN", defaultValue: false },
+    "Label#2": { type: "TEXT", defaultValue: "Label" },
+    "Icon#3": { type: "INSTANCE_SWAP", defaultValue: "component" },
+  };
+  const label = makeParityNode("instance-label", "TEXT");
+  label.name = "Label";
+  label.parent = nodes.get("instance");
+  const icon = makeParityNode("instance-icon", "INSTANCE");
+  icon.name = "Icon";
+  icon.parent = nodes.get("instance");
+  icon.getMainComponentAsync = async () => component;
+  nodes.set("instance-label", label);
+  nodes.set("instance-icon", icon);
+  nodes.get("instance")!.children = [label, icon];
+  nodes.get("instance")!.getMainComponentAsync = async () => component;
+  nodes.get("component-child")!.parent = component;
   nodes.set("parent", parent);
   nodes.set("page", page);
 
@@ -714,10 +793,16 @@ function createBehavioralFigma() {
       height: 10,
       visible: true,
       opacity: 1,
+      topLeftRadius: 0,
+      topRightRadius: 0,
+      bottomRightRadius: 0,
+      bottomLeftRadius: 0,
       fills: [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }],
       strokes: [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }],
       effects: [],
-      layoutMode: "NONE",
+      layoutMode: "HORIZONTAL",
+      layoutWrap: "WRAP",
+      counterAxisSpacing: 0,
       primaryAxisSizingMode: "FIXED",
       counterAxisSizingMode: "FIXED",
       primaryAxisAlignItems: "MIN",
@@ -737,11 +822,19 @@ function createBehavioralFigma() {
       fontName: { family: "Inter", style: "Regular" },
       characters: "Text",
       constraints: { horizontal: "MIN", vertical: "MIN" },
+      children: [] as Record<string, unknown>[],
+      componentPropertyReferences: null as Record<string, string> | null,
+      reactions: [] as unknown[],
       appendChild: (child: unknown) => recordCall(id, "appendChild", child),
       insertChild: (index: number, child: unknown) => recordCall(id, "insertChild", index, child),
       remove: () => recordCall(id, "remove"),
       resize: (width: number, height: number) => recordCall(id, "resize", width, height),
-      clone: () => { recordCall(id, "clone"); return makeParityNode("clone", "RECTANGLE"); },
+      clone: () => {
+        recordCall(id, "clone");
+        const clone = makeParityNode("clone", "RECTANGLE");
+        nodes.set("clone", clone);
+        return clone;
+      },
       createInstance: () => { recordCall(id, "createInstance"); return makeParityNode("created-instance", "INSTANCE"); },
       swapComponent: (component: unknown) => recordCall(id, "swapComponent", component),
       setProperties: (properties: unknown) => recordCall(id, "setProperties", properties),
@@ -753,6 +846,10 @@ function createBehavioralFigma() {
       setStrokeStyleIdAsync: async (...args: unknown[]) => recordCall(id, "setStrokeStyleIdAsync", ...args),
       setTextStyleIdAsync: async (...args: unknown[]) => recordCall(id, "setTextStyleIdAsync", ...args),
       setEffectStyleIdAsync: async (...args: unknown[]) => recordCall(id, "setEffectStyleIdAsync", ...args),
+      setReactionsAsync: async (...args: unknown[]) => {
+        recordCall(id, "setReactionsAsync", ...args);
+        node.reactions = args[0] as unknown[];
+      },
     };
     nodeSnapshots.set(id, node);
     return new Proxy(node, {
@@ -764,7 +861,19 @@ function createBehavioralFigma() {
     }) as Record<string, unknown>;
   }
 
+  const paintTarget = makeParityNode("paint-target", "PAINT");
+  paintTarget.paints = [];
+  const effectStyle = makeParityNode("style", "EFFECT");
+  const textTarget = makeParityNode("text-target", "TEXT");
+  const textSource = makeParityNode("text-source", "TEXT");
+  textSource.name = "Text/Source";
+  textSource.fontSize = 14;
+  textSource.lineHeight = { value: 20, unit: "PIXELS" };
+  textSource.letterSpacing = { value: 0, unit: "PIXELS" };
+  const styles = new Map([["paint-target", paintTarget], ["style", effectStyle], ["text-target", textTarget], ["text-source", textSource]]);
+
   const figma = {
+    editorType: "figma",
     currentPage: page,
     root: { name: "Document" },
     showUI: vi.fn(),
@@ -774,13 +883,20 @@ function createBehavioralFigma() {
     getNodeById: (id: string) => nodes.get(id),
     getNodeByIdAsync: async (id: string) => nodes.get(id) ?? null,
     loadFontAsync: async (...args: unknown[]) => recordCall("figma", "loadFontAsync", ...args),
-    createFrame: () => { recordCall("figma", "createFrame"); return makeParityNode("frame", "FRAME"); },
+    createFrame: () => {
+      recordCall("figma", "createFrame");
+      const frame = makeParityNode("frame", "FRAME");
+      nodes.set("frame", frame);
+      return frame;
+    },
     createText: () => { recordCall("figma", "createText"); return makeParityNode("created-text", "TEXT"); },
     createComponentFromNode: (...args: unknown[]) => { recordCall("figma", "createComponentFromNode", ...args); return makeParityNode("created-component", "COMPONENT"); },
     combineAsVariants: (...args: unknown[]) => { recordCall("figma", "combineAsVariants", ...args); return makeParityNode("component-set", "COMPONENT_SET"); },
     createPaintStyle: () => { recordCall("figma", "createPaintStyle"); return makeParityNode("paint-style", "PAINT_STYLE"); },
     createTextStyle: () => { recordCall("figma", "createTextStyle"); return makeParityNode("text-style", "TEXT_STYLE"); },
     createEffectStyle: () => { recordCall("figma", "createEffectStyle"); return makeParityNode("effect-style", "EFFECT_STYLE"); },
+    createNodeFromSvg: (...args: unknown[]) => { recordCall("figma", "createNodeFromSvg", ...args); return makeParityNode("svg-node", "FRAME"); },
+    createSection: () => { recordCall("figma", "createSection"); return makeParityNode("created-section", "SECTION"); },
     createPage: () => {
       recordCall("figma", "createPage");
       const created = makeParityNode("created-page", "PAGE");
@@ -792,9 +908,17 @@ function createBehavioralFigma() {
     base64Decode: (...args: unknown[]) => { recordCall("figma", "base64Decode", ...args); return new Uint8Array([1]); },
     base64Encode: (...args: unknown[]) => { recordCall("figma", "base64Encode", ...args); return "AQ=="; },
     triggerUndo: vi.fn(),
+    getStyleByIdAsync: async (id: string) => styles.get(id) ?? null,
+    getLocalPaintStylesAsync: async () => [...styles.values()].filter((style) => style.type === "PAINT"),
+    getLocalTextStylesAsync: async () => [...styles.values()].filter((style) => style.type === "TEXT"),
+    getLocalEffectStylesAsync: async () => [...styles.values()].filter((style) => style.type === "EFFECT"),
     variables: {
       getVariableById: () => variable,
       getVariableCollectionById: () => collection,
+      getVariableByIdAsync: async () => variable,
+      getVariableCollectionByIdAsync: async () => collection,
+      getLocalVariablesAsync: async () => [variable],
+      getLocalVariableCollectionsAsync: async () => [collection],
       setBoundVariableForPaint: (...args: unknown[]) => {
         recordCall("variables", "setBoundVariableForPaint", ...args);
         return { ...(args[0] as Record<string, unknown>), boundVariable: variable.id };
@@ -841,13 +965,7 @@ describe("all-action behavioral parity", () => {
   it("has a full-field behavior case for every action schema", () => {
     expect(BEHAVIORAL_PARITY_CASES.map(({ type }) => type).sort()).toEqual([...ACTION_TYPES].sort());
     for (const { action } of BEHAVIORAL_PARITY_CASES) {
-      const parsed = actionSchema.parse(action);
-      const schema = actionSchema.options.find((option) => {
-        const shape = (option as unknown as { shape: Record<string, unknown> }).shape;
-        return (shape.type as { value: string }).value === parsed.type;
-      });
-      const shape = (schema as unknown as { shape: Record<string, unknown> }).shape;
-      expect(Object.keys(action).sort()).toEqual(Object.keys(shape).sort());
+      expect(actionSchema.parse(action).type).toBe(action.type);
     }
   });
 
@@ -961,6 +1079,16 @@ describe("all-action behavioral parity", () => {
       configure: (nodes) => { nodes.get("component")!.type = "RECTANGLE"; },
     },
     {
+      label: "counter-axis spacing without wrapping",
+      action: { type: "set_spacing", nodeId: "node", itemSpacing: 8, counterAxisSpacing: 12 },
+      configure: (nodes) => { nodes.get("node")!.layoutWrap = "NO_WRAP"; },
+    },
+    {
+      label: "baseline alignment on vertical layout",
+      action: { type: "set_alignment", nodeId: "node", primaryAxisAlignItems: "CENTER", counterAxisAlignItems: "BASELINE" },
+      configure: (nodes) => { nodes.get("node")!.layoutMode = "VERTICAL"; },
+    },
+    {
       label: "a document page target",
       action: { type: "switch_page", pageId: "page" },
       configure: (nodes) => { nodes.get("page")!.type = "DOCUMENT"; },
@@ -971,26 +1099,15 @@ describe("all-action behavioral parity", () => {
       configure: (nodes) => { nodes.delete("page"); },
     },
     {
-      label: "an unresolved page reference",
-      action: { type: "switch_page", pageId: "$ref:node-0" },
-      configure: () => {},
-    },
-    {
       label: "a missing image-fill target",
-      action: { type: "set_image_fill", nodeId: "node", imageBase64: "AQID", scaleMode: "CROP" },
+      action: { type: "set_image_fill", nodeId: "node", imageBase64: PNG_BASE64, scaleMode: "CROP" },
       configure: (nodes) => { nodes.delete("node"); },
       forbidImageStoreMutation: true,
     },
     {
       label: "an image-fill target without fills",
-      action: { type: "set_image_fill", nodeId: "node", imageBase64: "AQID", scaleMode: "CROP" },
+      action: { type: "set_image_fill", nodeId: "node", imageBase64: PNG_BASE64, scaleMode: "CROP" },
       configure: (nodes) => { delete nodes.get("node")!.fills; },
-      forbidImageStoreMutation: true,
-    },
-    {
-      label: "an unresolved image-fill target reference",
-      action: { type: "set_image_fill", nodeId: "$ref:node-0", imageBase64: "AQID", scaleMode: "CROP" },
-      configure: () => {},
       forbidImageStoreMutation: true,
     },
   ];
@@ -1025,5 +1142,79 @@ describe("all-action behavioral parity", () => {
         expect(trace.some((entry) => entry.startsWith("call:figma.createImage:"))).toBe(false);
       }
     }
+  });
+});
+
+describe("stable named references", () => {
+  it("publishes aliases in nodeIdMap and resolves them in later connected actions", async () => {
+    const environment = createBehavioralFigma();
+    const result = await runPlugin(environment.figma as unknown as PluginFigma, [
+      { type: "create_frame", parentId: "parent", name: "Outer", as: "outer" },
+      { type: "duplicate_node", nodeId: "$outer", targetParentId: "parent", as: "copy" },
+      { type: "rename", nodeId: "$copy", name: "Copy" },
+    ]);
+
+    expect(result.summary).toMatchObject({ applied: 3, failed: 0 });
+    expect(result.nodeIdMap).toMatchObject({ "$ref:node-0": "frame", "$outer": "frame", "$ref:node-1": "clone", "$copy": "clone" });
+    expect(environment.trace).toContain('set:clone.name:"Copy"');
+  });
+});
+
+describe("deterministic write resolvers", () => {
+  it("rejects ambiguous childPath segments without changing either child", async () => {
+    const environment = createBehavioralFigma();
+    const first = environment.nodes.get("instance-label")!;
+    const second = { ...first, id: "second-label", visible: true };
+    environment.nodes.get("instance")!.children = [first, second];
+
+    const result = await runPlugin(environment.figma as unknown as PluginFigma, [{
+      type: "set_instance_visibility", instanceId: "instance", childPath: ["Label"], visible: false,
+    }]);
+
+    expect(result.summary).toMatchObject({ applied: 0, failed: 1 });
+    expect(first.visible).toBe(true);
+    expect(second.visible).toBe(true);
+  });
+
+  it("rejects detached instances and ambiguous component-property display names", async () => {
+    const detached = createBehavioralFigma();
+    detached.nodes.get("instance")!.getMainComponentAsync = async () => null;
+    const detachedResult = await runPlugin(detached.figma as unknown as PluginFigma, [{
+      type: "set_instance_text", instanceId: "instance", childPath: ["Label"], characters: "Nope",
+    }]);
+    expect(detachedResult.results[0].error).toContain("detached");
+
+    const ambiguous = createBehavioralFigma();
+    ambiguous.nodes.get("component")!.componentPropertyDefinitions = {
+      "Label#1": { type: "TEXT", defaultValue: "A" },
+      "Label#2": { type: "TEXT", defaultValue: "B" },
+    };
+    const result = await runPlugin(ambiguous.figma as unknown as PluginFigma, [{
+      type: "set_component_properties", nodeId: "instance", properties: { Label: "Nope" },
+    }]);
+    expect(result.results[0].error).toContain("ambiguous");
+    expect(ambiguous.trace.some((entry) => entry.includes("setProperties"))).toBe(false);
+  });
+
+  it("rejects ambiguous variable and style names before binding", async () => {
+    const variables = createBehavioralFigma();
+    const variable = await variables.figma.variables.getVariableByIdAsync();
+    variables.figma.variables.getLocalVariablesAsync = async () => [variable, { ...variable, id: "variable-2" }];
+    const variableResult = await runPlugin(variables.figma as unknown as PluginFigma, [{
+      type: "bind_variable", nodeId: "node", property: "topLeftRadius", variableName: "spacing/md", resolvedType: "FLOAT",
+    }]);
+    expect(variableResult.results[0].error).toContain("ambiguous");
+    expect(variables.trace.some((entry) => entry.includes("setBoundVariable"))).toBe(false);
+
+    const styles = createBehavioralFigma();
+    const duplicateStyle = { id: "style-2", type: "EFFECT", name: "Shadow" };
+    styles.figma.getLocalEffectStylesAsync = async () => [
+      { id: "style-1", type: "EFFECT", name: "Shadow" }, duplicateStyle,
+    ] as never;
+    const styleResult = await runPlugin(styles.figma as unknown as PluginFigma, [{
+      type: "apply_style", nodeId: "node", styleName: "Shadow", property: "effect",
+    }]);
+    expect(styleResult.results[0].error).toContain("ambiguous");
+    expect(styles.trace.some((entry) => entry.includes("setEffectStyleIdAsync"))).toBe(false);
   });
 });

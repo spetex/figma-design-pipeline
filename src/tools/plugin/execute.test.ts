@@ -25,6 +25,48 @@ describe("actionSchema (zod v4)", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it("enforces exclusive name/ID selectors and text truncation invariants", () => {
+    expect(actionSchema.safeParse({ type: "apply_style", nodeId: "1:2", property: "text", styleId: "S:1", styleName: "Body" }).success).toBe(false);
+    expect(actionSchema.safeParse({ type: "bind_variable", nodeId: "1:2", property: "opacity", variableId: "V:1", variableName: "opacity/muted" }).success).toBe(false);
+    expect(actionSchema.safeParse({ type: "create_text", parentId: "1:1", characters: "Long", maxLines: 2 }).success).toBe(false);
+    expect(actionSchema.safeParse({ type: "create_text", parentId: "1:1", characters: "Long", textTruncation: "ENDING", maxLines: 2 }).success).toBe(true);
+  });
+});
+
+describe("symbolic reference preflight", () => {
+  it.each([
+    ["duplicate", [
+      { type: "create_frame", parentId: "1:2", name: "A", as: "same" },
+      { type: "create_frame", parentId: "1:2", name: "B", as: "same" },
+    ], "duplicate alias"],
+    ["unknown", [{ type: "rename", nodeId: "$missing", name: "Nope" }], "unknown reference"],
+    ["self", [{ type: "duplicate_node", nodeId: "$copy", as: "copy" }], "self reference"],
+    ["forward", [
+      { type: "rename", nodeId: "$later", name: "Too early" },
+      { type: "create_frame", parentId: "1:2", name: "Later", as: "later" },
+    ], "forward reference"],
+    ["cyclic", [
+      { type: "duplicate_node", nodeId: "$b", as: "a" },
+      { type: "duplicate_node", nodeId: "$a", as: "b" },
+    ], "cyclic"],
+    ["legacy-forward", [
+      { type: "rename", nodeId: "$ref:node-0", name: "Too early" },
+      { type: "create_frame", parentId: "1:2", name: "Later" },
+    ], "forward reference"],
+  ])("rejects %s references before bridge execution", async (_label, actions, message) => {
+    const execute = vi.fn();
+    const bridge = { isConnected: () => true, execute } as unknown as BridgeServer;
+    await expect(handleExecute(bridge, { actions })).rejects.toThrow(message as string);
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed and reserved aliases during schema validation", async () => {
+    await expect(handleExecute(null, { actions: [{ type: "create_frame", parentId: "1:2", name: "Bad", as: "node-0" }] }))
+      .rejects.toThrow("reserved");
+    await expect(handleExecute(null, { actions: [{ type: "create_frame", parentId: "1:2", name: "Bad", as: "1bad" }] }))
+      .rejects.toThrow("Alias must start");
+  });
 });
 
 describe("handleExecute fallback generation", () => {
@@ -367,6 +409,7 @@ describe("handleExecute fallback generation", () => {
     const applied: Array<Record<string, string | boolean>> = [];
     const node = {
       id: "instance",
+      type: "INSTANCE",
       setProperties: (properties: Record<string, string | boolean>) => {
         applied.push(properties);
         if ("Second" in properties) throw new Error("Second rejected");
@@ -545,6 +588,8 @@ describe("handleExecute fallback generation", () => {
         resolvedType: "FLOAT",
         value: 16,
       },
+      { type: "create_from_svg", parentId: "1:2", svg: "<svg/>" },
+      { type: "create_section", parentId: "1:2", name: "Section" },
     ];
     const actions = [
       { type: "rename", nodeId: "1:1", name: "Before creates" },

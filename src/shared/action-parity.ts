@@ -16,15 +16,15 @@ const operation = (...inputFields: string[]): ActionOperationSpec => ({ inputFie
 export const ACTION_OPERATIONS = {
   rename: operation("nodeId", "name"),
   move: operation("nodeId", "targetParentId", "insertIndex"),
-  create_text: operation("parentId", "characters", "name", "fontFamily", "fontWeight", "fontSize", "lineHeight", "letterSpacing", "fills", "textCase", "textAlignHorizontal", "textAutoResize", "layoutSizingHorizontal", "layoutSizingVertical", "opacity"),
-  create_frame: operation("name", "parentId", "x", "y", "width", "height"),
+  create_text: operation("parentId", "characters", "name", "fontFamily", "fontWeight", "fontSize", "lineHeight", "letterSpacing", "fills", "textCase", "textAlignHorizontal", "textAutoResize", "layoutSizingHorizontal", "layoutSizingVertical", "opacity", "textTruncation", "maxLines", "textStyleId", "textStyleName", "as"),
+  create_frame: operation("name", "parentId", "x", "y", "width", "height", "as"),
   delete_node: operation("nodeId", "confirmed"),
-  set_layout_mode: operation("nodeId", "mode", "primaryAxisSizingMode", "counterAxisSizingMode"),
-  set_spacing: operation("nodeId", "itemSpacing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft"),
+  set_layout_mode: operation("nodeId", "mode", "primaryAxisSizingMode", "counterAxisSizingMode", "layoutWrap"),
+  set_spacing: operation("nodeId", "itemSpacing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "counterAxisSpacing"),
   resize: operation("nodeId", "width", "height"),
-  create_component_from_node: operation("nodeId", "name"),
-  create_component_set: operation("componentIds", "name"),
-  create_instance: operation("componentId", "parentId", "x", "y"),
+  create_component_from_node: operation("nodeId", "name", "as"),
+  create_component_set: operation("componentIds", "name", "as"),
+  create_instance: operation("componentId", "parentId", "x", "y", "as"),
   swap_instance: operation("instanceId", "newComponentId"),
   set_fills: operation("nodeId", "fills"),
   set_text_content: operation("nodeId", "characters"),
@@ -38,25 +38,36 @@ export const ACTION_OPERATIONS = {
   set_strokes: operation("nodeId", "strokes", "strokeWeight"),
   set_effects: operation("nodeId", "effects"),
   set_alignment: operation("nodeId", "primaryAxisAlignItems", "counterAxisAlignItems"),
-  duplicate_node: operation("nodeId"),
+  duplicate_node: operation("nodeId", "targetParentId", "insertIndex", "x", "y", "as"),
   set_component_properties: operation("nodeId", "properties"),
-  create_paint_style: operation("name", "paints"),
-  create_text_style: operation("name", "fontFamily", "fontWeight", "fontSize", "lineHeight", "letterSpacing"),
-  create_effect_style: operation("name", "effects"),
+  create_paint_style: operation("name", "paints", "as"),
+  create_text_style: operation("name", "fontFamily", "fontWeight", "fontSize", "lineHeight", "letterSpacing", "as"),
+  create_effect_style: operation("name", "effects", "as"),
   set_child_layout_sizing: operation("nodeId", "layoutSizingHorizontal", "layoutSizingVertical"),
   set_constraints: operation("nodeId", "horizontal", "vertical"),
   set_min_max_size: operation("nodeId", "minWidth", "maxWidth", "minHeight", "maxHeight"),
-  create_page: operation("name"),
+  create_page: operation("name", "as"),
   switch_page: operation("pageId"),
   set_gradient_fill: operation("nodeId", "gradientType", "stops", "angle"),
-  set_image_fill: operation("nodeId", "imageBase64", "scaleMode"),
+  set_image_fill: operation("nodeId", "imageBase64", "path", "url", "scaleMode"),
   set_text_properties: operation("nodeId", "textAlignHorizontal", "textAlignVertical", "paragraphSpacing", "textCase", "textDecoration", "textAutoResize"),
-  apply_style: operation("nodeId", "styleId", "property"),
+  apply_style: operation("nodeId", "styleId", "styleName", "property"),
+  update_style: operation("styleType", "styleId", "styleName", "copyFromStyleId", "copyFromStyleName", "name", "paints", "effects", "fontFamily", "fontWeight", "fontSize", "lineHeight", "letterSpacing"),
   set_description: operation("nodeId", "description"),
   define_component_property: operation("nodeId", "propertyName", "propertyType", "defaultValue"),
-  create_variable_collection: operation("name", "modes"),
-  create_variable: operation("collectionId", "name", "resolvedType", "value", "scopes"),
-  bind_variable: operation("nodeId", "property", "variableId", "paintIndex"),
+  set_component_property_reference: operation("nodeId", "property", "componentPropertyName"),
+  set_instance_text: operation("instanceId", "childPath", "characters"),
+  set_instance_visibility: operation("instanceId", "childPath", "visible"),
+  swap_nested_instance: operation("instanceId", "childPath", "newComponentId"),
+  create_variable_collection: operation("name", "modes", "as"),
+  create_variable: operation("collectionId", "name", "resolvedType", "value", "scopes", "as"),
+  bind_variable: operation("nodeId", "property", "variableId", "variableName", "collectionId", "collectionName", "resolvedType", "paintIndex"),
+  set_variable_value: operation("variableId", "variableName", "collectionId", "collectionName", "resolvedType", "modeId", "modeName", "value"),
+  create_from_svg: operation("parentId", "svg", "name", "x", "y", "as"),
+  create_section: operation("parentId", "name", "x", "y", "width", "height", "as"),
+  resize_section: operation("sectionId", "width", "height"),
+  move_to_section: operation("nodeId", "sectionId", "insertIndex"),
+  set_reaction: operation("nodeId", "trigger", "destinationId", "navigation", "mode"),
 } as const satisfies Record<ActionType, ActionOperationSpec>;
 
 export const ACTION_TYPES = Object.keys(ACTION_OPERATIONS) as ActionType[];
@@ -81,7 +92,7 @@ export function assertActionInputCoverage(action: Record<string, unknown>): void
     throw new Error(`Unknown action type: ${String(type)}`);
   }
   const unsupportedFields = Object.keys(action).filter(
-    (field) => field !== "type" && field !== "_ref" && !ACTION_OPERATIONS[type].inputFields.includes(field)
+    (field) => field !== "type" && field !== "_ref" && field !== "_aliasRef" && !ACTION_OPERATIONS[type].inputFields.includes(field)
   );
   if (unsupportedFields.length > 0) {
     throw new Error(

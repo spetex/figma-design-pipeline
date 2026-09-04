@@ -1,5 +1,22 @@
 import { z } from "zod";
 
+export const actionAliasSchema = z
+  .string()
+  .regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/, "Alias must start with a letter and contain at most 64 letters, digits, '_' or '-'")
+  .refine((value) => !/^(?:node-|ref(?:-|$))/i.test(value), "Alias prefixes 'node-' and 'ref' are reserved for legacy references");
+
+const aliasField = { as: actionAliasSchema.optional().describe("Stable batch alias; reference as $alias") };
+const childPathSchema = z.array(z.string().min(1)).min(1).max(64)
+  .describe("Exact direct-child names from the instance root to one unambiguous descendant");
+const variableTypeSchema = z.enum(["COLOR", "FLOAT", "STRING", "BOOLEAN"]);
+const variableSelectorFields = {
+  variableId: z.string().optional(),
+  variableName: z.string().min(1).optional(),
+  collectionId: z.string().optional(),
+  collectionName: z.string().min(1).optional(),
+  resolvedType: variableTypeSchema.optional(),
+};
+
 // ─── Plugin Action Types (Discriminated Union) ──────────────────────
 
 export const renameActionSchema = z
@@ -53,6 +70,11 @@ export const createTextActionSchema = z
     layoutSizingHorizontal: z.enum(["FILL", "HUG", "FIXED"]).optional(),
     layoutSizingVertical: z.enum(["FILL", "HUG", "FIXED"]).optional(),
     opacity: z.number().min(0).max(1).optional(),
+    textTruncation: z.enum(["DISABLED", "ENDING"]).optional(),
+    maxLines: z.number().int().positive().nullable().optional(),
+    textStyleId: z.string().optional(),
+    textStyleName: z.string().min(1).optional(),
+    ...aliasField,
   })
   .strict();
 
@@ -65,6 +87,7 @@ export const createFrameActionSchema = z
     y: z.number().default(0),
     width: z.number().min(1).default(100),
     height: z.number().min(1).default(100),
+    ...aliasField,
   })
   .strict();
 
@@ -84,6 +107,7 @@ export const setLayoutModeActionSchema = z
     mode: z.enum(["HORIZONTAL", "VERTICAL", "NONE"]),
     primaryAxisSizingMode: z.enum(["FIXED", "AUTO"]).optional(),
     counterAxisSizingMode: z.enum(["FIXED", "AUTO"]).optional(),
+    layoutWrap: z.enum(["NO_WRAP", "WRAP"]).optional(),
   })
   .strict();
 
@@ -96,6 +120,7 @@ export const setSpacingActionSchema = z
     paddingRight: z.number().min(0).optional(),
     paddingBottom: z.number().min(0).optional(),
     paddingLeft: z.number().min(0).optional(),
+    counterAxisSpacing: z.number().min(0).nullable().optional(),
   })
   .strict();
 
@@ -113,6 +138,7 @@ export const createComponentFromNodeActionSchema = z
     type: z.literal("create_component_from_node"),
     nodeId: z.string(),
     name: z.string().min(1),
+    ...aliasField,
   })
   .strict();
 
@@ -121,6 +147,7 @@ export const createComponentSetActionSchema = z
     type: z.literal("create_component_set"),
     componentIds: z.array(z.string()).min(1),
     name: z.string().min(1),
+    ...aliasField,
   })
   .strict();
 
@@ -131,6 +158,7 @@ export const createInstanceActionSchema = z
     parentId: z.string(),
     x: z.number().default(0),
     y: z.number().default(0),
+    ...aliasField,
   })
   .strict();
 
@@ -343,6 +371,11 @@ export const duplicateNodeActionSchema = z
   .object({
     type: z.literal("duplicate_node"),
     nodeId: z.string(),
+    targetParentId: z.string().optional(),
+    insertIndex: z.number().int().min(0).optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+    ...aliasField,
   })
   .strict();
 
@@ -372,6 +405,7 @@ export const createPaintStyleActionSchema = z
         opacity: z.number().min(0).max(1).optional(),
       })
     ),
+    ...aliasField,
   })
   .strict();
 
@@ -384,6 +418,7 @@ export const createTextStyleActionSchema = z
     fontSize: z.number().min(1).describe("Font size in pixels"),
     lineHeight: z.number().optional().describe("Line height in pixels"),
     letterSpacing: z.number().optional().describe("Letter spacing in pixels"),
+    ...aliasField,
   })
   .strict();
 
@@ -392,6 +427,7 @@ export const createEffectStyleActionSchema = z
     type: z.literal("create_effect_style"),
     name: z.string().min(1).describe("Style name (use '/' for folders)"),
     effects: z.array(z.union([shadowEffectSchema, blurEffectSchema])),
+    ...aliasField,
   })
   .strict();
 
@@ -432,6 +468,7 @@ export const createPageActionSchema = z
   .object({
     type: z.literal("create_page"),
     name: z.string().min(1),
+    ...aliasField,
   })
   .strict();
 
@@ -466,7 +503,9 @@ export const setImageFillActionSchema = z
   .object({
     type: z.literal("set_image_fill"),
     nodeId: z.string(),
-    imageBase64: z.string().describe("Base64-encoded image data"),
+    imageBase64: z.string().optional().describe("Base64-encoded image data"),
+    path: z.string().min(1).optional().describe("Server-local image path; read and validated before transport"),
+    url: z.url().optional().describe("Public HTTP(S) image URL; fetched and validated before transport"),
     scaleMode: z.enum(["FILL", "FIT", "CROP", "TILE"]).default("FILL"),
   })
   .strict();
@@ -492,7 +531,8 @@ export const applyStyleActionSchema = z
   .object({
     type: z.literal("apply_style"),
     nodeId: z.string(),
-    styleId: z.string().describe("Paint/text/effect style ID"),
+    styleId: z.string().optional().describe("Paint/text/effect style ID"),
+    styleName: z.string().min(1).optional().describe("Exact local style name"),
     property: z.enum(["fill", "stroke", "text", "effect"]),
   })
   .strict();
@@ -517,6 +557,27 @@ export const defineComponentPropertyActionSchema = z
   })
   .strict();
 
+export const setComponentPropertyReferenceActionSchema = z
+  .object({
+    type: z.literal("set_component_property_reference"),
+    nodeId: z.string().describe("Component or component-set descendant node"),
+    property: z.enum(["characters", "visible", "mainComponent"]),
+    componentPropertyName: z.string().min(1).describe("Exact display name or internal Prop#id key"),
+  })
+  .strict();
+
+export const setInstanceTextActionSchema = z
+  .object({ type: z.literal("set_instance_text"), instanceId: z.string(), childPath: childPathSchema, characters: z.string() })
+  .strict();
+
+export const setInstanceVisibilityActionSchema = z
+  .object({ type: z.literal("set_instance_visibility"), instanceId: z.string(), childPath: childPathSchema, visible: z.boolean() })
+  .strict();
+
+export const swapNestedInstanceActionSchema = z
+  .object({ type: z.literal("swap_nested_instance"), instanceId: z.string(), childPath: childPathSchema, newComponentId: z.string() })
+  .strict();
+
 // ─── Figma Variables Actions ────────────────────────────────────────
 
 export const createVariableCollectionActionSchema = z
@@ -524,6 +585,7 @@ export const createVariableCollectionActionSchema = z
     type: z.literal("create_variable_collection"),
     name: z.string().min(1),
     modes: z.array(z.string()).default(["Default"]).describe("Mode names (e.g., ['Light', 'Dark'])"),
+    ...aliasField,
   })
   .strict();
 
@@ -535,6 +597,7 @@ export const createVariableActionSchema = z
     resolvedType: z.enum(["COLOR", "FLOAT", "STRING", "BOOLEAN"]),
     value: z.unknown().describe("Value matching the type: hex string for COLOR, number for FLOAT, etc."),
     scopes: z.array(z.string()).optional().describe("Scope list, e.g., ['FRAME_FILL', 'SHAPE_FILL'] — defaults to ALL_SCOPES if omitted"),
+    ...aliasField,
   })
   .strict();
 
@@ -546,10 +609,74 @@ export const bindVariableActionSchema = z
       "fills", "strokes",
       "paddingLeft", "paddingRight", "paddingTop", "paddingBottom",
       "itemSpacing", "cornerRadius", "opacity",
-      "width", "height",
+      "width", "height", "topLeftRadius", "topRightRadius",
+      "bottomRightRadius", "bottomLeftRadius", "counterAxisSpacing",
     ]),
-    variableId: z.string().describe("Variable ID to bind (use $ref: for recently created)"),
+    ...variableSelectorFields,
     paintIndex: z.number().int().min(0).optional().describe("For fills/strokes: which paint in the array to bind (default 0)"),
+  })
+  .strict();
+
+export const setVariableValueActionSchema = z
+  .object({
+    type: z.literal("set_variable_value"),
+    ...variableSelectorFields,
+    modeId: z.string().optional(),
+    modeName: z.string().min(1).optional(),
+    value: z.unknown(),
+  })
+  .strict();
+
+export const updateStyleActionSchema = z
+  .object({
+    type: z.literal("update_style"),
+    styleType: z.enum(["PAINT", "TEXT", "EFFECT"]),
+    styleId: z.string().optional(),
+    styleName: z.string().min(1).optional(),
+    copyFromStyleId: z.string().optional(),
+    copyFromStyleName: z.string().min(1).optional(),
+    name: z.string().min(1).optional(),
+    paints: z.array(z.object({
+      type: z.literal("SOLID"),
+      color: z.object({ r: z.number().min(0).max(1), g: z.number().min(0).max(1), b: z.number().min(0).max(1), a: z.number().min(0).max(1).optional() }),
+      opacity: z.number().min(0).max(1).optional(),
+    })).optional(),
+    effects: z.array(z.union([shadowEffectSchema, blurEffectSchema])).optional(),
+    fontFamily: z.string().min(1).optional(),
+    fontWeight: z.number().min(100).max(900).optional(),
+    fontSize: z.number().min(1).optional(),
+    lineHeight: z.number().positive().optional(),
+    letterSpacing: z.number().optional(),
+  })
+  .strict();
+
+export const createFromSvgActionSchema = z
+  .object({
+    type: z.literal("create_from_svg"), parentId: z.string(), svg: z.string().min(1),
+    name: z.string().min(1).optional(), x: z.number().default(0), y: z.number().default(0), ...aliasField,
+  })
+  .strict();
+
+export const createSectionActionSchema = z
+  .object({
+    type: z.literal("create_section"), parentId: z.string(), name: z.string().min(1),
+    x: z.number().default(0), y: z.number().default(0), width: z.number().positive().default(100),
+    height: z.number().positive().default(100), ...aliasField,
+  })
+  .strict();
+
+export const resizeSectionActionSchema = z
+  .object({ type: z.literal("resize_section"), sectionId: z.string(), width: z.number().positive(), height: z.number().positive() })
+  .strict();
+
+export const moveToSectionActionSchema = z
+  .object({ type: z.literal("move_to_section"), nodeId: z.string(), sectionId: z.string(), insertIndex: z.number().int().min(0).optional() })
+  .strict();
+
+export const setReactionActionSchema = z
+  .object({
+    type: z.literal("set_reaction"), nodeId: z.string(), trigger: z.literal("ON_CLICK"), destinationId: z.string(),
+    navigation: z.enum(["NAVIGATE", "OVERLAY", "SWAP", "SCROLL_TO"]), mode: z.enum(["append", "replace"]),
   })
   .strict();
 
@@ -593,11 +720,16 @@ export const actionSchema = z.discriminatedUnion("type", [
   swapInstanceActionSchema,
   setComponentPropertiesActionSchema,
   defineComponentPropertyActionSchema,
+  setComponentPropertyReferenceActionSchema,
+  setInstanceTextActionSchema,
+  setInstanceVisibilityActionSchema,
+  swapNestedInstanceActionSchema,
   // Styles
   createPaintStyleActionSchema,
   createTextStyleActionSchema,
   createEffectStyleActionSchema,
   applyStyleActionSchema,
+  updateStyleActionSchema,
   setDescriptionActionSchema,
   // Pages
   createPageActionSchema,
@@ -606,9 +738,58 @@ export const actionSchema = z.discriminatedUnion("type", [
   createVariableCollectionActionSchema,
   createVariableActionSchema,
   bindVariableActionSchema,
+  setVariableValueActionSchema,
+  // Safe assets, board organization, and prototypes
+  createFromSvgActionSchema,
+  createSectionActionSchema,
+  resizeSectionActionSchema,
+  moveToSectionActionSchema,
+  setReactionActionSchema,
   // Export
   exportNodeActionSchema,
-]);
+]).superRefine((action, ctx) => {
+  const record = action as Record<string, unknown>;
+  const exactlyOne = (fields: string[], label: string) => {
+    if (fields.filter((field) => record[field] !== undefined).length !== 1) {
+      ctx.addIssue({ code: "custom", message: `${label} requires exactly one of ${fields.join(" or ")}` });
+    }
+  };
+  const atMostOne = (fields: string[], label: string) => {
+    if (fields.filter((field) => record[field] !== undefined).length > 1) {
+      ctx.addIssue({ code: "custom", message: `${label} accepts at most one of ${fields.join(" or ")}` });
+    }
+  };
+  if (action.type === "set_image_fill") exactlyOne(["imageBase64", "path", "url"], "set_image_fill");
+  if (action.type === "bind_variable" || action.type === "set_variable_value") {
+    exactlyOne(["variableId", "variableName"], action.type);
+    atMostOne(["collectionId", "collectionName"], action.type);
+  }
+  if (action.type === "bind_variable" && action.paintIndex !== undefined
+    && action.property !== "fills" && action.property !== "strokes") {
+    ctx.addIssue({ code: "custom", message: "bind_variable paintIndex is only valid for fills or strokes" });
+  }
+  if (action.type === "set_variable_value") exactlyOne(["modeId", "modeName"], "set_variable_value mode");
+  if (action.type === "apply_style") exactlyOne(["styleId", "styleName"], "apply_style");
+  if (action.type === "update_style") {
+    exactlyOne(["styleId", "styleName"], "update_style target");
+    atMostOne(["copyFromStyleId", "copyFromStyleName"], "update_style source");
+  }
+  if (action.type === "create_text") {
+    atMostOne(["textStyleId", "textStyleName"], "create_text style");
+    if (action.maxLines !== undefined && action.maxLines !== null && action.textTruncation !== "ENDING") {
+      ctx.addIssue({ code: "custom", message: "create_text maxLines requires textTruncation: ENDING" });
+    }
+  }
+  if (action.type === "duplicate_node" && action.insertIndex !== undefined && action.targetParentId === undefined) {
+    ctx.addIssue({ code: "custom", message: "duplicate_node insertIndex requires targetParentId" });
+  }
+  if (action.type === "define_component_property") {
+    const needsBoolean = action.propertyType === "BOOLEAN";
+    if ((needsBoolean && typeof action.defaultValue !== "boolean") || (!needsBoolean && typeof action.defaultValue !== "string")) {
+      ctx.addIssue({ code: "custom", message: `define_component_property ${action.propertyType} has an incompatible defaultValue` });
+    }
+  }
+});
 
 export type Action = z.infer<typeof actionSchema>;
 export type ActionType = Action["type"];

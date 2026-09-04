@@ -212,26 +212,27 @@ Use this path when turning organized Figma structure into code or schema output.
 - Keep generation scoped to a focused page or section node for cleaner output.
 `;
 
-const ACTION_REFERENCE = `# figma_execute Action Reference — 43 Action Types
+const ACTION_REFERENCE = `# figma_execute Action Reference — 54 Action Types
 
 Use with figma_execute({ actions: [...] }) for batch execution via the plugin bridge.
+Node-producing actions accept \`as\` (for example \`as: "card"\`); later ID fields can use \`$card\`. Legacy \`$ref:node-N\` references remain supported. The complete reference graph and asset payloads are validated before execution.
 
 ## Scene Graph
 - rename: { nodeId, name }
 - move: { nodeId, targetParentId, insertIndex? }
-- create_frame: { name, parentId, x?, y?, width?, height? } → returns newNodeId; starts with transparent fills (fills: [])
+- create_frame: { name, parentId, x?, y?, width?, height?, as? } → returns newNodeId; starts with transparent fills (fills: [])
 - delete_node: { nodeId, confirmed: true }
 - resize: { nodeId, width?, height? }
 - set_position: { nodeId, x?, y? }
-- duplicate_node: { nodeId } → returns newNodeId
+- duplicate_node: { nodeId, targetParentId?, insertIndex?, x?, y?, as? } → returns newNodeId
 - set_visible: { nodeId, visible }
 - set_opacity: { nodeId, opacity: 0-1 }
 
 ## Layout
-- set_layout_mode: { nodeId, mode: "HORIZONTAL"|"VERTICAL"|"NONE" }
+- set_layout_mode: { nodeId, mode: "HORIZONTAL"|"VERTICAL"|"NONE", layoutWrap?: "NO_WRAP"|"WRAP" }
 - set_layout_positioning: { nodeId, positioning: "AUTO"|"ABSOLUTE" }
 - set_alignment: { nodeId, primaryAxisAlignItems?, counterAxisAlignItems? }
-- set_spacing: { nodeId, itemSpacing?, paddingTop/Right/Bottom/Left? }
+- set_spacing: { nodeId, itemSpacing?, paddingTop/Right/Bottom/Left?, counterAxisSpacing? }
 - **set_child_layout_sizing: { nodeId, layoutSizingHorizontal?: "FILL"|"HUG"|"FIXED", layoutSizingVertical? }** — responsive stretching
 - **set_constraints: { nodeId, horizontal?: "MIN"|"CENTER"|"MAX"|"STRETCH"|"SCALE", vertical? }** — responsive pinning
 - **set_min_max_size: { nodeId, minWidth?, maxWidth?, minHeight?, maxHeight? }** — responsive boundaries
@@ -239,13 +240,14 @@ Use with figma_execute({ actions: [...] }) for batch execution via the plugin br
 ## Appearance
 - set_fills: { nodeId, fills: [{ type: "SOLID", color: {r,g,b,a} }] }
 - **set_gradient_fill: { nodeId, gradientType: "LINEAR"|"RADIAL"|"ANGULAR", stops: [{position, color}], angle? }**
-- **set_image_fill: { nodeId, imageBase64, scaleMode: "FILL"|"FIT"|"CROP"|"TILE" }**
+- **set_image_fill: { nodeId, exactly one of imageBase64|path|url, scaleMode? }** — server-side validation; PNG/JPEG/WebP/GIF, 10 MiB maximum
+- **create_from_svg: { parentId, svg, name?, x?, y?, as? }** — inert SVG only, 1 MiB maximum
 - set_strokes: { nodeId, strokes, strokeWeight? }
 - set_effects: { nodeId, effects }
 - set_corner_radius: { nodeId, radius? | radii?: [tl,tr,br,bl] }
 
 ## Text
-- create_text: { parentId, characters, name?, fontFamily?, fontWeight?, fontSize?, lineHeight?, letterSpacing?, fills?, textCase?, textAlignHorizontal?, textAutoResize?, layoutSizingHorizontal?, layoutSizingVertical?, opacity? } → returns newNodeId
+- create_text: { parentId, characters, ..., textTruncation?, maxLines?, textStyleId?|textStyleName?, as? } → returns newNodeId
 - set_text_content: { nodeId, characters }
 - set_text_style: { nodeId, fontFamily?, fontSize?, fontWeight?, lineHeight?, letterSpacing? }
 - **set_text_properties: { nodeId, textAlignHorizontal?, textAlignVertical?, paragraphSpacing?, textCase?, textDecoration?, textAutoResize? }**
@@ -257,27 +259,39 @@ Use with figma_execute({ actions: [...] }) for batch execution via the plugin br
 - swap_instance: { instanceId, newComponentId }
 - set_component_properties: { nodeId, properties: { "Prop": value } }
 - **define_component_property: { nodeId, propertyName, propertyType: "TEXT"|"BOOLEAN"|"INSTANCE_SWAP"|"VARIANT", defaultValue }**
+- **set_component_property_reference: { nodeId, property: "characters"|"visible"|"mainComponent", componentPropertyName }**
+- **set_instance_text: { instanceId, childPath: [exact names...], characters }**
+- **set_instance_visibility: { instanceId, childPath: [exact names...], visible }**
+- **swap_nested_instance: { instanceId, childPath: [exact names...], newComponentId }**
 
 ## Styles
 - create_paint_style: { name, paints } → returns newNodeId
 - create_text_style: { name, fontFamily, fontSize, ... } → returns newNodeId
 - create_effect_style: { name, effects } → returns newNodeId
-- **apply_style: { nodeId, styleId, property: "fill"|"stroke"|"text"|"effect" }** — bind style to node
+- **apply_style: { nodeId, exactly one of styleId|styleName, property: "fill"|"stroke"|"text"|"effect" }**
+- **update_style: { styleType, styleId|styleName, copyFromStyleId?|copyFromStyleName?, ...updates }** — update/copy paint, text, or effect styles
 - **set_description: { nodeId, description }** — component documentation
 
 ## Pages
 - **create_page: { name }** → returns newNodeId
 - **switch_page: { pageId }** — navigate before creating on a specific page
 
+## Sections and prototypes
+- **create_section: { parentId, name, x?, y?, width?, height?, as? }**
+- **resize_section: { sectionId, width, height }**
+- **move_to_section: { nodeId, sectionId, insertIndex? }**
+- **set_reaction: { nodeId, trigger: "ON_CLICK", destinationId, navigation: "NAVIGATE"|"OVERLAY"|"SWAP"|"SCROLL_TO", mode: "append"|"replace" }**
+
 ## Variables (Design Tokens)
 - **create_variable_collection: { name, modes: ["Light", "Dark"] }** → returns newNodeId
 - **create_variable: { collectionId, name, resolvedType: "COLOR"|"FLOAT"|"STRING"|"BOOLEAN", value, scopes? }** → returns newNodeId
-- **bind_variable: { nodeId, property: "fills"|"paddingLeft"|..., variableId, paintIndex? }** — bind token to node
+- **bind_variable: { nodeId, property, exactly one of variableId|variableName, collectionId?|collectionName?, resolvedType?, paintIndex? }**
+- **set_variable_value: { variableId|variableName, collectionId?|collectionName?, modeId|modeName, value }**
 
 ## Export
 - export_node: { nodeId, format?, scale? }
 
-**Bold** = added in this release. Use $ref:node-N for chaining created node IDs within a batch.
+All name resolution is exact and rejects ambiguity. Same-batch read-back remains dependent on issue #30's plugin-native inspection transport and is not part of this action set.
 `;
 
 // ─── MCP Server ─────────────────────────────────────────────────────
@@ -292,7 +306,7 @@ const server = new McpServer({
 server.resource(
   "action-reference",
   "figma://actions",
-  { mimeType: "text/markdown", description: "Schema reference for all 43 figma_execute action types. Use with figma_execute({ actions: [...] }) for batch execution." },
+  { mimeType: "text/markdown", description: "Schema reference for all 54 figma_execute action types. Use with figma_execute({ actions: [...] }) for batch execution." },
   async () => ({
     contents: [{ uri: "figma://actions", mimeType: "text/markdown", text: ACTION_REFERENCE }],
   })
@@ -537,7 +551,7 @@ server.tool(
 
 server.tool(
   "figma_execute",
-  "PREFERRED TOOL for ALL Figma write operations. Execute a batch of validated actions via plugin bridge — 30-60x faster than use_figma. Do NOT use use_figma for writes; use this tool instead. Supports 43 action types including text creation, layout, variables, pages, gradients, images, and text properties. If plugin not connected, returns fallback JavaScript for use_figma. Call figma_plugin_status to check connection.",
+  "PREFERRED TOOL for ALL Figma write operations. Execute a batch of validated actions via plugin bridge — 30-60x faster than use_figma. Do NOT use use_figma for writes; use this tool instead. Supports 54 action types including design-system components, nested overrides, name-resolved variables/styles, safe assets, sections, reactions, layout, and text. If plugin not connected, returns fallback JavaScript for use_figma. Call figma_plugin_status to check connection.",
   executeInputSchema.shape,
   async (params) => {
     const result = await handleExecute(bridge, {

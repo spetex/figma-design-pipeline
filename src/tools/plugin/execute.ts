@@ -1,6 +1,7 @@
 import type { BridgeServer, BatchResult } from "../../plugin/bridge.js";
 import type { SnapshotCache } from "../../pipeline/snapshot.js";
 import { compileBatch } from "../../plugin/batch-compiler.js";
+import { preprocessActions } from "../../plugin/assets.js";
 import { actionSchema, type Action } from "../../shared/actions.js";
 import { assertActionInputCoverage, FORBIDDEN_DELETE_NODE_TYPES, isKnownActionType } from "../../shared/action-parity.js";
 import { weightToFontStyle } from "../../shared/font.js";
@@ -48,15 +49,17 @@ export async function handleExecute(
   params: ExecuteParams
 ): Promise<ExecuteResult> {
   // Validate actions
-  const validated: Action[] = [];
-  for (const raw of params.actions) {
+  const parsedActions: Action[] = [];
+  for (let index = 0; index < params.actions.length; index++) {
+    const raw = params.actions[index];
     const parsed = actionSchema.safeParse(raw);
     if (!parsed.success) {
-      throw new Error(`Invalid action: ${parsed.error.issues.map(i => i.message).join(", ")}`);
+      throw new Error(`Invalid action ${index}: ${parsed.error.issues.map(i => i.message).join(", ")}`);
     }
     assertActionInputCoverage(parsed.data);
-    validated.push(parsed.data);
+    parsedActions.push(parsed.data);
   }
+  const validated = await preprocessActions(parsedActions);
 
   // Compile batch
   const batch = compileBatch(validated, {
@@ -143,15 +146,15 @@ function generateFallbackJs(
   lines.push("let documentWrites = 0;");
   lines.push("let stopProcessing = false;");
   lines.push("const createdNodeIds = new Map();");
-  lines.push("const recordCreatedNode = (ref, result) => {");
+  lines.push("const recordCreatedNode = (ref, result, aliasRef) => {");
   lines.push("  createdNodeIds.set(ref, result.nodeId);");
+  lines.push("  if (aliasRef) createdNodeIds.set(aliasRef, result.nodeId);");
   lines.push("  results.push(result);");
   lines.push("};");
   lines.push("const markDocumentWrite = () => { documentWrites++; };");
   lines.push("const resolveRefId = (id) => {");
   lines.push("  if (typeof id !== \"string\") return id;");
-  lines.push("  const match = id.match(/^\\$ref:node-(\\d+)$/);");
-  lines.push("  if (!match) return id;");
+  lines.push("  if (!id.startsWith(\"$\")) return id;");
   lines.push("  const resolved = createdNodeIds.get(id);");
   lines.push("  if (!resolved) throw new Error(`Unable to resolve ${id}. Ensure referenced action ran first.`);");
   lines.push("  return resolved;");
@@ -187,16 +190,31 @@ function generateFallbackJs(
   lines.push("  return cleaned;");
   lines.push("});");
   lines.push("const parseVariableValue = (resolvedType, value) => {");
-  lines.push("  if (resolvedType !== \"COLOR\" || typeof value !== \"string\") return value;");
-  lines.push("  const cleaned = value.replace(\"#\", \"\");");
-  lines.push("  const expanded = cleaned.length === 3 ? cleaned.split(\"\").map((channel) => channel + channel).join(\"\") : cleaned;");
-  lines.push("  return {");
-  lines.push("    r: parseInt(expanded.substring(0, 2), 16) / 255,");
-  lines.push("    g: parseInt(expanded.substring(2, 4), 16) / 255,");
-  lines.push("    b: parseInt(expanded.substring(4, 6), 16) / 255,");
-  lines.push("    a: expanded.length === 8 ? parseInt(expanded.substring(6, 8), 16) / 255 : 1,");
-  lines.push("  };");
+  lines.push("  if (resolvedType === 'COLOR') {");
+  lines.push("    if (value && typeof value === 'object' && ['r','g','b'].every(key => typeof value[key] === 'number')) return value;");
+  lines.push("    if (typeof value !== 'string' || !/^#?(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value)) throw new Error('COLOR variable value must be valid hex or RGBA');");
+  lines.push("    const cleaned = value.replace('#', ''); const expanded = cleaned.length === 3 ? cleaned.split('').map(channel => channel + channel).join('') : cleaned;");
+  lines.push("    return { r: parseInt(expanded.slice(0,2),16)/255, g: parseInt(expanded.slice(2,4),16)/255, b: parseInt(expanded.slice(4,6),16)/255, a: expanded.length === 8 ? parseInt(expanded.slice(6,8),16)/255 : 1 };");
+  lines.push("  }");
+  lines.push("  if (resolvedType === 'FLOAT' && typeof value !== 'number') throw new Error('FLOAT variable value must be a number');");
+  lines.push("  if (resolvedType === 'STRING' && typeof value !== 'string') throw new Error('STRING variable value must be a string');");
+  lines.push("  if (resolvedType === 'BOOLEAN' && typeof value !== 'boolean') throw new Error('BOOLEAN variable value must be a boolean');");
+  lines.push("  return value;");
   lines.push("};");
+  lines.push("const propertyDisplayName = (key) => key.includes('#') ? key.slice(0, key.lastIndexOf('#')) : key;");
+  lines.push("const resolveComponentPropertyKey = (definitions, requested) => {");
+  lines.push("  if (Object.prototype.hasOwnProperty.call(definitions, requested)) return requested;");
+  lines.push("  const matches = Object.keys(definitions).filter(key => propertyDisplayName(key) === requested);");
+  lines.push("  if (!matches.length) throw new Error(`Component property not found: ${requested}`);");
+  lines.push("  if (matches.length > 1) throw new Error(`Component property name is ambiguous: ${requested}`);");
+  lines.push("  return matches[0];");
+  lines.push("};");
+  lines.push("const requireAttachedInstance = async (id) => { const node = requireNode(id); if (node.type !== 'INSTANCE') throw new Error(`Node ${id} is not an instance`); if (typeof node.getMainComponentAsync === 'function' && !(await node.getMainComponentAsync())) throw new Error(`Instance ${id} is detached or has no main component`); return node; };");
+  lines.push("const findInstanceChild = async (id, path) => { let current = await requireAttachedInstance(id); for (const segment of path) { if (!Array.isArray(current.children)) throw new Error(`Child path cannot descend through ${current.type}`); const matches = current.children.filter(child => child.name === segment); if (!matches.length) throw new Error(`Child path segment not found: ${segment}`); if (matches.length > 1) throw new Error(`Child path segment is ambiguous: ${segment}`); current = matches[0]; } return current; };");
+  lines.push("const localStyles = async (type) => type === 'PAINT' ? figma.getLocalPaintStylesAsync() : type === 'TEXT' ? figma.getLocalTextStylesAsync() : figma.getLocalEffectStylesAsync();");
+  lines.push("const resolveStyle = async (type, id, name) => { if (id) { const style = await figma.getStyleByIdAsync(resolveRefId(id)); if (!style) throw new Error(`Style not found: ${id}`); if (style.type !== type) throw new Error(`Style ${id} is ${style.type}, not ${type}`); return style; } const matches = (await localStyles(type)).filter(style => style.name === name); if (!matches.length) throw new Error(`Style not found: ${name}`); if (matches.length > 1) throw new Error(`Style name is ambiguous: ${name}`); return matches[0]; };");
+  lines.push("const resolveVariable = async (action) => { let variable; if (action.variableId) variable = figma.variables.getVariableByIdAsync ? await figma.variables.getVariableByIdAsync(resolveRefId(action.variableId)) : figma.variables.getVariableById(resolveRefId(action.variableId)); else { let candidates = (await figma.variables.getLocalVariablesAsync(action.resolvedType)).filter(item => item.name === action.variableName); if (action.collectionId || action.collectionName) { const collections = await figma.variables.getLocalVariableCollectionsAsync(); const matches = action.collectionId ? collections.filter(item => item.id === resolveRefId(action.collectionId)) : collections.filter(item => item.name === action.collectionName); if (!matches.length) throw new Error(`Variable collection not found: ${action.collectionId || action.collectionName}`); if (matches.length > 1) throw new Error(`Variable collection name is ambiguous: ${action.collectionName}`); candidates = candidates.filter(item => item.variableCollectionId === matches[0].id); } if (!candidates.length) throw new Error(`Variable not found: ${action.variableName}`); if (candidates.length > 1) throw new Error(`Variable name is ambiguous: ${action.variableName}`); variable = candidates[0]; } if (!variable) throw new Error(`Variable not found: ${action.variableId}`); if (action.resolvedType && variable.resolvedType !== action.resolvedType) throw new Error(`Variable ${variable.name} is ${variable.resolvedType}, not ${action.resolvedType}`); return variable; };");
+  lines.push("const validateVariableCollection = async (action, variable) => { if (!action.collectionId && !action.collectionName) return; let matches; if (action.collectionId) { const id = resolveRefId(action.collectionId); const collection = figma.variables.getVariableCollectionByIdAsync ? await figma.variables.getVariableCollectionByIdAsync(id) : figma.variables.getVariableCollectionById(id); matches = collection ? [collection] : []; } else matches = (await figma.variables.getLocalVariableCollectionsAsync()).filter(item => item.name === action.collectionName); if (!matches.length) throw new Error(`Variable collection not found: ${action.collectionId || action.collectionName}`); if (matches.length > 1) throw new Error(`Variable collection name is ambiguous: ${action.collectionName}`); if (variable.variableCollectionId !== matches[0].id) throw new Error(`Variable ${variable.name} is not in collection ${matches[0].name}`); };");
   lines.push("");
 
   for (let i = 0; i < actions.length; i++) {
@@ -215,11 +233,12 @@ function generateFallbackJs(
     const g = (id: string) => `getNode(${j(id)})`;
     const r = (t: string, extra = "") => `results.push({ type: "${t}", nodeId: "${nid}"${extra} });`;
     const createRef = compiledActions[i]?._ref;
+    const aliasRef = compiledActions[i]?._aliasRef;
     const cr = (t: string, nodeId: string) => {
       if (typeof createRef !== "string") {
         throw new Error(`Missing compiled reference for create action ${i}: ${t}`);
       }
-      return `recordCreatedNode(${j(createRef)}, { type: "${t}", nodeId: ${nodeId} });`;
+      return `recordCreatedNode(${j(createRef)}, { type: "${t}", nodeId: ${nodeId} }${typeof aliasRef === "string" ? `, ${j(aliasRef)}` : ""});`;
     };
 
     switch (a.type) {
@@ -235,7 +254,7 @@ function generateFallbackJs(
       case "create_text": {
         const fam = a.fontFamily || "Inter";
         const sty = weightToStyle(a.fontWeight || 400);
-        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); await loadFontOnce({ family: "${fam}", style: "${sty}" }); const t = figma.createText(); markDocumentWrite(); t.fontName = { family: "${fam}", style: "${sty}" }; t.characters = ${j(a.characters)}; ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} t.textAutoResize = "${a.textAutoResize || "HEIGHT"}"; ${a.name ? `t.name = ${j(a.name)};` : ""} parent.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} ${cr("create_text", "t.id")} }`);
+        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const textStyle = ${a.textStyleId || a.textStyleName ? `await resolveStyle("TEXT", ${j(a.textStyleId)}, ${j(a.textStyleName)})` : "null"}; await loadFontOnce({ family: "${fam}", style: "${sty}" }); const t = figma.createText(); markDocumentWrite(); t.fontName = { family: "${fam}", style: "${sty}" }; t.characters = ${j(a.characters)}; ${a.fontSize !== undefined ? `t.fontSize = ${a.fontSize};` : ""} ${a.lineHeight !== undefined ? `t.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : ""} ${a.letterSpacing !== undefined ? `t.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : ""} ${a.fills ? `t.fills = sanitizePaints(${j(a.fills)});` : ""} ${a.textCase ? `t.textCase = "${a.textCase}";` : ""} ${a.textAlignHorizontal ? `t.textAlignHorizontal = "${a.textAlignHorizontal}";` : ""} t.textAutoResize = "${a.textAutoResize || "HEIGHT"}"; ${a.textTruncation ? `t.textTruncation = "${a.textTruncation}";` : ""} ${a.maxLines !== undefined ? `t.maxLines = ${j(a.maxLines)};` : ""} ${a.name ? `t.name = ${j(a.name)};` : ""} parent.appendChild(t); ${a.layoutSizingHorizontal ? `t.layoutSizingHorizontal = "${a.layoutSizingHorizontal}";` : ""} ${a.layoutSizingVertical ? `t.layoutSizingVertical = "${a.layoutSizingVertical}";` : ""} ${a.opacity !== undefined ? `t.opacity = ${a.opacity};` : ""} if (textStyle) await t.setTextStyleIdAsync(textStyle.id); ${cr("create_text", "t.id")} }`);
         break;
       }
       case "delete_node":
@@ -248,7 +267,7 @@ function generateFallbackJs(
         lines.push(`{ const n = ${g(nid)}; ${a.x !== undefined ? `if (n.x !== ${a.x}) { n.x = ${a.x}; markDocumentWrite(); }` : ""} ${a.y !== undefined ? `if (n.y !== ${a.y}) { n.y = ${a.y}; markDocumentWrite(); }` : ""} ${r("set_position")} }`);
         break;
       case "duplicate_node":
-        lines.push(`{ const c = ${g(nid)}.clone(); markDocumentWrite(); ${cr("duplicate_node", "c.id")} }`);
+        lines.push(`{ const source = requireSceneNode(${j(nid)}); const target = ${a.targetParentId ? `requireContainer(${j(a.targetParentId)})` : "null"}; ${a.insertIndex !== undefined ? `if (target && ${a.insertIndex} > target.children.length) throw new Error("insertIndex exceeds target child count");` : ""} const c = source.clone(); markDocumentWrite(); ${a.targetParentId ? (a.insertIndex !== undefined ? `target.insertChild(${a.insertIndex}, c);` : "target.appendChild(c);") : ""} ${a.x !== undefined ? `c.x = ${a.x};` : ""} ${a.y !== undefined ? `c.y = ${a.y};` : ""} ${cr("duplicate_node", "c.id")} }`);
         break;
       case "set_visible":
         lines.push(`{ ${g(nid)}.visible = ${a.visible}; markDocumentWrite(); ${r("set_visible")} }`);
@@ -257,16 +276,16 @@ function generateFallbackJs(
         lines.push(`{ ${g(nid)}.opacity = ${a.opacity}; markDocumentWrite(); ${r("set_opacity")} }`);
         break;
       case "set_layout_mode":
-        lines.push(`{ const n = ${g(nid)}; n.layoutMode = "${a.mode}"; markDocumentWrite(); ${a.primaryAxisSizingMode ? `n.primaryAxisSizingMode = "${a.primaryAxisSizingMode}"; markDocumentWrite();` : ""} ${a.counterAxisSizingMode ? `n.counterAxisSizingMode = "${a.counterAxisSizingMode}"; markDocumentWrite();` : ""} ${r("set_layout_mode")} }`);
+        lines.push(`{ const n = ${g(nid)}; ${a.layoutWrap && a.mode !== "HORIZONTAL" ? `throw new Error("layoutWrap requires HORIZONTAL auto layout");` : ""} n.layoutMode = "${a.mode}"; markDocumentWrite(); ${a.primaryAxisSizingMode ? `n.primaryAxisSizingMode = "${a.primaryAxisSizingMode}"; markDocumentWrite();` : ""} ${a.counterAxisSizingMode ? `n.counterAxisSizingMode = "${a.counterAxisSizingMode}"; markDocumentWrite();` : ""} ${a.layoutWrap ? `n.layoutWrap = "${a.layoutWrap}"; markDocumentWrite();` : ""} ${r("set_layout_mode")} }`);
         break;
       case "set_layout_positioning":
         lines.push(`{ ${g(nid)}.layoutPositioning = "${a.positioning}"; markDocumentWrite(); ${r("set_layout_positioning")} }`);
         break;
       case "set_alignment":
-        lines.push(`{ const n = ${g(nid)}; ${a.primaryAxisAlignItems ? `n.primaryAxisAlignItems = "${a.primaryAxisAlignItems}"; markDocumentWrite();` : ""} ${a.counterAxisAlignItems ? `n.counterAxisAlignItems = "${a.counterAxisAlignItems}"; markDocumentWrite();` : ""} ${r("set_alignment")} }`);
+        lines.push(`{ const n = ${g(nid)}; if (n.layoutMode === "NONE") throw new Error("Alignment requires auto layout"); ${a.counterAxisAlignItems === "BASELINE" ? `if (n.layoutMode !== "HORIZONTAL") throw new Error("BASELINE alignment requires HORIZONTAL auto layout");` : ""} ${a.primaryAxisAlignItems ? `n.primaryAxisAlignItems = "${a.primaryAxisAlignItems}"; markDocumentWrite();` : ""} ${a.counterAxisAlignItems ? `n.counterAxisAlignItems = "${a.counterAxisAlignItems}"; markDocumentWrite();` : ""} ${r("set_alignment")} }`);
         break;
       case "set_spacing":
-        lines.push(`{ const n = ${g(nid)}; ${a.itemSpacing !== undefined ? `n.itemSpacing = ${a.itemSpacing}; markDocumentWrite();` : ""} ${a.paddingTop !== undefined ? `n.paddingTop = ${a.paddingTop}; markDocumentWrite();` : ""} ${a.paddingRight !== undefined ? `n.paddingRight = ${a.paddingRight}; markDocumentWrite();` : ""} ${a.paddingBottom !== undefined ? `n.paddingBottom = ${a.paddingBottom}; markDocumentWrite();` : ""} ${a.paddingLeft !== undefined ? `n.paddingLeft = ${a.paddingLeft}; markDocumentWrite();` : ""} ${r("set_spacing")} }`);
+        lines.push(`{ const n = ${g(nid)}; if (n.layoutMode === "NONE") throw new Error("Spacing requires auto layout"); ${a.counterAxisSpacing !== undefined ? `if (n.layoutWrap !== "WRAP") throw new Error("counterAxisSpacing requires wrapping auto layout");` : ""} ${a.itemSpacing !== undefined ? `n.itemSpacing = ${a.itemSpacing}; markDocumentWrite();` : ""} ${a.paddingTop !== undefined ? `n.paddingTop = ${a.paddingTop}; markDocumentWrite();` : ""} ${a.paddingRight !== undefined ? `n.paddingRight = ${a.paddingRight}; markDocumentWrite();` : ""} ${a.paddingBottom !== undefined ? `n.paddingBottom = ${a.paddingBottom}; markDocumentWrite();` : ""} ${a.paddingLeft !== undefined ? `n.paddingLeft = ${a.paddingLeft}; markDocumentWrite();` : ""} ${a.counterAxisSpacing !== undefined ? `n.counterAxisSpacing = ${j(a.counterAxisSpacing)}; markDocumentWrite();` : ""} ${r("set_spacing")} }`);
         break;
       case "set_child_layout_sizing":
         lines.push(`{ const n = ${g(nid)}; ${a.layoutSizingHorizontal ? `n.layoutSizingHorizontal = "${a.layoutSizingHorizontal}"; markDocumentWrite();` : ""} ${a.layoutSizingVertical ? `n.layoutSizingVertical = "${a.layoutSizingVertical}"; markDocumentWrite();` : ""} ${r("set_child_layout_sizing")} }`);
@@ -285,6 +304,21 @@ function generateFallbackJs(
         break;
       case "set_image_fill":
         lines.push(`{ const n = requireFills(${j(nid)}); const img = figma.createImage(figma.base64Decode(${j(a.imageBase64)})); n.fills = [{ type: "IMAGE", imageHash: img.hash, scaleMode: "${a.scaleMode || "FILL"}" }]; markDocumentWrite(); ${r("set_image_fill")} }`);
+        break;
+      case "create_from_svg":
+        lines.push(`{ const parent = requireContainer(${j(a.parentId)}); const n = figma.createNodeFromSvg(${j(a.svg)}); markDocumentWrite(); ${a.name ? `n.name = ${j(a.name)};` : ""} parent.appendChild(n); n.x = ${a.x}; n.y = ${a.y}; ${cr("create_from_svg", "n.id")} }`);
+        break;
+      case "create_section":
+        lines.push(`{ if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design"); const parent = requireNode(${j(a.parentId)}); if (parent.type !== "PAGE") throw new Error("Sections must be created on a page"); const s = figma.createSection(); markDocumentWrite(); s.name = ${j(a.name)}; s.resize(${a.width}, ${a.height}); parent.appendChild(s); s.x = ${a.x}; s.y = ${a.y}; ${cr("create_section", "s.id")} }`);
+        break;
+      case "resize_section":
+        lines.push(`{ if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design"); const s = requireNode(${j(a.sectionId)}); if (s.type !== "SECTION") throw new Error("Node is not a section"); s.resize(${a.width}, ${a.height}); markDocumentWrite(); results.push({ type: "resize_section", nodeId: s.id }); }`);
+        break;
+      case "move_to_section":
+        lines.push(`{ if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design"); const n = requireSceneNode(${j(nid)}); const s = requireNode(${j(a.sectionId)}); if (s.type !== "SECTION") throw new Error("Node is not a section"); if (["SECTION", "PAGE", "DOCUMENT"].includes(n.type)) throw new Error(n.type + " nodes cannot be moved into sections"); ${a.insertIndex !== undefined ? `if (${a.insertIndex} > s.children.length) throw new Error("insertIndex exceeds section child count");` : ""} let ancestor = s; while (ancestor && ancestor.parent) { if (ancestor.id === n.id) throw new Error("Cannot move a node into its own descendant"); ancestor = ancestor.parent; } ${a.insertIndex !== undefined ? `s.insertChild(${a.insertIndex}, n);` : "s.appendChild(n);"} markDocumentWrite(); ${r("move_to_section")} }`);
+        break;
+      case "set_reaction":
+        lines.push(`{ if (figma.editorType !== "figma") throw new Error("Prototype reactions are only supported in Figma Design"); const n = requireSceneNode(${j(nid)}); const destination = requireSceneNode(${j(a.destinationId)}); if (typeof n.setReactionsAsync !== "function") throw new Error("Node does not support reactions"); const reaction = { trigger: { type: "ON_CLICK" }, actions: [{ type: "NODE", destinationId: destination.id, navigation: "${a.navigation}", transition: null }] }; const next = "${a.mode}" === "append" ? [...n.reactions, reaction] : [reaction]; await n.setReactionsAsync(next); markDocumentWrite(); ${r("set_reaction")} }`);
         break;
       case "set_strokes":
         lines.push(`{ const n = ${g(nid)}; n.strokes = sanitizePaints(${j(a.strokes)}); markDocumentWrite(); ${a.strokeWeight !== undefined ? `n.strokeWeight = ${a.strokeWeight}; markDocumentWrite();` : ""} ${r("set_strokes")} }`);
@@ -321,10 +355,22 @@ function generateFallbackJs(
         lines.push(`{ const instance = requireNode(${j(a.instanceId)}); if (instance.type !== "INSTANCE" || typeof instance.swapComponent !== "function") throw new Error("Node is not an instance"); const component = requireNode(${j(a.newComponentId)}); if (component.type !== "COMPONENT") throw new Error("Node is not a component"); instance.swapComponent(component); markDocumentWrite(); results.push({ type: "swap_instance" }); }`);
         break;
       case "set_component_properties":
-        lines.push(`{ const n = ${g(nid)}; for (const [property, value] of Object.entries(${j(a.properties)})) { n.setProperties({ [property]: value }); markDocumentWrite(); } ${r("set_component_properties")} }`);
+        lines.push(`{ const n = await requireAttachedInstance(${j(nid)}); const main = typeof n.getMainComponentAsync === "function" ? await n.getMainComponentAsync() : null; const properties = main ? Object.fromEntries(Object.entries(${j(a.properties)}).map(([key, value]) => { const resolvedKey = resolveComponentPropertyKey(main.componentPropertyDefinitions, key); const definition = main.componentPropertyDefinitions[resolvedKey]; return [resolvedKey, definition.type === "INSTANCE_SWAP" && typeof value === "string" && value.startsWith("$") ? resolveRefId(value) : value]; })) : ${j(a.properties)}; for (const [property, value] of Object.entries(properties)) { n.setProperties({ [property]: value }); markDocumentWrite(); } ${r("set_component_properties")} }`);
         break;
       case "define_component_property":
-        lines.push(`{ ${g(nid)}.addComponentProperty(${j(a.propertyName)}, "${a.propertyType}", ${j(a.defaultValue)}); markDocumentWrite(); ${r("define_component_property")} }`);
+        lines.push(`{ const n = requireNode(${j(nid)}); if (n.type !== "COMPONENT" && n.type !== "COMPONENT_SET") throw new Error("Node is not a component or component set"); ${a.propertyType === "VARIANT" ? `if (n.type !== "COMPONENT_SET") throw new Error("VARIANT properties require a component set");` : ""} const defaultValue = ${a.propertyType === "INSTANCE_SWAP" && typeof a.defaultValue === "string" ? `resolveRefId(${j(a.defaultValue)})` : j(a.defaultValue)}; n.addComponentProperty(${j(a.propertyName)}, "${a.propertyType}", defaultValue); markDocumentWrite(); ${r("define_component_property")} }`);
+        break;
+      case "set_component_property_reference":
+        lines.push(`{ const n = requireSceneNode(${j(nid)}); let owner = n.parent; while (owner && owner.type !== "COMPONENT" && owner.type !== "COMPONENT_SET") owner = owner.parent; if (!owner) throw new Error("Node is not inside a component or component set"); const key = resolveComponentPropertyKey(owner.componentPropertyDefinitions, ${j(a.componentPropertyName)}); const expected = ${j(a.property === "characters" ? "TEXT" : a.property === "visible" ? "BOOLEAN" : "INSTANCE_SWAP")}; if (owner.componentPropertyDefinitions[key].type !== expected) throw new Error("Component property type is incompatible"); ${a.property === "characters" ? `if (n.type !== "TEXT") throw new Error("characters references require a text node");` : ""} ${a.property === "mainComponent" ? `if (n.type !== "INSTANCE") throw new Error("mainComponent references require an instance node");` : ""} n.componentPropertyReferences = { ...(n.componentPropertyReferences || {}), ${j(a.property)}: key }; markDocumentWrite(); ${r("set_component_property_reference")} }`);
+        break;
+      case "set_instance_text":
+        lines.push(`{ const n = await findInstanceChild(${j(a.instanceId)}, ${j(a.childPath)}); if (n.type !== "TEXT") throw new Error("childPath does not resolve to a text node"); if (n.fontName === figma.mixed) { const fonts = new Map(); for (let i = 0; i < n.characters.length; i++) { const font = n.getRangeFontName(i, i + 1); fonts.set(font.family + "|" + font.style, font); } for (const font of fonts.values()) await loadFontOnce(font); } else await loadFontOnce(n.fontName); n.characters = ${j(a.characters)}; markDocumentWrite(); results.push({ type: "set_instance_text", nodeId: n.id }); }`);
+        break;
+      case "set_instance_visibility":
+        lines.push(`{ const n = await findInstanceChild(${j(a.instanceId)}, ${j(a.childPath)}); n.visible = ${a.visible}; markDocumentWrite(); results.push({ type: "set_instance_visibility", nodeId: n.id }); }`);
+        break;
+      case "swap_nested_instance":
+        lines.push(`{ const n = await findInstanceChild(${j(a.instanceId)}, ${j(a.childPath)}); if (n.type !== "INSTANCE") throw new Error("childPath does not resolve to an instance node"); const component = requireNode(${j(a.newComponentId)}); if (component.type !== "COMPONENT") throw new Error("Swap target is not a component"); n.swapComponent(component); markDocumentWrite(); results.push({ type: "swap_nested_instance", nodeId: n.id }); }`);
         break;
       case "create_paint_style":
         lines.push(`{ const s = figma.createPaintStyle(); markDocumentWrite(); s.name = ${j(a.name)}; s.paints = sanitizePaints(${j(a.paints)}); ${cr("create_paint_style", "s.id")} }`);
@@ -336,8 +382,14 @@ function generateFallbackJs(
         lines.push(`{ const s = figma.createEffectStyle(); markDocumentWrite(); s.name = ${j(a.name)}; s.effects = ${j(a.effects)}; ${cr("create_effect_style", "s.id")} }`);
         break;
       case "apply_style":
-        lines.push(`{ const n = ${g(nid)}; const styleId = resolveRefId(${j(a.styleId)}); ${a.property === "fill" ? "await n.setFillStyleIdAsync(styleId);" : a.property === "stroke" ? "await n.setStrokeStyleIdAsync(styleId);" : a.property === "text" ? "await n.setTextStyleIdAsync(styleId);" : "await n.setEffectStyleIdAsync(styleId);"} markDocumentWrite(); ${r("apply_style")} }`);
+        lines.push(`{ const n = ${g(nid)}; const style = await resolveStyle(${j(a.property === "text" ? "TEXT" : a.property === "effect" ? "EFFECT" : "PAINT")}, ${j(a.styleId)}, ${j(a.styleName)}); const styleId = style.id; ${a.property === "fill" ? "await n.setFillStyleIdAsync(styleId);" : a.property === "stroke" ? "await n.setStrokeStyleIdAsync(styleId);" : a.property === "text" ? "await n.setTextStyleIdAsync(styleId);" : "await n.setEffectStyleIdAsync(styleId);"} markDocumentWrite(); ${r("apply_style")} }`);
         break;
+      case "update_style": {
+        const textUpdates = a.fontFamily !== undefined || a.fontWeight !== undefined || a.fontSize !== undefined || a.lineHeight !== undefined || a.letterSpacing !== undefined;
+        const noUpdates = a.name === undefined && a.paints === undefined && a.effects === undefined && !textUpdates && !a.copyFromStyleId && !a.copyFromStyleName;
+        lines.push(`{ const style = await resolveStyle(${j(a.styleType)}, ${j(a.styleId)}, ${j(a.styleName)}); const source = ${a.copyFromStyleId || a.copyFromStyleName ? `await resolveStyle(${j(a.styleType)}, ${j(a.copyFromStyleId)}, ${j(a.copyFromStyleName)})` : "null"}; ${a.paints !== undefined && a.styleType !== "PAINT" || a.effects !== undefined && a.styleType !== "EFFECT" || textUpdates && a.styleType !== "TEXT" ? `throw new Error("Update fields do not match style type");` : ""} ${noUpdates ? `throw new Error("update_style has no updates");` : ""} ${a.styleType === "TEXT" ? `const current = source || style; const family = ${a.fontFamily !== undefined ? j(a.fontFamily) : "current.fontName.family"}; const fontStyle = ${a.fontWeight !== undefined ? j(weightToStyle(a.fontWeight)) : "current.fontName.style"}; await loadFontOnce({ family, style: fontStyle });` : ""} markDocumentWrite(); ${a.name !== undefined ? `style.name = ${j(a.name)};` : ""} ${a.styleType === "PAINT" && (a.paints !== undefined || a.copyFromStyleId || a.copyFromStyleName) ? `style.paints = sanitizePaints(${a.paints !== undefined ? j(a.paints) : "[...source.paints]"});` : ""} ${a.styleType === "EFFECT" && (a.effects !== undefined || a.copyFromStyleId || a.copyFromStyleName) ? `style.effects = ${a.effects !== undefined ? j(a.effects) : "[...source.effects]"};` : ""} ${a.styleType === "TEXT" ? `${a.copyFromStyleId || a.copyFromStyleName ? "style.textDecoration = source.textDecoration; style.leadingTrim = source.leadingTrim; style.paragraphIndent = source.paragraphIndent; style.paragraphSpacing = source.paragraphSpacing; style.listSpacing = source.listSpacing; style.hangingPunctuation = source.hangingPunctuation; style.hangingList = source.hangingList; style.textCase = source.textCase;" : ""} style.fontName = { family, style: fontStyle }; ${a.fontSize !== undefined ? `style.fontSize = ${a.fontSize};` : (a.copyFromStyleId || a.copyFromStyleName) ? "style.fontSize = source.fontSize;" : ""} ${a.lineHeight !== undefined ? `style.lineHeight = { value: ${a.lineHeight}, unit: "PIXELS" };` : (a.copyFromStyleId || a.copyFromStyleName) ? "style.lineHeight = source.lineHeight;" : ""} ${a.letterSpacing !== undefined ? `style.letterSpacing = { value: ${a.letterSpacing}, unit: "PIXELS" };` : (a.copyFromStyleId || a.copyFromStyleName) ? "style.letterSpacing = source.letterSpacing;" : ""}` : ""} results.push({ type: "update_style", nodeId: style.id }); }`);
+        break;
+      }
       case "set_description":
         lines.push(`{ ${g(nid)}.description = ${j(a.description)}; markDocumentWrite(); ${r("set_description")} }`);
         break;
@@ -351,10 +403,13 @@ function generateFallbackJs(
         lines.push(`{ const c = figma.variables.createVariableCollection(${j(a.name)}); markDocumentWrite(); const modes = ${j(a.modes)}; if (modes[0]) { c.renameMode(c.modes[0].modeId, modes[0]); markDocumentWrite(); } for (let modeIndex = 1; modeIndex < modes.length; modeIndex++) { c.addMode(modes[modeIndex]); markDocumentWrite(); } ${cr("create_variable_collection", "c.id")} }`);
         break;
       case "create_variable":
-        lines.push(`{ const c = figma.variables.getVariableCollectionById(resolveRefId(${j(a.collectionId)})); if (!c) throw new Error("Variable collection not found"); const v = figma.variables.createVariable(${j(a.name)}, c, "${a.resolvedType}"); markDocumentWrite(); ${a.scopes ? `v.scopes = ${j(a.scopes)};` : ""} const value = parseVariableValue("${a.resolvedType}", ${j(a.value)}); for (const mode of c.modes) v.setValueForMode(mode.modeId, value); ${cr("create_variable", "v.id")} }`);
+        lines.push(`{ const collectionId = resolveRefId(${j(a.collectionId)}); const c = figma.variables.getVariableCollectionByIdAsync ? await figma.variables.getVariableCollectionByIdAsync(collectionId) : figma.variables.getVariableCollectionById(collectionId); if (!c) throw new Error("Variable collection not found"); const value = parseVariableValue("${a.resolvedType}", ${j(a.value)}); const v = figma.variables.createVariable(${j(a.name)}, c, "${a.resolvedType}"); markDocumentWrite(); ${a.scopes ? `v.scopes = ${j(a.scopes)};` : ""} for (const mode of c.modes) v.setValueForMode(mode.modeId, value); ${cr("create_variable", "v.id")} }`);
         break;
       case "bind_variable":
-        lines.push(`{ const v = figma.variables.getVariableById(resolveRefId(${j(a.variableId)})); if (!v) throw new Error("Variable not found"); const n = ${g(nid)}; ${a.property === "fills" || a.property === "strokes" ? `const paints = [...n.${a.property}]; const paintIndex = ${a.paintIndex ?? 0}; const paint = paints[paintIndex]; if (!paint) throw new Error(\"Paint index \" + paintIndex + \" does not exist in ${a.property}\"); if (paint.type !== \"SOLID\") throw new Error(\"Paint index \" + paintIndex + \" in ${a.property} is not a solid paint\"); paints[paintIndex] = figma.variables.setBoundVariableForPaint(paint, "color", v); n.${a.property} = paints; markDocumentWrite();` : `n.setBoundVariable("${a.property}", v); markDocumentWrite();`} ${r("bind_variable")} }`);
+        lines.push(`{ const action = ${j(a)}; const v = await resolveVariable(action); await validateVariableCollection(action, v); const n = ${g(nid)}; ${a.property === "fills" || a.property === "strokes" ? `if (v.resolvedType && v.resolvedType !== "COLOR") throw new Error("${a.property} bindings require a COLOR variable"); const paints = [...n.${a.property}]; const paintIndex = ${a.paintIndex ?? 0}; const paint = paints[paintIndex]; if (!paint) throw new Error(\"Paint index \" + paintIndex + \" does not exist in ${a.property}\"); if (paint.type !== \"SOLID\") throw new Error(\"Paint index \" + paintIndex + \" in ${a.property} is not a solid paint\"); paints[paintIndex] = figma.variables.setBoundVariableForPaint(paint, "color", v); n.${a.property} = paints; markDocumentWrite();` : `if (v.resolvedType && v.resolvedType !== "FLOAT") throw new Error("${a.property} bindings require a FLOAT variable"); if (!("${a.property}" in n) || typeof n.setBoundVariable !== "function") throw new Error("Node does not support ${a.property} variable binding"); ${a.property === "counterAxisSpacing" ? `if (n.layoutWrap !== "WRAP") throw new Error("counterAxisSpacing bindings require wrapping auto layout");` : ""} n.setBoundVariable("${a.property}", v); markDocumentWrite();`} ${r("bind_variable")} }`);
+        break;
+      case "set_variable_value":
+        lines.push(`{ const action = ${j(a)}; const v = await resolveVariable(action); await validateVariableCollection(action, v); const c = await figma.variables.getVariableCollectionByIdAsync(v.variableCollectionId); if (!c) throw new Error("Variable collection not found"); const matches = action.modeId ? c.modes.filter(mode => mode.modeId === action.modeId) : c.modes.filter(mode => mode.name === action.modeName); if (!matches.length) throw new Error("Variable mode not found"); if (matches.length > 1) throw new Error("Variable mode name is ambiguous"); const value = parseVariableValue(v.resolvedType, action.value); v.setValueForMode(matches[0].modeId, value); markDocumentWrite(); results.push({ type: "set_variable_value", nodeId: v.id }); }`);
         break;
       case "export_node":
         lines.push(`{ const format = "${a.format}"; const scale = ${a.scale}; const bytes = await ${g(nid)}.exportAsync({ format, ...(format !== "SVG" ? { constraint: { type: "SCALE", value: scale } } : {}) }); results.push({ type: "export_node", nodeId: "${nid}", base64: figma.base64Encode(bytes) }); }`);

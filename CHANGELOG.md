@@ -6,13 +6,23 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 
 ### Added
 - `figma_get_tree`, `figma_find_nodes`, and `figma_get_components` now support bounded, token-free plugin inspection with exact file-key identity, node/current-page/selection roots, exact or regex name and type filtering, component-set discovery, correlated concurrent reads, and guarded chunked responses. `source: auto` prefers the matching plugin while preserving REST fallback; plugin reads never write or alter inspection caches.
+- Expanded `figma_execute` from 43 to 54 actions for design-system construction: component-property references, exact-path nested instance text/visibility/swap overrides, variable value updates, style updates/copies, safe SVG creation, sections, and bounded ON_CLICK prototype reactions.
+- Added stable `as` aliases (`$alias`) to every node-producing action while preserving `$ref:node-N`, plus whole-batch reference-graph preflight and alias entries in connected `nodeIdMap` results.
+- Added exact-name variable/style resolution with explicit collection/type disambiguation, per-corner and counter-axis variable binding, and server-side local-path/HTTP(S) image ingestion with format, size, timeout, redirect, and private-network protections.
+
+### Changed
+- Extended targeted duplication with parent, insertion, and position controls; component-property definition to component sets; and text creation with style selection, truncation, and maximum-line controls.
+- Extended auto-layout with wrapping and counter-axis spacing and added explicit precondition checks for wrapping, counter-axis spacing, and baseline alignment.
 
 ### Fixed
 - Plugin inspection now uses deterministic serialization and visited-node budgets instead of full-tree pre-counts or unbounded sparse searches. Selection metadata is independently bounded and paged with truthful total/omitted counts, every Figma-origin scalar is UTF-8 bounded with explicit truncation metrics, and the UI enforces aggregate byte/chunk limits before transport. Both read paths share the pure-JavaScript linear-time RE2 engine, which safely handles overlapping repetitions and rejects backreferences/lookarounds. REST preserves an explicit `depth: 0`, and whole-file REST component truncation provides advancing `offset` / `nextOffset` pagination without changing explicit current-page roots into whole-file reads.
 - Audit note for the issue branch: `re2js` has no runtime dependencies and adds no advisory findings. The four pre-existing production findings in `fast-uri`, `hono`, `ip-address`, and `qs` are fixed separately by release-hardening commit `094d54a` and will be integrated after issues #30 and #31; their lockfile upgrades are intentionally not duplicated here.
 - Newly created frames now start with transparent fills in both connected-plugin execution and disconnected fallback JavaScript, avoiding unintended white surfaces on structural containers.
 - The dynamic-page plugin now loads all pages before registering its global document-change listener, preserving debounced cache invalidation while containing and logging initialization failures so bridge startup can continue.
+- Gradient and per-corner-radius result snapshots no longer expose Figma mixed-value symbols through the bridge. Connected and fallback executors retain full schema/action behavior parity, including multi-effect blur payloads.
 
+### Known limitation
+- Same-batch write read-back remains deferred until issue #30 provides plugin-native inspection and bounded response transport; this release does not add the separately owned read protocol.
 ## [0.8.2] - 2026-08-02
 
 ### Changed

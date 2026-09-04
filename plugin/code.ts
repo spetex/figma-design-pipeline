@@ -17,6 +17,7 @@ import {
   type PluginTruncatedFields,
 } from "../src/shared/plugin-read";
 import { compileInspectionRegex, type InspectionRegex } from "../src/shared/safe-regex";
+import { preflightActionReferences } from "../src/plugin/batch-compiler";
 
 // ─── SPFR Design Pipeline Plugin v2 ──────────────────────────────
 // High-performance batch executor with font caching, symbolic refs,
@@ -49,7 +50,7 @@ async function ensureFonts(fonts: Array<{ family: string; style?: string }>): Pr
 const refMap = new Map<string, string>();
 
 function resolveId(id: string): string {
-  if (id.startsWith("$ref:")) {
+  if (id.startsWith("$")) {
     const real = refMap.get(id);
     if (!real) throw new Error(`Unresolved ref: ${id}`);
     return real;
@@ -75,6 +76,136 @@ function requireContainer(node: BaseNode, nodeId: string): BaseNode & ChildrenMi
     throw new Error(`Node ${nodeId} is not a container`);
   }
   return node as BaseNode & ChildrenMixin;
+}
+
+function propertyDisplayName(key: string): string {
+  const separator = key.lastIndexOf("#");
+  return separator < 0 ? key : key.slice(0, separator);
+}
+
+function resolveComponentPropertyKey(
+  definitions: ComponentPropertyDefinitions,
+  requested: string
+): string {
+  if (Object.prototype.hasOwnProperty.call(definitions, requested)) return requested;
+  const matches = Object.keys(definitions).filter((key) => propertyDisplayName(key) === requested);
+  if (matches.length === 0) throw new Error(`Component property not found: ${requested}`);
+  if (matches.length > 1) throw new Error(`Component property name is ambiguous: ${requested}`);
+  return matches[0];
+}
+
+async function requireAttachedInstance(instanceId: string): Promise<InstanceNode> {
+  const node = await findSceneNode(instanceId);
+  if (node.type !== "INSTANCE") throw new Error(`Node ${instanceId} is not an instance`);
+  if (typeof node.getMainComponentAsync === "function" && !(await node.getMainComponentAsync())) {
+    throw new Error(`Instance ${instanceId} is detached or has no main component`);
+  }
+  return node;
+}
+
+async function findInstanceChild(instanceId: string, childPath: string[]): Promise<SceneNode> {
+  let current: BaseNode = await requireAttachedInstance(instanceId);
+  for (const segment of childPath) {
+    if (!("children" in current)) throw new Error(`Child path cannot descend through ${current.type}`);
+    const matches: SceneNode[] = current.children.filter((child: SceneNode) => child.name === segment);
+    if (matches.length === 0) throw new Error(`Child path segment not found: ${segment}`);
+    if (matches.length > 1) throw new Error(`Child path segment is ambiguous: ${segment}`);
+    current = matches[0];
+  }
+  if (!("parent" in current)) throw new Error("Child path did not resolve to a scene node");
+  return current as SceneNode;
+}
+
+async function resolveVariable(action: Record<string, unknown>): Promise<Variable> {
+  let variable: Variable | null = null;
+  if (typeof action.variableId === "string") {
+    variable = typeof figma.variables.getVariableByIdAsync === "function"
+      ? await figma.variables.getVariableByIdAsync(resolveId(action.variableId))
+      : figma.variables.getVariableById(resolveId(action.variableId));
+  } else {
+    const name = action.variableName as string;
+    let candidates = (await figma.variables.getLocalVariablesAsync(action.resolvedType as VariableResolvedDataType | undefined))
+      .filter((candidate) => candidate.name === name);
+    if (action.collectionId || action.collectionName) {
+      const collections = await figma.variables.getLocalVariableCollectionsAsync();
+      const collectionMatches = action.collectionId
+        ? collections.filter((collection) => collection.id === resolveId(action.collectionId as string))
+        : collections.filter((collection) => collection.name === action.collectionName);
+      if (collectionMatches.length === 0) throw new Error(`Variable collection not found: ${String(action.collectionId ?? action.collectionName)}`);
+      if (collectionMatches.length > 1) throw new Error(`Variable collection name is ambiguous: ${String(action.collectionName)}`);
+      candidates = candidates.filter((candidate) => candidate.variableCollectionId === collectionMatches[0].id);
+    }
+    if (candidates.length === 0) throw new Error(`Variable not found: ${name}`);
+    if (candidates.length > 1) throw new Error(`Variable name is ambiguous: ${name}`);
+    variable = candidates[0];
+  }
+  if (!variable) throw new Error(`Variable not found: ${String(action.variableId)}`);
+  if (action.resolvedType && variable.resolvedType !== action.resolvedType) {
+    throw new Error(`Variable ${variable.name} is ${variable.resolvedType}, not ${String(action.resolvedType)}`);
+  }
+  if (action.collectionId || action.collectionName) {
+    let collections: VariableCollection[];
+    if (action.collectionId) {
+      const collectionId = resolveId(action.collectionId as string);
+      const collection = await figma.variables.getVariableCollectionByIdAsync(collectionId);
+      collections = collection ? [collection] : [];
+    } else {
+      collections = (await figma.variables.getLocalVariableCollectionsAsync())
+        .filter((collection) => collection.name === action.collectionName);
+    }
+    if (collections.length === 0) throw new Error(`Variable collection not found: ${String(action.collectionId ?? action.collectionName)}`);
+    if (collections.length > 1) throw new Error(`Variable collection name is ambiguous: ${String(action.collectionName)}`);
+    if (variable.variableCollectionId !== collections[0].id) {
+      throw new Error(`Variable ${variable.name} is not in collection ${collections[0].name}`);
+    }
+  }
+  return variable;
+}
+
+async function localStyles(type: "PAINT" | "TEXT" | "EFFECT"): Promise<Array<PaintStyle | TextStyle | EffectStyle>> {
+  if (type === "PAINT") return figma.getLocalPaintStylesAsync();
+  if (type === "TEXT") return figma.getLocalTextStylesAsync();
+  return figma.getLocalEffectStylesAsync();
+}
+
+async function resolveStyle(
+  type: "PAINT" | "TEXT" | "EFFECT",
+  id: unknown,
+  name: unknown
+): Promise<PaintStyle | TextStyle | EffectStyle> {
+  if (typeof id === "string") {
+    const style = await figma.getStyleByIdAsync(resolveId(id));
+    if (!style) throw new Error(`Style not found: ${id}`);
+    if (style.type !== type) throw new Error(`Style ${id} is ${style.type}, not ${type}`);
+    return style as PaintStyle | TextStyle | EffectStyle;
+  }
+  const matches = (await localStyles(type)).filter((style) => style.name === name);
+  if (matches.length === 0) throw new Error(`Style not found: ${String(name)}`);
+  if (matches.length > 1) throw new Error(`Style name is ambiguous: ${String(name)}`);
+  return matches[0];
+}
+
+function parseVariableValue(type: VariableResolvedDataType, value: unknown): VariableValue {
+  if (type === "COLOR") {
+    if (typeof value === "object" && value !== null && ["r", "g", "b"].every((key) => typeof (value as Record<string, unknown>)[key] === "number")) {
+      return value as RGBA;
+    }
+    if (typeof value !== "string" || !/^#?(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value)) {
+      throw new Error("COLOR variable value must be #RGB, #RRGGBB, #RRGGBBAA, or RGBA");
+    }
+    const cleaned = value.replace("#", "");
+    const expanded = cleaned.length === 3 ? cleaned.split("").map((channel) => channel + channel).join("") : cleaned;
+    return {
+      r: parseInt(expanded.slice(0, 2), 16) / 255,
+      g: parseInt(expanded.slice(2, 4), 16) / 255,
+      b: parseInt(expanded.slice(4, 6), 16) / 255,
+      a: expanded.length === 8 ? parseInt(expanded.slice(6, 8), 16) / 255 : 1,
+    };
+  }
+  if (type === "FLOAT" && typeof value !== "number") throw new Error("FLOAT variable value must be a number");
+  if (type === "STRING" && typeof value !== "string") throw new Error("STRING variable value must be a string");
+  if (type === "BOOLEAN" && typeof value !== "boolean") throw new Error("BOOLEAN variable value must be a boolean");
+  return value as VariableValue;
 }
 
 /** Load every font needed to modify a text node without replacing its font. */
@@ -691,6 +822,9 @@ async function executeAction(
     case "create_text": {
       const parent = await findNode(action.parentId as string);
       const container = requireContainer(parent, action.parentId as string);
+      const textStyle = action.textStyleId || action.textStyleName
+        ? await resolveStyle("TEXT", action.textStyleId, action.textStyleName) as TextStyle
+        : null;
       const family = (action.fontFamily as string) || "Inter";
       const weight = (action.fontWeight as number) || 400;
       const style = weightToFontStyle(weight);
@@ -706,6 +840,9 @@ async function executeAction(
       if (action.textCase) text.textCase = action.textCase as TextCase;
       if (action.textAlignHorizontal) text.textAlignHorizontal = action.textAlignHorizontal as "LEFT" | "CENTER" | "RIGHT" | "JUSTIFIED";
       text.textAutoResize = (action.textAutoResize as "NONE" | "WIDTH_AND_HEIGHT" | "HEIGHT" | "TRUNCATE") || "HEIGHT";
+      if (textStyle) await text.setTextStyleIdAsync(textStyle.id);
+      if (action.textTruncation) text.textTruncation = action.textTruncation as "DISABLED" | "ENDING";
+      if (action.maxLines !== undefined) text.maxLines = action.maxLines as number | null;
       if (action.name) text.name = action.name as string;
       container.appendChild(text);
       if (action.layoutSizingHorizontal) text.layoutSizingHorizontal = action.layoutSizingHorizontal as "FILL" | "HUG" | "FIXED";
@@ -771,15 +908,28 @@ async function executeAction(
 
     case "duplicate_node": {
       const node = await findSceneNode(action.nodeId as string);
+      const target = action.targetParentId
+        ? requireContainer(await findNode(action.targetParentId as string), action.targetParentId as string)
+        : null;
+      if (target && action.insertIndex !== undefined && (action.insertIndex as number) > target.children.length) {
+        throw new Error(`insertIndex ${String(action.insertIndex)} exceeds target child count ${target.children.length}`);
+      }
       const clone = node.clone();
       markDocumentWrite();
-      return { after: { id: clone.id, name: clone.name }, newNodeId: clone.id };
+      if (target) {
+        if (action.insertIndex !== undefined) target.insertChild(action.insertIndex as number, clone);
+        else target.appendChild(clone);
+      }
+      if (action.x !== undefined) clone.x = action.x as number;
+      if (action.y !== undefined) clone.y = action.y as number;
+      return { after: { id: clone.id, name: clone.name, parentId: clone.parent?.id, x: clone.x, y: clone.y }, newNodeId: clone.id };
     }
 
     case "set_layout_mode": {
       const node = await findSceneNode(action.nodeId as string);
       if (!("layoutMode" in node)) throw new Error(`Node ${action.nodeId} does not support layout mode`);
       const frame = node as FrameNode;
+      if (action.layoutWrap && action.mode !== "HORIZONTAL") throw new Error("layoutWrap requires HORIZONTAL auto layout");
       const before = { layoutMode: frame.layoutMode };
       frame.layoutMode = action.mode as "HORIZONTAL" | "VERTICAL" | "NONE";
       markDocumentWrite();
@@ -791,7 +941,11 @@ async function executeAction(
         frame.counterAxisSizingMode = action.counterAxisSizingMode as "FIXED" | "AUTO";
         markDocumentWrite();
       }
-      return { before, after: { layoutMode: frame.layoutMode } };
+      if (action.layoutWrap) {
+        frame.layoutWrap = action.layoutWrap as "NO_WRAP" | "WRAP";
+        markDocumentWrite();
+      }
+      return { before, after: { layoutMode: frame.layoutMode, layoutWrap: frame.layoutWrap } };
     }
 
     case "set_layout_positioning": {
@@ -806,6 +960,10 @@ async function executeAction(
       const node = await findSceneNode(action.nodeId as string);
       if (!("layoutMode" in node)) throw new Error(`Node ${action.nodeId} does not support alignment`);
       const frame = node as FrameNode;
+      if (frame.layoutMode === "NONE") throw new Error("Alignment requires auto layout");
+      if (action.counterAxisAlignItems === "BASELINE" && frame.layoutMode !== "HORIZONTAL") {
+        throw new Error("BASELINE alignment requires HORIZONTAL auto layout");
+      }
       const before = {
         primaryAxisAlignItems: frame.primaryAxisAlignItems,
         counterAxisAlignItems: frame.counterAxisAlignItems,
@@ -825,6 +983,10 @@ async function executeAction(
       const node = await findSceneNode(action.nodeId as string);
       if (!("layoutMode" in node)) throw new Error(`Node ${action.nodeId} does not support spacing`);
       const frame = node as FrameNode;
+      if (frame.layoutMode === "NONE") throw new Error("Spacing requires auto layout");
+      if (action.counterAxisSpacing !== undefined && frame.layoutWrap !== "WRAP") {
+        throw new Error("counterAxisSpacing requires wrapping auto layout");
+      }
       const before = {
         itemSpacing: frame.itemSpacing,
         paddingTop: frame.paddingTop, paddingRight: frame.paddingRight,
@@ -850,7 +1012,11 @@ async function executeAction(
         frame.paddingLeft = action.paddingLeft as number;
         markDocumentWrite();
       }
-      return { before, after: { itemSpacing: frame.itemSpacing, paddingTop: frame.paddingTop, paddingRight: frame.paddingRight, paddingBottom: frame.paddingBottom, paddingLeft: frame.paddingLeft } };
+      if (action.counterAxisSpacing !== undefined) {
+        frame.counterAxisSpacing = action.counterAxisSpacing as number | null;
+        markDocumentWrite();
+      }
+      return { before, after: { itemSpacing: frame.itemSpacing, paddingTop: frame.paddingTop, paddingRight: frame.paddingRight, paddingBottom: frame.paddingBottom, paddingLeft: frame.paddingLeft, counterAxisSpacing: frame.counterAxisSpacing } };
     }
 
     case "set_fills": {
@@ -875,15 +1041,15 @@ async function executeAction(
 
     case "set_effects": {
       const node = await findSceneNode(action.nodeId as string) as BlendMixin & SceneNode;
-      const before = { effects: JSON.parse(JSON.stringify(node.effects)) };
+      const before = { effects: safeSerialize(node.effects) };
       node.effects = action.effects as Effect[];
       markDocumentWrite();
-      return { before, after: { effects: JSON.parse(JSON.stringify(node.effects)) } };
+      return { before, after: { effects: safeSerialize(node.effects) } };
     }
 
     case "set_corner_radius": {
       const node = await findSceneNode(action.nodeId as string) as FrameNode;
-      const before = { cornerRadius: node.cornerRadius };
+      const before = { cornerRadius: safeSerialize(node.cornerRadius) };
       if (action.radius !== undefined) {
         node.cornerRadius = action.radius as number;
         markDocumentWrite();
@@ -899,7 +1065,7 @@ async function executeAction(
         node.bottomLeftRadius = bl;
         markDocumentWrite();
       }
-      return { before, after: { cornerRadius: node.cornerRadius } };
+      return { before, after: { cornerRadius: safeSerialize(node.cornerRadius), radii: [node.topLeftRadius, node.topRightRadius, node.bottomRightRadius, node.bottomLeftRadius] } };
     }
 
     case "set_visible": {
@@ -1014,13 +1180,22 @@ async function executeAction(
     }
 
     case "set_component_properties": {
-      const node = await findSceneNode(action.nodeId as string) as InstanceNode;
+      const node = await requireAttachedInstance(action.nodeId as string);
       const props = action.properties as Record<string, string | boolean>;
-      for (const [key, value] of Object.entries(props)) {
-        node.setProperties({ [key]: value });
+      const main = typeof node.getMainComponentAsync === "function" ? await node.getMainComponentAsync() : null;
+      const resolved = main
+        ? Object.fromEntries(Object.entries(props).map(([key, value]) => {
+          const resolvedKey = resolveComponentPropertyKey(main.componentPropertyDefinitions, key);
+          const resolvedValue = main.componentPropertyDefinitions[resolvedKey].type === "INSTANCE_SWAP"
+            && typeof value === "string" && value.startsWith("$") ? resolveId(value) : value;
+          return [resolvedKey, resolvedValue];
+        }))
+        : props;
+      for (const [key, value] of Object.entries(resolved)) {
+        node.setProperties({ [key]: value as string | boolean });
         markDocumentWrite();
       }
-      return { after: { properties: props } };
+      return { after: { properties: resolved } };
     }
 
     case "create_paint_style": {
@@ -1179,6 +1354,80 @@ async function executeAction(
       return { before, after: { imageHash: image.hash } };
     }
 
+    case "create_from_svg": {
+      const parent = requireContainer(await findNode(action.parentId as string), action.parentId as string);
+      const node = figma.createNodeFromSvg(action.svg as string);
+      markDocumentWrite();
+      if (action.name) node.name = action.name as string;
+      parent.appendChild(node);
+      node.x = action.x as number;
+      node.y = action.y as number;
+      return { after: { id: node.id, name: node.name, x: node.x, y: node.y }, newNodeId: node.id };
+    }
+
+    case "create_section": {
+      if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design");
+      const parent = await findNode(action.parentId as string);
+      if (parent.type !== "PAGE") throw new Error("Sections must be created on a page");
+      const section = figma.createSection();
+      markDocumentWrite();
+      section.name = action.name as string;
+      section.resize(action.width as number, action.height as number);
+      parent.appendChild(section);
+      section.x = action.x as number;
+      section.y = action.y as number;
+      return { after: { id: section.id, name: section.name, width: section.width, height: section.height }, newNodeId: section.id };
+    }
+
+    case "resize_section": {
+      if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design");
+      const node = await findNode(action.sectionId as string);
+      if (node.type !== "SECTION") throw new Error(`Node ${action.sectionId} is not a section`);
+      const before = { width: node.width, height: node.height };
+      node.resize(action.width as number, action.height as number);
+      markDocumentWrite();
+      return { before, after: { width: node.width, height: node.height } };
+    }
+
+    case "move_to_section": {
+      if (figma.editorType !== "figma") throw new Error("Sections are only supported in Figma Design");
+      const node = await findSceneNode(action.nodeId as string);
+      const section = await findNode(action.sectionId as string);
+      if (section.type !== "SECTION") throw new Error(`Node ${action.sectionId} is not a section`);
+      if (["SECTION", "PAGE", "DOCUMENT"].includes(node.type as string)) {
+        throw new Error(`${node.type} nodes cannot be moved into sections`);
+      }
+      if (action.insertIndex !== undefined && (action.insertIndex as number) > section.children.length) {
+        throw new Error(`insertIndex ${String(action.insertIndex)} exceeds section child count ${section.children.length}`);
+      }
+      let ancestor: BaseNode | null = section;
+      while (ancestor && "parent" in ancestor) {
+        if (ancestor.id === node.id) throw new Error("Cannot move a node into its own descendant");
+        ancestor = ancestor.parent;
+      }
+      const before = { parentId: node.parent?.id };
+      if (action.insertIndex !== undefined) section.insertChild(action.insertIndex as number, node);
+      else section.appendChild(node);
+      markDocumentWrite();
+      return { before, after: { parentId: section.id } };
+    }
+
+    case "set_reaction": {
+      if (figma.editorType !== "figma") throw new Error("Prototype reactions are only supported in Figma Design");
+      const node = await findSceneNode(action.nodeId as string);
+      const destination = await findSceneNode(action.destinationId as string);
+      if (!("setReactionsAsync" in node)) throw new Error(`Node ${action.nodeId} does not support reactions`);
+      const reaction: Reaction = {
+        trigger: { type: "ON_CLICK" },
+        actions: [{ type: "NODE", destinationId: destination.id, navigation: action.navigation as Navigation, transition: null }],
+      };
+      const previous = [...(node as SceneNode & ReactionMixin).reactions];
+      const next = action.mode === "append" ? [...previous, reaction] : [reaction];
+      await (node as SceneNode & ReactionMixin).setReactionsAsync(next);
+      markDocumentWrite();
+      return { before: { reactionCount: previous.length }, after: { reactionCount: next.length } };
+    }
+
     // ─── Text Enhancement ─────────────────────────────────────────
 
     case "set_text_properties": {
@@ -1225,7 +1474,9 @@ async function executeAction(
     case "apply_style": {
       const node = await findSceneNode(action.nodeId as string);
       const property = action.property as string;
-      const styleId = resolveId(action.styleId as string);
+      const expectedType = property === "text" ? "TEXT" : property === "effect" ? "EFFECT" : "PAINT";
+      const style = await resolveStyle(expectedType, action.styleId, action.styleName);
+      const styleId = style.id;
       // Figma's dynamic-page document access disallows the sync setters
       // (`node.fillStyleId = x`); the async variants are required.
       if (property === "fill" && "setFillStyleIdAsync" in node) {
@@ -1241,6 +1492,65 @@ async function executeAction(
       }
       markDocumentWrite();
       return { after: { styleId, property } };
+    }
+
+    case "update_style": {
+      const styleType = action.styleType as "PAINT" | "TEXT" | "EFFECT";
+      const style = await resolveStyle(styleType, action.styleId, action.styleName);
+      const source = action.copyFromStyleId || action.copyFromStyleName
+        ? await resolveStyle(styleType, action.copyFromStyleId, action.copyFromStyleName)
+        : null;
+      const paintFields = action.paints !== undefined;
+      const effectFields = action.effects !== undefined;
+      const textFields = ["fontFamily", "fontWeight", "fontSize", "lineHeight", "letterSpacing"].some((field) => action[field] !== undefined);
+      if ((paintFields && styleType !== "PAINT") || (effectFields && styleType !== "EFFECT") || (textFields && styleType !== "TEXT")) {
+        throw new Error(`Update fields do not match ${styleType} style type`);
+      }
+      if (!source && action.name === undefined && !paintFields && !effectFields && !textFields) throw new Error("update_style has no updates");
+
+      let textValues: { fontName: FontName; fontSize?: number; lineHeight?: LineHeight; letterSpacing?: LetterSpacing } | null = null;
+      if (styleType === "TEXT") {
+        const target = style as TextStyle;
+        const sourceText = source as TextStyle | null;
+        const current = sourceText ?? target;
+        const family = (action.fontFamily as string | undefined) ?? current.fontName.family;
+        const fontStyle = action.fontWeight !== undefined ? weightToFontStyle(action.fontWeight as number) : current.fontName.style;
+        await ensureFonts([{ family, style: fontStyle }]);
+        textValues = {
+          fontName: { family, style: fontStyle },
+          fontSize: (action.fontSize as number | undefined) ?? (sourceText ? sourceText.fontSize : undefined),
+          lineHeight: action.lineHeight !== undefined ? { value: action.lineHeight as number, unit: "PIXELS" } : sourceText?.lineHeight,
+          letterSpacing: action.letterSpacing !== undefined ? { value: action.letterSpacing as number, unit: "PIXELS" } : sourceText?.letterSpacing,
+        };
+      }
+      const before = { name: style.name };
+      markDocumentWrite();
+      if (action.name !== undefined) style.name = action.name as string;
+      if (styleType === "PAINT" && (action.paints !== undefined || source)) {
+        (style as PaintStyle).paints = sanitizePaints((action.paints as unknown[] | undefined) ?? [...(source as PaintStyle).paints]);
+      }
+      if (styleType === "EFFECT" && (action.effects !== undefined || source)) {
+        (style as EffectStyle).effects = (action.effects as Effect[] | undefined) ?? [...(source as EffectStyle).effects];
+      }
+      if (textValues) {
+        const target = style as TextStyle;
+        const sourceText = source as TextStyle | null;
+        if (sourceText) {
+          target.textDecoration = sourceText.textDecoration;
+          target.leadingTrim = sourceText.leadingTrim;
+          target.paragraphIndent = sourceText.paragraphIndent;
+          target.paragraphSpacing = sourceText.paragraphSpacing;
+          target.listSpacing = sourceText.listSpacing;
+          target.hangingPunctuation = sourceText.hangingPunctuation;
+          target.hangingList = sourceText.hangingList;
+          target.textCase = sourceText.textCase;
+        }
+        target.fontName = textValues.fontName;
+        if (textValues.fontSize !== undefined) target.fontSize = textValues.fontSize;
+        if (textValues.lineHeight !== undefined) target.lineHeight = textValues.lineHeight;
+        if (textValues.letterSpacing !== undefined) target.letterSpacing = textValues.letterSpacing;
+      }
+      return { before, after: { id: style.id, name: style.name, type: style.type } };
     }
 
     case "set_description": {
@@ -1259,14 +1569,66 @@ async function executeAction(
       if (node.type !== "COMPONENT" && node.type !== "COMPONENT_SET") {
         throw new Error(`Node ${action.nodeId} is not a component or component set`);
       }
-      const comp = node as ComponentNode;
+      if (action.propertyType === "VARIANT" && node.type !== "COMPONENT_SET") {
+        throw new Error("VARIANT properties require a component set");
+      }
+      const comp = node as ComponentNode | ComponentSetNode;
       comp.addComponentProperty(
         action.propertyName as string,
         action.propertyType as ComponentPropertyType,
-        action.defaultValue as string | boolean
+        action.propertyType === "INSTANCE_SWAP" && typeof action.defaultValue === "string"
+          ? resolveId(action.defaultValue)
+          : action.defaultValue as string | boolean
       );
       markDocumentWrite();
       return { after: { propertyName: action.propertyName, propertyType: action.propertyType } };
+    }
+
+    case "set_component_property_reference": {
+      const node = await findSceneNode(action.nodeId as string);
+      let owner: BaseNode | null = node.parent;
+      while (owner && owner.type !== "COMPONENT" && owner.type !== "COMPONENT_SET") owner = "parent" in owner ? owner.parent : null;
+      if (!owner || (owner.type !== "COMPONENT" && owner.type !== "COMPONENT_SET")) {
+        throw new Error(`Node ${action.nodeId} is not inside a component or component set`);
+      }
+      const key = resolveComponentPropertyKey(owner.componentPropertyDefinitions, action.componentPropertyName as string);
+      const property = action.property as "characters" | "visible" | "mainComponent";
+      const expected = property === "characters" ? "TEXT" : property === "visible" ? "BOOLEAN" : "INSTANCE_SWAP";
+      if (owner.componentPropertyDefinitions[key].type !== expected) throw new Error(`${property} requires a ${expected} component property`);
+      if (property === "characters" && node.type !== "TEXT") throw new Error("characters references require a text node");
+      if (property === "mainComponent" && node.type !== "INSTANCE") throw new Error("mainComponent references require an instance node");
+      const before = safeSerialize(node.componentPropertyReferences);
+      node.componentPropertyReferences = { ...(node.componentPropertyReferences ?? {}), [property]: key };
+      markDocumentWrite();
+      return { before: { componentPropertyReferences: before }, after: { componentPropertyReferences: safeSerialize(node.componentPropertyReferences) } };
+    }
+
+    case "set_instance_text": {
+      const child = await findInstanceChild(action.instanceId as string, action.childPath as string[]);
+      if (child.type !== "TEXT") throw new Error("childPath does not resolve to a text node");
+      await ensureTextNodeFonts(child);
+      const before = { characters: child.characters };
+      child.characters = action.characters as string;
+      markDocumentWrite();
+      return { before, after: { nodeId: child.id, characters: child.characters } };
+    }
+
+    case "set_instance_visibility": {
+      const child = await findInstanceChild(action.instanceId as string, action.childPath as string[]);
+      const before = { visible: child.visible };
+      child.visible = action.visible as boolean;
+      markDocumentWrite();
+      return { before, after: { nodeId: child.id, visible: child.visible } };
+    }
+
+    case "swap_nested_instance": {
+      const child = await findInstanceChild(action.instanceId as string, action.childPath as string[]);
+      if (child.type !== "INSTANCE") throw new Error("childPath does not resolve to an instance node");
+      const component = await findNode(action.newComponentId as string);
+      if (component.type !== "COMPONENT") throw new Error(`Node ${action.newComponentId} is not a component`);
+      child.swapComponent(component);
+      markDocumentWrite();
+      return { after: { nodeId: child.id, componentId: component.id } };
     }
 
     // ─── Figma Variables ──────────────────────────────────────────
@@ -1286,8 +1648,11 @@ async function executeAction(
 
     case "create_variable": {
       const collectionId = resolveId(action.collectionId as string);
-      const collection = figma.variables.getVariableCollectionById(collectionId);
+      const collection = typeof figma.variables.getVariableCollectionByIdAsync === "function"
+        ? await figma.variables.getVariableCollectionByIdAsync(collectionId)
+        : figma.variables.getVariableCollectionById(collectionId);
       if (!collection) throw new Error(`Variable collection not found: ${collectionId}`);
+      const value = parseVariableValue(action.resolvedType as VariableResolvedDataType, action.value);
       const variable = figma.variables.createVariable(
         action.name as string,
         collection,
@@ -1297,37 +1662,18 @@ async function executeAction(
       // Set scopes if provided
       if (action.scopes) variable.scopes = action.scopes as VariableScope[];
       // Set value for each mode
-      const value = action.value;
-      if (action.resolvedType === "COLOR" && typeof value === "string") {
-        // Parse hex to Figma color (supports #RGB, #RRGGBB, #RRGGBBAA)
-        const cleaned = (value as string).replace("#", "");
-        const expanded = cleaned.length === 3
-          ? cleaned.split("").map(c => c + c).join("")
-          : cleaned;
-        const r = parseInt(expanded.substring(0, 2), 16) / 255;
-        const g = parseInt(expanded.substring(2, 4), 16) / 255;
-        const b = parseInt(expanded.substring(4, 6), 16) / 255;
-        const a = expanded.length === 8 ? parseInt(expanded.substring(6, 8), 16) / 255 : 1;
-        for (const mode of collection.modes) {
-          variable.setValueForMode(mode.modeId, { r, g, b, a });
-        }
-      } else {
-        for (const mode of collection.modes) {
-          variable.setValueForMode(mode.modeId, value as string | number | boolean);
-        }
-      }
+      for (const mode of collection.modes) variable.setValueForMode(mode.modeId, value);
       return { after: { id: variable.id, name: variable.name }, newNodeId: variable.id };
     }
 
     case "bind_variable": {
       const node = await findSceneNode(action.nodeId as string);
-      const variableId = resolveId(action.variableId as string);
-      const variable = figma.variables.getVariableById(variableId);
-      if (!variable) throw new Error(`Variable not found: ${variableId}`);
+      const variable = await resolveVariable(action);
       const property = action.property as string;
       const paintIndex = (action.paintIndex as number) || 0;
 
       if (property === "fills" || property === "strokes") {
+        if (variable.resolvedType !== "COLOR") throw new Error(`${property} bindings require a COLOR variable`);
         const paintsProp = property as "fills" | "strokes";
         const paints = [...((node as GeometryMixin)[paintsProp] as Paint[])];
         const paint = paints[paintIndex];
@@ -1338,10 +1684,30 @@ async function executeAction(
         markDocumentWrite();
       } else {
         // Numeric properties: spacing, radius, opacity, size
+        if (variable.resolvedType !== "FLOAT") throw new Error(`${property} bindings require a FLOAT variable`);
+        if (!(property in node) || typeof node.setBoundVariable !== "function") throw new Error(`Node ${node.id} does not support ${property} variable binding`);
+        if (property === "counterAxisSpacing" && (!("layoutWrap" in node) || (node as FrameNode).layoutWrap !== "WRAP")) {
+          throw new Error("counterAxisSpacing bindings require wrapping auto layout");
+        }
         (node as SceneNode).setBoundVariable(property as VariableBindableNodeField, variable);
         markDocumentWrite();
       }
       return { after: { variableId: variable.id, property } };
+    }
+
+    case "set_variable_value": {
+      const variable = await resolveVariable(action);
+      const collection = await figma.variables.getVariableCollectionByIdAsync(variable.variableCollectionId);
+      if (!collection) throw new Error(`Variable collection not found: ${variable.variableCollectionId}`);
+      const modeMatches = action.modeId
+        ? collection.modes.filter((mode) => mode.modeId === action.modeId)
+        : collection.modes.filter((mode) => mode.name === action.modeName);
+      if (modeMatches.length === 0) throw new Error(`Variable mode not found: ${String(action.modeId ?? action.modeName)}`);
+      if (modeMatches.length > 1) throw new Error(`Variable mode name is ambiguous: ${String(action.modeName)}`);
+      const value = parseVariableValue(variable.resolvedType, action.value);
+      variable.setValueForMode(modeMatches[0].modeId, value);
+      markDocumentWrite();
+      return { after: { variableId: variable.id, modeId: modeMatches[0].modeId, value: safeSerialize(value) } };
     }
 
     default:
@@ -1371,6 +1737,7 @@ interface BatchResult {
 }
 
 async function processBatch(batch: Batch): Promise<BatchResult> {
+  preflightActionReferences(batch.actions);
   // Clear ref map for this batch
   refMap.clear();
 
@@ -1405,15 +1772,15 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
 
     let actionWroteDocument = false;
     try {
-      // Resolve any $ref: in nodeId, parentId, targetParentId, componentId, instanceId, componentIds
-      for (const key of ["nodeId", "parentId", "targetParentId", "componentId", "instanceId"]) {
-        if (typeof action[key] === "string" && (action[key] as string).startsWith("$ref:")) {
+      // Resolve every ID-bearing scalar/array field before execution.
+      for (const key of ["nodeId", "parentId", "targetParentId", "componentId", "instanceId", "newComponentId", "pageId", "collectionId", "variableId", "styleId", "copyFromStyleId", "sectionId", "destinationId", "textStyleId"]) {
+        if (typeof action[key] === "string" && (action[key] as string).startsWith("$")) {
           action[key] = resolveId(action[key] as string);
         }
       }
       if (Array.isArray(action.componentIds)) {
         action.componentIds = (action.componentIds as string[]).map(id =>
-          id.startsWith("$ref:") ? resolveId(id) : id
+          id.startsWith("$") ? resolveId(id) : id
         );
       }
 
@@ -1424,6 +1791,7 @@ async function processBatch(batch: Batch): Promise<BatchResult> {
       // Register new node ID for symbolic ref
       if (result.newNodeId && action._ref) {
         refMap.set(action._ref as string, result.newNodeId);
+        if (action._aliasRef) refMap.set(action._aliasRef as string, result.newNodeId);
       }
 
       results.push({

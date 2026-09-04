@@ -112,3 +112,18 @@ messages to 16 MiB, and disables per-message compression. Messages above the
 limit are closed with WebSocket status 1009.
 
 The plugin runs inside Figma's sandboxed environment and can only access the current file's scene graph through the official Plugin API.
+
+### Asset ingestion
+
+`set_image_fill` reads local paths in the MCP server process, so only pass paths
+that the server account is already authorized to read. HTTP(S) ingestion pins
+each connection to DNS answers checked immediately beforehand and rejects
+loopback, private, link-local, multicast, and reserved addresses on the initial
+request and every redirect. Requests have a 10-second deadline and five-
+redirect maximum. Decoded PNG, JPEG, WebP, and GIF payloads are capped at
+10 MiB before plugin transport.
+
+`create_from_svg` accepts at most 1 MiB of UTF-8 markup and rejects document
+types/entities, scripts, event handlers, foreign content, CSS imports, and
+non-fragment resource references before the batch is sent. These checks are a
+bounded ingestion policy, not a general-purpose SVG sanitizer.

@@ -178,16 +178,17 @@ Plans are reviewable: the agent inspects, edits, or filters before sending to `f
 
 Fallback JavaScript preserves `dryRun`, `stopOnError`, and `rollbackOnError` semantics. Rollback requires the host runtime to expose `figma.triggerUndo`; when `rollbackOnError: true`, the tool returns a structured `fallbackLimitations` entry and the program fails closed before executing any action if that API is unavailable.
 
-43 action types are available. Highlights:
+54 action types are available. Highlights:
 
 - **Nodes**: `create_frame`, `create_text`, `create_component`, `create_instance`, `clone_node`, `delete_node`
 - **Layout**: `set_auto_layout`, `set_child_layout_sizing` (FILL / HUG / FIXED), `set_constraints`, `move_node`, `resize_node`
-- **Paint**: `set_fills`, `set_strokes`, `set_gradient_fill`, `set_effects`
+- **Paint/assets**: `set_fills`, `set_strokes`, `set_gradient_fill`, `set_effects`, `set_image_fill`, `create_from_svg`
 - **Type**: `set_text_content`, `set_font`
-- **Styles**: `create_paint_style`, `create_text_style`, `create_effect_style`, `apply_style`
-- **Variables**: `create_variable_collection`, `create_variable`, `bind_variable`
+- **Styles**: `create_paint_style`, `create_text_style`, `create_effect_style`, name-resolved `apply_style`, `update_style`
+- **Variables**: `create_variable_collection`, `create_variable`, name-resolved `bind_variable`, `set_variable_value`
 - **Pages**: `create_page`, `switch_page`
-- **Components**: `set_component_properties`, `swap_instance`
+- **Components**: component-set properties/references, `set_component_properties`, and nested text/visibility/swap overrides
+- **Boards/prototypes**: `create_section`, `resize_section`, `move_to_section`, bounded `set_reaction`
 
 `create_frame` creates a transparent frame (`fills: []`) by default, making it suitable for structural and auto-layout containers. Apply `set_fills` explicitly when the frame should render a background or other visual surface.
 
@@ -198,16 +199,22 @@ See the `figma://actions` MCP resource for the full schema.
 ```
 figma_execute({
   actions: [
-    { type: "create_page", name: "Dashboard" },
-    { type: "create_frame", name: "Sidebar", parentId: "$ref:node-0", width: 240, height: 800 },
-    { type: "create_text", parentId: "$ref:node-1", characters: "Analytics", fontSize: 24, name: "Sidebar/Title" }
+    { type: "create_page", name: "Dashboard", as: "dashboard" },
+    { type: "create_frame", name: "Sidebar", parentId: "$dashboard", width: 240, height: 800, as: "sidebar" },
+    { type: "create_text", parentId: "$sidebar", characters: "Analytics", fontSize: 24, name: "Sidebar/Title" }
   ],
   dryRun: false,
   stopOnError: true
 })
 ```
 
-`$ref:node-N` resolves to the Nth newly-created node within the same batch, so you can build trees in a single call.
+Aliases use `as: "name"` and `$name`, and are the recommended stable reference form. `$ref:node-N` remains supported for migration compatibility. Duplicate, malformed, reserved, unknown, self, forward, and cyclic references fail whole-batch preflight before mutation.
+
+Image fills accept exactly one of `imageBase64`, a server-local `path`, or a public HTTP(S) `url`. The server validates formats and enforces a 10 MiB decoded limit before sending bytes to the plugin. URL ingestion times out after 10 seconds, follows at most five redirects, and rejects private, loopback, link-local, and reserved destinations at every hop. SVG creation accepts at most 1 MiB of inert markup and rejects scripts, event handlers, and external resources.
+
+Variable and style names are exact matches. Use `collectionName`/`collectionId` and `resolvedType` to disambiguate variables; duplicate matches are errors. Nested instance operations use `childPath`, where every segment must match exactly one direct child.
+
+Same-batch read-back is intentionally not available yet. It depends on issue #30's plugin-native inspection transport; use a separate inspection call once that foundation lands.
 
 ### dryRun
 
