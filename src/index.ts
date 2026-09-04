@@ -301,7 +301,7 @@ All name resolution is exact and rejects ambiguity. Inspection actions count as 
 
 const server = new McpServer({
   name: "figma-design-pipeline",
-  version: "0.8.2",
+  version: "0.9.0",
 });
 
 // ─── MCP Resources ──────────────────────────────────────────────────

@@ -125,6 +125,7 @@ Other optional env vars:
 ```bash
 export FIGMA_FILE_KEY=...                        # default Figma file
 export FIGMA_PLUGIN_PORT=4010                    # WebSocket bridge port (scans 4010–4014)
+export FIGMA_ASSET_ROOTS=/path/to/assets         # allowlisted local image directories (`:` on Unix, `;` on Windows)
 export COMPONENT_REGISTRY_DIR=/path/to/registry  # component registry for codegen
 ```
 
@@ -146,7 +147,8 @@ If you skip the installer and want to wire the server up yourself, point your CL
 ```
 
 Claude inherits its parent environment for stdio MCP servers, so start Claude Code
-from a shell where any optional variables are exported.
+from a shell where any optional variables are exported. In particular, local-path
+image ingestion requires `FIGMA_ASSET_ROOTS` to contain every allowed directory.
 
 ### Gemini CLI
 
@@ -162,6 +164,7 @@ from a shell where any optional variables are exported.
         "FIGMA_ACCESS_TOKEN": "$FIGMA_ACCESS_TOKEN",
         "FIGMA_FILE_KEY": "$FIGMA_FILE_KEY",
         "FIGMA_PLUGIN_PORT": "$FIGMA_PLUGIN_PORT",
+        "FIGMA_ASSET_ROOTS": "$FIGMA_ASSET_ROOTS",
         "COMPONENT_REGISTRY_DIR": "$COMPONENT_REGISTRY_DIR"
       }
     }
@@ -177,7 +180,7 @@ from a shell where any optional variables are exported.
 [mcp_servers."figma-design-pipeline"]
 command = "node"
 args = ["/absolute/path/to/dist/index.js"]
-env_vars = ["FIGMA_ACCESS_TOKEN", "FIGMA_FILE_KEY", "FIGMA_PLUGIN_PORT", "COMPONENT_REGISTRY_DIR"]
+env_vars = ["FIGMA_ACCESS_TOKEN", "FIGMA_FILE_KEY", "FIGMA_PLUGIN_PORT", "FIGMA_ASSET_ROOTS", "COMPONENT_REGISTRY_DIR"]
 startup_timeout_ms = 30000
 ```
 

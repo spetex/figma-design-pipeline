@@ -15,7 +15,8 @@ This project requires API tokens to function. Follow these rules to keep them sa
       "command": "node",
       "args": ["/path/to/dist/index.js"],
       "env": {
-        "FIGMA_ACCESS_TOKEN": "figd_your_token_here"
+        "FIGMA_ACCESS_TOKEN": "figd_your_token_here",
+        "FIGMA_ASSET_ROOTS": "/absolute/path/to/approved/assets"
       }
     }
   }
@@ -102,6 +103,16 @@ The baseline dependency and bundle review found:
 There are no remaining production advisories requiring a reachability
 exception. The bundle result can be checked after `npm run build` by searching
 the source comments in `dist/index.js` for the package names above.
+
+### Next-release dependency refresh
+
+On 2026-09-04, the release audit against the 0.8.2 lockfile reported 4 new
+production vulnerabilities: 2 moderate and 2 high. Fixes were available for
+all findings. Compatible dependency updates moved `fast-uri` to 3.1.7, `hono`
+to 4.13.5, `ip-address` to 10.7.0, and `qs` to 6.16.0. The directly used `ws`
+package was refreshed to 8.21.3 and `zod` to 4.5.4. No production advisory
+requires a reachability exception; `npm audit --omit=dev` must remain at zero
+for release.
 
 ## Figma Plugin Security
 

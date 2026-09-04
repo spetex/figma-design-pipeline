@@ -4,6 +4,8 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-04
+
 ### Added
 - `figma_get_tree`, `figma_find_nodes`, and `figma_get_components` now support bounded, token-free plugin inspection with exact file-key identity, node/current-page/selection roots, exact or regex name and type filtering, component-set discovery, correlated concurrent reads, and guarded chunked responses. `source: auto` prefers the matching plugin while preserving REST fallback; plugin reads never write or alter inspection caches.
 - Expanded `figma_execute` from 43 to 54 actions for design-system construction: component-property references, exact-path nested instance text/visibility/swap overrides, variable value updates, style updates/copies, safe SVG creation, sections, and bounded ON_CLICK prototype reactions.
@@ -14,10 +16,15 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 ### Changed
 - Extended targeted duplication with parent, insertion, and position controls; component-property definition to component sets; and text creation with style selection, truncation, and maximum-line controls.
 - Extended auto-layout with wrapping and counter-axis spacing and added explicit precondition checks for wrapping, counter-axis spacing, and baseline alignment.
+- Refreshed compatible direct, transitive, and development dependencies for the next release, including `ws`, `zod`, `fast-uri`, `hono`, `ip-address`, `qs`, and the build/test toolchain.
+- Release verification now inspects and installs a locally packed candidate before registry checks, and the publish workflow publishes that tested tarball.
 
 ### Fixed
+- The installer forwards `FIGMA_ASSET_ROOTS` to Codex and Gemini alongside the
+  other allowlisted variables, and npm publication now requires the exact
+  package-version release tag even for manual workflow retries.
 - Plugin inspection now uses deterministic serialization and visited-node budgets instead of full-tree pre-counts or unbounded sparse searches. Selection metadata is independently bounded and paged with truthful total/omitted counts, every Figma-origin scalar is UTF-8 bounded with explicit truncation metrics, and the UI enforces aggregate byte/chunk limits before transport. Both read paths share the pure-JavaScript linear-time RE2 engine, which safely handles overlapping repetitions and rejects backreferences/lookarounds. REST preserves an explicit `depth: 0`, and whole-file REST component truncation provides advancing `offset` / `nextOffset` pagination without changing explicit current-page roots into whole-file reads.
-- Audit note for the issue branch: `re2js` has no runtime dependencies and adds no advisory findings. The four pre-existing production findings in `fast-uri`, `hono`, `ip-address`, and `qs` are fixed separately by release-hardening commit `094d54a` and will be integrated after issues #30 and #31; their lockfile upgrades are intentionally not duplicated here.
+- The direct `re2js` dependency has no runtime dependencies and adds no advisory findings; the combined release dependency refresh fixes the production findings in `fast-uri`, `hono`, `ip-address`, and `qs`.
 - Newly created frames now start with transparent fills in both connected-plugin execution and disconnected fallback JavaScript, avoiding unintended white surfaces on structural containers.
 - The dynamic-page plugin now loads all pages before registering its global document-change listener, preserving debounced cache invalidation while containing and logging initialization failures so bridge startup can continue.
 - Rollback batches now establish explicit Figma undo boundaries so a later failed batch cannot undo an earlier successful batch.
@@ -28,8 +35,11 @@ All notable changes to SPFR Figma Design Pipeline will be documented in this fil
 - Gradient and per-corner-radius result snapshots no longer expose Figma mixed-value symbols through the bridge. Connected and fallback executors retain full schema/action behavior parity.
 - Same-batch inspection uses the approved plugin serializer's depth/result/scan/scalar limits and a shared 80KB aggregate batch budget. Inspection actions do not count as mutations or invalidate caches; rollback redacts transient inspection trees and marks them `rolledBack`.
 - Connected batches are FIFO-serialized at both bridge and plugin boundaries, use batch-local alias maps, and recover cleanly after batch errors, timeouts, disconnects, and reconnects so rollback cannot interfere with adjacent callers.
-- GIF and JPEG ingestion now performs bounded full decode validation with `modern-gif` and `jpeg-js`, rejecting empty LZW streams, malformed scan/table shells, corrupt/truncated content, excessive decoded frame data, and oversized dimensions. These exact runtime dependencies and their lockfile entries must be carried into the final release branch.
+- GIF and JPEG ingestion now performs bounded full decode validation with exact `modern-gif` and `jpeg-js` runtime dependencies, rejecting empty LZW streams, malformed scan/table shells, corrupt/truncated content, excessive decoded frame data, and oversized dimensions.
 - Same-batch inspection reports `omittedNodeCount` as an explicit lower bound with `omittedNodeCountExact: false` when result or scan budgets stop traversal; rollback now also scrubs transient action IDs, create maps, and post-mutation snapshots while preserving errors and summary accounting.
+
+### Security
+- Restored a zero-finding `npm audit --omit=dev` production dependency gate after fixes became available for four new advisories.
 
 ## [0.8.2] - 2026-08-02
 

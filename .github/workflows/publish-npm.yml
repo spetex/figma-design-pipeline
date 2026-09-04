@@ -19,6 +19,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Verify release tag matches package version
+        run: node scripts/verify-release-tag.mjs package.json
+
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
@@ -31,6 +34,43 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npm run build
+      - name: Pack and inspect release candidate
+        id: package
+        shell: bash
+        run: |
+          candidate_dir="$RUNNER_TEMP/release-candidate"
+          mkdir -p "$candidate_dir"
+          package_manifest="$candidate_dir/npm-pack.json"
+          npm pack --ignore-scripts --json --pack-destination "$candidate_dir" > "$package_manifest"
+          package_tarball="$(node scripts/verify-package.mjs "$package_manifest" --print-path)"
+          chmod a-w "$package_tarball"
+          node scripts/verify-package.mjs "$package_manifest"
+          printf 'manifest=%s\ntarball=%s\n' "$package_manifest" "$package_tarball" >> "$GITHUB_OUTPUT"
+      - name: Test packed release candidate
+        shell: bash
+        env:
+          PACKAGE_MANIFEST: ${{ steps.package.outputs.manifest }}
+          PACKAGE_TARBALL: ${{ steps.package.outputs.tarball }}
+        run: |
+          candidate_home="$(mktemp -d)"
+          verified_tarball="$(node scripts/verify-package.mjs "$PACKAGE_MANIFEST" --print-path)"
+          test "$verified_tarball" = "$PACKAGE_TARBALL"
+          npm exec --yes --package="$verified_tarball" -- spetex-figma-design-pipeline-install --help
+          FIGMA_ASSET_ROOTS="$candidate_home/assets" FIGMA_UNRELATED_SETTING="must-not-leak" HOME="$candidate_home" \
+            npm exec --yes --package="$verified_tarball" -- spetex-figma-design-pipeline-install --client all
+          test -f "$candidate_home/.figma-design-pipeline/server/index.js"
+          test -f "$candidate_home/.figma-design-pipeline/plugin/manifest.json"
+          grep -F "$candidate_home/.figma-design-pipeline/server/index.js" "$candidate_home/.codex/config.toml"
+          grep -F 'FIGMA_ASSET_ROOTS' "$candidate_home/.codex/config.toml"
+          grep -F '"FIGMA_ASSET_ROOTS": "$FIGMA_ASSET_ROOTS"' "$candidate_home/.gemini/settings.json"
+          if grep -F 'FIGMA_UNRELATED_SETTING' "$candidate_home/.codex/config.toml" "$candidate_home/.gemini/settings.json"; then
+            echo "Generated client configurations must not forward unrelated environment variables" >&2
+            exit 1
+          fi
+          if grep -F ".npm/_npx/" "$candidate_home/.codex/config.toml"; then
+            echo "Codex configuration must not reference npm's temporary npx cache" >&2
+            exit 1
+          fi
       - name: Check whether this version is already published
         id: npm_version
         shell: bash
@@ -44,4 +84,11 @@ jobs:
           fi
       - name: Publish package
         if: steps.npm_version.outputs.published != 'true'
-        run: npm publish --provenance --access public
+        shell: bash
+        env:
+          PACKAGE_MANIFEST: ${{ steps.package.outputs.manifest }}
+          PACKAGE_TARBALL: ${{ steps.package.outputs.tarball }}
+        run: |
+          verified_tarball="$(node scripts/verify-package.mjs "$PACKAGE_MANIFEST" --print-path)"
+          test "$verified_tarball" = "$PACKAGE_TARBALL"
+          npm publish "$verified_tarball" --provenance --access public
