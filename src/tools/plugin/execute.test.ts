@@ -28,6 +28,49 @@ describe("actionSchema (zod v4)", () => {
 });
 
 describe("handleExecute fallback generation", () => {
+  it("clears a new frame's fills immediately after creation in fallback JavaScript", async () => {
+    const operations: string[] = [];
+    const parent = {
+      id: "parent",
+      appendChild: () => { operations.push("appendChild"); },
+    };
+    let fills: unknown = [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }];
+    const frame = {
+      id: "frame",
+      name: "",
+      resize: () => { operations.push("resize"); },
+      x: 0,
+      y: 0,
+    } as Record<string, unknown>;
+    Object.defineProperty(frame, "fills", {
+      enumerable: true,
+      get: () => fills,
+      set: (value) => {
+        operations.push("fills");
+        fills = value;
+      },
+    });
+    const figma = {
+      getNodeById: () => parent,
+      createFrame: () => {
+        operations.push("createFrame");
+        return frame;
+      },
+    };
+    const fallback = await handleExecute(null, {
+      actions: [{ type: "create_frame", name: "Frame", parentId: "parent" }],
+    });
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
+      ...args: string[]
+    ) => (figmaApi: typeof figma) => Promise<Array<Record<string, unknown>>>;
+
+    const result = await new AsyncFunction("figma", fallback.fallbackJs!)(figma);
+
+    expect(result).toEqual([{ type: "create_frame", nodeId: "frame" }]);
+    expect(fills).toEqual([]);
+    expect(operations.slice(0, 2)).toEqual(["createFrame", "fills"]);
+  });
+
   it("derives exhaustive executor coverage from the Zod schemas", () => {
     const schemaOperations = actionSchema.options.map((schema) => {
       const shape = (schema as unknown as { shape: Record<string, unknown> }).shape;

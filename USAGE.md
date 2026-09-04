@@ -153,6 +153,8 @@ Fallback JavaScript preserves `dryRun`, `stopOnError`, and `rollbackOnError` sem
 - **Pages**: `create_page`, `switch_page`
 - **Components**: `set_component_properties`, `swap_instance`
 
+`create_frame` creates a transparent frame (`fills: []`) by default, making it suitable for structural and auto-layout containers. Apply `set_fills` explicitly when the frame should render a background or other visual surface.
+
 See the `figma://actions` MCP resource for the full schema.
 
 ### Example

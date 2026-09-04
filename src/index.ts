@@ -192,7 +192,7 @@ Use with figma_execute({ actions: [...] }) for batch execution via the plugin br
 ## Scene Graph
 - rename: { nodeId, name }
 - move: { nodeId, targetParentId, insertIndex? }
-- create_frame: { name, parentId, x?, y?, width?, height? } → returns newNodeId
+- create_frame: { name, parentId, x?, y?, width?, height? } → returns newNodeId; starts with transparent fills (fills: [])
 - delete_node: { nodeId, confirmed: true }
 - resize: { nodeId, width?, height? }
 - set_position: { nodeId, x?, y? }
